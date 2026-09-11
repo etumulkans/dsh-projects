@@ -132,16 +132,19 @@ async function fixture(driver: FakeDriver): Promise<CoordinatorFixture> {
   return { context, catalog, projectId, runService, planService, coupler, coordinator, driver, emit }
 }
 
-async function settle(fixture: CoordinatorFixture, runId: string): Promise<void> {
+async function settle(fixture: CoordinatorFixture, runId: string, sessions = 1): Promise<void> {
   // The settlement chain runs after the (fake) driver promise; yield to the
-  // task queue until the coordinator outcome event is persisted.
+  // task queue until every started session has a persisted outcome event
+  // (each session produces exactly one completed/failed event).
   for (let i = 0; i < 50; i += 1) {
     const detail = await fixture.runService.runDetail(runId)
-    if (detail.events.some(event =>
-      event.type === 'run.coordinator.completed' || event.type === 'run.coordinator.failed')) return
+    const started = detail.events.filter(event => event.type === 'run.coordinator.started').length
+    const outcomes = detail.events.filter(event =>
+      event.type === 'run.coordinator.completed' || event.type === 'run.coordinator.failed').length
+    if (started >= sessions && outcomes >= sessions) return
     await new Promise(resolve => setTimeout(resolve, 0))
   }
-  throw new Error('coordination did not settle in time')
+  throw new Error(`coordination ${sessions} did not settle in time`)
 }
 
 const directSubmission: CoordinatorPlanSubmission = {
@@ -374,6 +377,42 @@ describe('CoordinatorService (Phase 3)', () => {
       await settle(base, run.id)
       expect(base.planService.planList(run.id)).toHaveLength(0)
       expect((await base.runService.runDetail(run.id)).run.phase).toBe('blocked')
+    } finally {
+      await base.runService.stop()
+      await base.catalog.stop()
+    }
+  })
+
+  it('a blocked run resumes to planning and coordinates again (retryable, spec §12.5)', async () => {
+    let attempt = 0
+    const base = await fixture(new FakeDriver(async (input) => {
+      attempt += 1
+      if (attempt === 1) return { kind: 'failed', error: 'model exploded' }
+      await input.onPlanSubmit(directSubmission)
+      return { kind: 'completed' }
+    }))
+    try {
+      const run = await base.runService.createRun({ goal: 'retryable' }, { mode: 'project', projectId: base.projectId })
+      await base.coordinator.coordinate(run.id)
+      await settle(base, run.id)
+      const afterFailure = await base.runService.runDetail(run.id)
+      expect(afterFailure.run.phase).toBe('blocked')
+      expect(afterFailure.run.suspendedFrom).toBe('planning')
+      const firstSession = afterFailure.run.coordinatorSessionId
+
+      // Resume via the existing Phase 1 transition, then coordinate again.
+      const resumed = await base.runService.transitionRun(run.id, 'planning')
+      expect(resumed.phase).toBe('planning')
+      const second = await base.coordinator.coordinate(run.id)
+      expect(second.coordinatorSessionId).toBeDefined()
+      expect(second.coordinatorSessionId).not.toBe(firstSession)
+      await settle(base, run.id, 2)
+      const detail = await base.runService.runDetail(run.id)
+      expect(detail.run.phase).toBe('executing')
+      expect(base.planService.planList(run.id)).toHaveLength(1)
+      expect(detail.events.filter(event => event.type === 'run.coordinator.started')).toHaveLength(2)
+      expect(detail.events.filter(event => event.type === 'run.coordinator.failed')).toHaveLength(1)
+      expect(detail.events.filter(event => event.type === 'run.coordinator.completed')).toHaveLength(1)
     } finally {
       await base.runService.stop()
       await base.catalog.stop()
