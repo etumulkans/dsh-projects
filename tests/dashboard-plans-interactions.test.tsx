@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DashboardSurface } from '../src/client/Dashboard.tsx'
 import { fixtureSnapshot } from '../src/client/fixture.ts'
 import type { CreatePlanInput, RunPlanRecord } from '../src/plans/types.ts'
-import type { ProjectRunView } from '../src/runs/types.ts'
+import type { ProjectRunView, RunDetailView } from '../src/runs/types.ts'
 
 afterEach(cleanup)
 
@@ -106,6 +106,32 @@ describe('Dashboard Run Plan interactions', () => {
     fireEvent.click(within(inspector).getByRole('button', { name: /v1/u }))
     expect(within(inspector).getByText('初始计划：单任务直接执行')).toBeTruthy()
     expect(within(inspector).getByText('健康检查端点可用')).toBeTruthy()
+  })
+
+  it('shows plan events interleaved on the run timeline', async () => {
+    const onLoadPlans = vi.fn(async (runId: string) => plansFor(runId))
+    const onLoadRunDetail = vi.fn(async (runId: string): Promise<RunDetailView> => {
+      if (runId !== executingRun.id) throw new Error('unexpected run')
+      return {
+        run: executingRun,
+        truncated: false,
+        events: [
+          { id: 'e4', type: 'run.replanned', title: 'Run replanned', detail: 'Plan v1 → v2', seq: 4, at: '2026-08-14T02:22:00.000Z' },
+          { id: 'e3', type: 'plan.approved', title: 'Plan v2 approved', seq: 3, at: '2026-08-14T02:21:00.000Z' },
+          { id: 'e2', type: 'plan.created', title: 'Plan v2 created', seq: 2, at: '2026-08-14T02:20:00.000Z' },
+          { id: 'e1', type: 'run.created', title: 'Run created', seq: 1, at: '2026-08-14T02:11:00.000Z' },
+        ],
+      }
+    })
+    renderDashboard({ onLoadPlans, onLoadRunDetail })
+
+    const inspector = await openRunInspector(executingRun)
+    await waitFor(() => expect(onLoadRunDetail).toHaveBeenCalledWith(executingRun.id))
+    expect(within(inspector).getByText('Run replanned')).toBeTruthy()
+    expect(within(inspector).getByText('Plan v2 approved')).toBeTruthy()
+    expect(within(inspector).getByText('Plan v2 created')).toBeTruthy()
+    expect(within(inspector).getByText('Run created')).toBeTruthy()
+    expect(within(inspector).getByText('Plan v1 → v2')).toBeTruthy()
   })
 
   it('transitions a draft plan from the version actions with the CAS revision', async () => {

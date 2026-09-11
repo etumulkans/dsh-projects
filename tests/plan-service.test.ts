@@ -442,17 +442,41 @@ describe('RunPlanService', () => {
     }
   })
 
-  it('records approval request, rejection, and completion with their events', async () => {
-    const { planService, runService, projectId, storage } = await fixture()
+  it('records approval request, rejection, and completion with their events and Cordis emits', async () => {
+    const { planService, runService, projectId, storage, emit } = await fixture()
     try {
       const run = await runService.createRun({ goal: 'lifecycle' }, { mode: 'project', projectId })
       const plan = await planService.createPlan({ runId: run.id, pattern: 'direct', rationale: 'r' })
 
       await planService.transitionPlan(plan.id, 'awaiting-approval')
+      expect(emit).toHaveBeenCalledWith('dsh-projects/plan/approval-requested', expect.objectContaining({
+        runId: run.id,
+        projectId,
+        planId: plan.id,
+        version: 1,
+        from: 'draft',
+        to: 'awaiting-approval',
+      }))
       await planService.transitionPlan(plan.id, 'draft')
+      expect(emit).toHaveBeenCalledWith('dsh-projects/plan/rejected', expect.objectContaining({
+        runId: run.id,
+        projectId,
+        planId: plan.id,
+        version: 1,
+        from: 'awaiting-approval',
+        to: 'draft',
+      }))
       await planService.transitionPlan(plan.id, 'active')
       const completed = await planService.transitionPlan(plan.id, 'completed')
       expect(completed).toMatchObject({ status: 'completed', revision: 2 })
+      expect(emit).toHaveBeenCalledWith('dsh-projects/plan/completed', expect.objectContaining({
+        runId: run.id,
+        projectId,
+        planId: plan.id,
+        version: 1,
+        from: 'active',
+        to: 'completed',
+      }))
 
       const events = [...storage.tables.get('run_events')!.entries()]
         .map(([, record]) => record as { type: string })

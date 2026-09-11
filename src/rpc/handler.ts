@@ -168,20 +168,20 @@ export async function handleDashboardRpc(
       }
       case 'planList': {
         if (plans === undefined) return badRequest('planList is unavailable: the Run Plan service is not mounted')
-        const runId = readStringField(payload, 'runId')
-        if (runId === undefined) return badRequest('planList requires a non-empty `runId`')
+        const runId = readUuidField(payload, 'runId')
+        if (runId === undefined) return badRequest('planList requires a uuid `runId`')
         return success(plans.planList(runId))
       }
       case 'planDetail': {
         if (plans === undefined) return badRequest('planDetail is unavailable: the Run Plan service is not mounted')
-        const planId = readStringField(payload, 'planId')
-        if (planId === undefined) return badRequest('planDetail requires a non-empty `planId`')
+        const planId = readUuidField(payload, 'planId')
+        if (planId === undefined) return badRequest('planDetail requires a uuid `planId`')
         return success(plans.planDetail(planId))
       }
       case 'planTransition': {
         if (plans === undefined) return badRequest('planTransition is unavailable: the Run Plan service is not mounted')
-        const planId = readStringField(payload, 'planId')
-        if (planId === undefined) return badRequest('planTransition requires a non-empty `planId`')
+        const planId = readUuidField(payload, 'planId')
+        if (planId === undefined) return badRequest('planTransition requires a uuid `planId`')
         const status = readPlanStatus(payload)
         if (status === undefined) return badRequest('planTransition requires a valid `status`')
         const expectedRevision = readOptionalInteger(payload, 'expectedRevision', 1, Number.MAX_SAFE_INTEGER)
@@ -302,10 +302,20 @@ function readPlanStatus(value: unknown): RunPlanStatus | undefined {
     : undefined
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu
+
+/** Spec §7: plan endpoint ids must be uuids — anything else is a bad request. */
+function readUuidField(value: unknown, field: string): string | undefined {
+  const object = readObject(value)
+  const id = object === undefined ? undefined : readStringField(object, field)
+  if (id === undefined || !UUID_PATTERN.test(id)) return undefined
+  return id
+}
+
 function readCreatePlan(value: unknown): CreatePlanInput | string {
   const object = readObject(value)
-  const runId = readStringField(object, 'runId')
-  if (runId === undefined) return 'planCreate requires a non-empty `runId`'
+  const runId = readUuidField(object, 'runId')
+  if (runId === undefined) return 'planCreate requires a uuid `runId`'
   const pattern = object?.['pattern']
   if (typeof pattern !== 'string' || !(RUN_PLAN_PATTERNS as readonly string[]).includes(pattern)) {
     return 'planCreate `pattern` must be one of direct | prompt-chain | parallel-workers | supervisor | router | evaluation-loop'
