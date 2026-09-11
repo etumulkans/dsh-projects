@@ -94,6 +94,9 @@ export function transitionRun(
     ...(run.tokenUsage === undefined ? {} : { tokenUsage: run.tokenUsage }),
     ...(resultSummary === undefined ? {} : { resultSummary }),
     ...(error === undefined ? {} : { error }),
+    // Phase 2: the active plan survives run phase transitions (only plan
+    // coupling clears/sets it).
+    ...(run.activePlanId === undefined ? {} : { activePlanId: run.activePlanId }),
     createdAt: run.createdAt,
     updatedAt: context.now,
     phaseChangedAt: context.now,

@@ -14,6 +14,7 @@ import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ProjectCatalog } from '../src/catalog/catalog.ts'
+import { RunPlanService } from '../src/plans/plan-service.ts'
 import { dshProjectsDomainSpec } from '../src/runs/spec.ts'
 import { ProjectRunService } from '../src/runs/run-service.ts'
 
@@ -64,9 +65,11 @@ describe('ProjectRunService against real JSON storage', () => {
     const { ctx, facility, dispose } = await boot(root)
     const clock = () => new Date(Date.UTC(2026, 7, 14, 2, 0, 0)).toISOString()
 
-    // --- boot 1: create and suspend a run, then shut the process down ---
+    // --- boot 1: create a run, plan + activate v1, replan v2, suspend ---
     const first = new ProjectRunService(ctx, catalogFixture(), clock)
     await first.start()
+    const firstPlans = new RunPlanService(ctx, first, clock)
+    firstPlans.start()
     const run = await first.createRun(
       { goal: 'Integration: survive a real storage restart', sourceRef: 'IT-1' },
       { mode: 'project', projectId: PROJECT_ID },
@@ -74,14 +77,31 @@ describe('ProjectRunService against real JSON storage', () => {
     expect(run).toMatchObject({ phase: 'created', version: 1 })
     await first.transitionRun(run.id, 'planning')
     await first.transitionRun(run.id, 'executing')
+    const planV1 = await firstPlans.createPlan({
+      runId: run.id,
+      pattern: 'supervisor',
+      rationale: 'coordinate the integration work',
+      tasks: [{ title: 'first task', description: 'do the first thing' }],
+    })
+    await firstPlans.transitionPlan(planV1.id, 'active')
+    const planV2 = await firstPlans.createPlan({
+      runId: run.id,
+      pattern: 'direct',
+      rationale: 'narrowed scope',
+      replanReason: 'scope changed mid-run',
+    })
+    await firstPlans.transitionPlan(planV2.id, 'active')
     const paused = await first.transitionRun(run.id, 'paused')
-    expect(paused).toMatchObject({ phase: 'paused', suspendedFrom: 'executing', version: 4 })
+    expect(paused).toMatchObject({ phase: 'paused', suspendedFrom: 'executing', version: 6 })
+    firstPlans.stop()
     await first.stop()
     await facility.closeAll()
 
     // --- boot 2: fresh service instance over the same medium ---
     const second = new ProjectRunService(ctx, catalogFixture(), clock)
     await second.start()
+    const secondPlans = new RunPlanService(ctx, second, clock)
+    secondPlans.start()
     try {
       const summary = await second.listForSnapshot({ mode: 'project', projectId: PROJECT_ID })
       expect(summary.total).toBe(1)
@@ -91,35 +111,50 @@ describe('ProjectRunService against real JSON storage', () => {
         sourceRef: 'IT-1',
         phase: 'paused',
         suspendedFrom: 'executing',
-        version: 4,
+        version: 6,
+        activePlanId: planV2.id,
       })
 
       const detail = await second.runDetail(run.id)
       expect(detail.truncated).toBe(false)
       expect(detail.events.map(event => event.type)).toEqual([
         'run.phase.changed',
+        'run.replanned',
+        'plan.approved',
+        'plan.superseded',
+        'plan.created',
+        'plan.approved',
+        'plan.created',
         'run.phase.changed',
         'run.phase.changed',
         'run.created',
       ])
-      expect(detail.events.map(event => event.seq)).toEqual([4, 3, 2, 1])
+      expect(detail.events.map(event => event.seq)).toEqual([10, 9, 8, 7, 6, 5, 4, 3, 2, 1])
       expect(detail.events[0]!).toMatchObject({ type: 'run.phase.changed', detail: 'executing → paused' })
+      expect(detail.events[1]!).toMatchObject({ type: 'run.replanned', detail: 'Plan v1 → v2' })
+
+      const plans = secondPlans.planList(run.id)
+      expect(plans.map(plan => plan.version)).toEqual([2, 1])
+      expect(plans[0]).toMatchObject({ id: planV2.id, status: 'active', version: 2, revision: 1 })
+      expect(plans[1]).toMatchObject({ id: planV1.id, status: 'superseded', version: 1, revision: 2, replanReason: 'scope changed mid-run' })
+      expect(secondPlans.planDetail(planV2.id)).toMatchObject({ supersedesPlanId: planV1.id, replanReason: 'scope changed mid-run' })
 
       const resumed = await second.transitionRun(run.id, 'executing')
-      expect(resumed).toMatchObject({ phase: 'executing', version: 5 })
+      expect(resumed).toMatchObject({ phase: 'executing', version: 7 })
       expect(resumed.suspendedFrom).toBeUndefined()
 
       await second.transitionRun(run.id, 'finalizing')
       const done = await second.transitionRun(run.id, 'succeeded', { resultSummary: 'integration complete' })
       expect(done.completedAt).toBe(clock())
       expect(done.resultSummary).toBe('integration complete')
-      expect(done.version).toBe(7)
+      expect(done.version).toBe(9)
 
       await expect(second.transitionRun(run.id, 'planning')).rejects.toMatchObject({
         dashboardCode: 'run.transitionInvalid',
         params: { from: 'succeeded', to: 'planning' },
       })
     } finally {
+      secondPlans.stop()
       await second.stop()
     }
 
@@ -134,10 +169,11 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    expect(Object.keys(medium.tables).sort()).toEqual(['run_events', 'runs'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
-    // 4 boot-1 events + 3 boot-2 events (resume, finalize, completed)
-    expect(Object.keys(medium.tables.run_events ?? {})).toHaveLength(7)
+    expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(2)
+    // 10 boot-1 events + 3 boot-2 events (resume, finalize, completed)
+    expect(Object.keys(medium.tables.run_events ?? {})).toHaveLength(13)
 
     dispose()
   })

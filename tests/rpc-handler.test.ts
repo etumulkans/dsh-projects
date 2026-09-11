@@ -3,6 +3,7 @@ import { fixtureSnapshot } from '../src/client/fixture.ts'
 import { handleDashboardRpc } from '../src/rpc/handler.ts'
 import { DashboardDomainError, decodeDashboardError } from '../src/runtime/errors.ts'
 import type { DashboardRuntimeCoordinator } from '../src/runtime/coordinator.ts'
+import type { RunPlanService } from '../src/plans/plan-service.ts'
 import type { ProjectRunService } from '../src/runs/run-service.ts'
 import type { ProjectCatalogSelection } from '../src/catalog/types.ts'
 
@@ -287,6 +288,198 @@ describe('Dashboard RPC Project Runs', () => {
     const transition = await handleDashboardRpc(runtime, 'runTransition', { runId: 'r', to: 'planning' }, signal(), Promise.resolve())
     expect(created).toMatchObject({ ok: false, error: { code: 'bad-request' } })
     expect(detail).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(transition).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
+})
+
+function fakePlanService(overrides: Partial<Record<'createPlan' | 'planList' | 'planDetail' | 'transitionPlan', unknown>> = {}) {
+  return {
+    createPlan: vi.fn(async () => ({})),
+    planList: vi.fn(() => []),
+    planDetail: vi.fn(() => ({})),
+    transitionPlan: vi.fn(async () => ({})),
+    ...overrides,
+  } as unknown as RunPlanService
+}
+
+describe('Dashboard RPC Run Plans', () => {
+  it('creates a plan from a validated payload and returns the record', async () => {
+    const createPlan = vi.fn(async () => ({ id: 'plan-1', version: 1 }))
+    const plans = fakePlanService({ createPlan })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const result = await handleDashboardRpc(
+      runtime,
+      'planCreate',
+      {
+        runId: 'run-1',
+        pattern: 'supervisor',
+        rationale: 'coordinate it',
+        assumptions: ['a1'],
+        successCriteria: ['s1'],
+        tasks: [{ title: 'first', description: 'do it', dependencies: [], acceptanceCriteria: ['ac'] }],
+        replanReason: 'pivot',
+      },
+      new AbortController().signal,
+      Promise.resolve(),
+      undefined,
+      plans,
+    )
+
+    expect(createPlan).toHaveBeenCalledWith({
+      runId: 'run-1',
+      pattern: 'supervisor',
+      rationale: 'coordinate it',
+      assumptions: ['a1'],
+      successCriteria: ['s1'],
+      tasks: [{ title: 'first', description: 'do it', dependencies: [], acceptanceCriteria: ['ac'] }],
+      replanReason: 'pivot',
+    })
+    expect(result).toEqual({ ok: true, value: { id: 'plan-1', version: 1 } })
+  })
+
+  it('omits empty optional plan fields before dispatch', async () => {
+    const createPlan = vi.fn(async () => ({}))
+    const plans = fakePlanService({ createPlan })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    await handleDashboardRpc(
+      runtime,
+      'planCreate',
+      { runId: 'run-1', pattern: 'direct', rationale: '  simple  ' },
+      new AbortController().signal,
+      Promise.resolve(),
+      undefined,
+      plans,
+    )
+
+    expect(createPlan).toHaveBeenCalledWith({ runId: 'run-1', pattern: 'direct', rationale: 'simple' })
+  })
+
+  it('rejects invalid planCreate payloads before dispatch', async () => {
+    const createPlan = vi.fn(async () => ({}))
+    const plans = fakePlanService({ createPlan })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const signal = () => new AbortController().signal
+
+    const missingRun = await handleDashboardRpc(runtime, 'planCreate', { pattern: 'direct', rationale: 'r' }, signal(), Promise.resolve(), undefined, plans)
+    expect(missingRun).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    const badPattern = await handleDashboardRpc(runtime, 'planCreate', { runId: 'r', pattern: 'swarm', rationale: 'r' }, signal(), Promise.resolve(), undefined, plans)
+    expect(badPattern).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    const badTask = await handleDashboardRpc(
+      runtime,
+      'planCreate',
+      { runId: 'r', pattern: 'direct', rationale: 'r', tasks: [{ title: 'only title' }] },
+      signal(),
+      Promise.resolve(),
+      undefined,
+      plans,
+    )
+    expect(badTask).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    const badArray = await handleDashboardRpc(
+      runtime,
+      'planCreate',
+      { runId: 'r', pattern: 'direct', rationale: 'r', assumptions: 'not-an-array' },
+      signal(),
+      Promise.resolve(),
+      undefined,
+      plans,
+    )
+    expect(badArray).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    expect(createPlan).not.toHaveBeenCalled()
+  })
+
+  it('lists and loads plans by id', async () => {
+    const list = [{ id: 'plan-2', version: 2 }, { id: 'plan-1', version: 1 }]
+    const plans = fakePlanService({ planList: vi.fn(() => list), planDetail: vi.fn(() => list[1]!) })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const listed = await handleDashboardRpc(runtime, 'planList', { runId: 'run-1' }, new AbortController().signal, Promise.resolve(), undefined, plans)
+    expect(listed).toEqual({ ok: true, value: list })
+
+    const detailed = await handleDashboardRpc(runtime, 'planDetail', { planId: 'plan-1' }, new AbortController().signal, Promise.resolve(), undefined, plans)
+    expect(detailed).toEqual({ ok: true, value: { id: 'plan-1', version: 1 } })
+
+    const missing = await handleDashboardRpc(runtime, 'planDetail', {}, new AbortController().signal, Promise.resolve(), undefined, plans)
+    expect(missing).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
+
+  it('applies a validated plan transition with an optional CAS revision', async () => {
+    const transitionPlan = vi.fn(async () => ({ id: 'plan-1', status: 'active' }))
+    const plans = fakePlanService({ transitionPlan })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const result = await handleDashboardRpc(
+      runtime,
+      'planTransition',
+      { planId: 'plan-1', status: 'active', expectedRevision: 2, replanReason: 'moved' },
+      new AbortController().signal,
+      Promise.resolve(),
+      undefined,
+      plans,
+    )
+
+    expect(transitionPlan).toHaveBeenCalledWith('plan-1', 'active', { expectedRevision: 2, replanReason: 'moved' })
+    expect(result).toEqual({ ok: true, value: { id: 'plan-1', status: 'active' } })
+  })
+
+  it('rejects invalid planTransition payloads before dispatch', async () => {
+    const transitionPlan = vi.fn(async () => ({}))
+    const plans = fakePlanService({ transitionPlan })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const signal = () => new AbortController().signal
+
+    const badStatus = await handleDashboardRpc(runtime, 'planTransition', { planId: 'p', status: 'sideways' }, signal(), Promise.resolve(), undefined, plans)
+    expect(badStatus).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    const badRevision = await handleDashboardRpc(runtime, 'planTransition', { planId: 'p', status: 'active', expectedRevision: 0 }, signal(), Promise.resolve(), undefined, plans)
+    expect(badRevision).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    const missingId = await handleDashboardRpc(runtime, 'planTransition', { status: 'active' }, signal(), Promise.resolve(), undefined, plans)
+    expect(missingId).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    expect(transitionPlan).not.toHaveBeenCalled()
+  })
+
+  it('maps a plan revision conflict to a structured bad request', async () => {
+    const transitionPlan = vi.fn(async () => {
+      throw new DashboardDomainError('plan.revisionConflict', 'conflict', { expectedRevision: 1, actualRevision: 2 })
+    })
+    const plans = fakePlanService({ transitionPlan })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const result = await handleDashboardRpc(
+      runtime,
+      'planTransition',
+      { planId: 'p', status: 'active', expectedRevision: 1 },
+      new AbortController().signal,
+      Promise.resolve(),
+      undefined,
+      plans,
+    )
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (result.ok) throw new Error('expected failure')
+    expect(decodeDashboardError(result.error.message)).toMatchObject({
+      dashboardCode: 'plan.revisionConflict',
+      params: { expectedRevision: 1, actualRevision: 2 },
+    })
+  })
+
+  it('reports plan endpoints as unavailable when no Plan service is mounted', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const signal = () => new AbortController().signal
+    const created = await handleDashboardRpc(runtime, 'planCreate', { runId: 'r', pattern: 'direct', rationale: 'r' }, signal(), Promise.resolve())
+    const listed = await handleDashboardRpc(runtime, 'planList', { runId: 'r' }, signal(), Promise.resolve())
+    const detailed = await handleDashboardRpc(runtime, 'planDetail', { planId: 'p' }, signal(), Promise.resolve())
+    const transition = await handleDashboardRpc(runtime, 'planTransition', { planId: 'p', status: 'active' }, signal(), Promise.resolve())
+    expect(created).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(listed).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(detailed).toMatchObject({ ok: false, error: { code: 'bad-request' } })
     expect(transition).toMatchObject({ ok: false, error: { code: 'bad-request' } })
   })
 })

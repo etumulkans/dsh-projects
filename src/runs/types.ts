@@ -37,13 +37,29 @@ export interface ProjectRunRecord {
   readonly tokenUsage?: TokenTotals
   readonly resultSummary?: string
   readonly error?: string
+  /** Additive (Phase 2): the plan currently active for this run, if any. */
+  readonly activePlanId?: string
   readonly createdAt: string
   readonly updatedAt: string
   readonly phaseChangedAt: string
   readonly version: number
 }
 
-export type ProjectRunEventType = 'run.created' | 'run.phase.changed' | 'run.completed'
+/**
+ * High-level run event types: Phase 1 run events + Phase 2 plan events.
+ * The stream is per-run, so plan and run events interleave on one seq.
+ */
+export type ProjectRunEventType =
+  | 'run.created'
+  | 'run.phase.changed'
+  | 'run.completed'
+  | 'plan.created'
+  | 'plan.approval.requested'
+  | 'plan.approved'
+  | 'plan.rejected'
+  | 'plan.superseded'
+  | 'plan.completed'
+  | 'run.replanned'
 
 /** High-level Run event; detailed agent activity stays in Harness session logs. */
 export interface ProjectRunEventRecord {
@@ -72,6 +88,8 @@ export interface ProjectRunView {
   readonly tokenUsage?: TokenTotals
   readonly resultSummary?: string
   readonly error?: string
+  /** Additive (Phase 2): the plan currently active for this run, if any. */
+  readonly activePlanId?: string
   readonly createdAt: string
   readonly updatedAt: string
   readonly phaseChangedAt: string

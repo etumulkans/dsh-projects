@@ -175,6 +175,7 @@ export const fixtureSnapshot: DashboardSnapshot = {
         updatedAt: '2026-08-14T02:29:40.000Z',
         phaseChangedAt: '2026-08-14T02:12:00.000Z',
         version: 3,
+        activePlanId: '5e0d1c88-9a47-4f2e-b3c6-7d8a1f0e9b24',
       },
       {
         id: '2b8d4e71-6f0a-4c1b-8d35-1a9c4f7e0b53',

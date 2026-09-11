@@ -1,7 +1,10 @@
-/** Harness storage-domain declaration for DSH Projects Run state (Phase 1). */
+/** Harness storage-domain declaration for DSH Projects Run state (Phase 1) + Run Plans (Phase 2). */
 
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
+import { runPlanRecordSchema } from '../plans/spec.ts'
+import type { RunPlanRecord } from '../plans/types.ts'
+import type { PlanId } from '../plans/types.ts'
 import type { ProjectRunEventRecord, ProjectRunRecord, RunEventId, RunId } from './types.ts'
 
 const id = z.uuid()
@@ -36,17 +39,30 @@ export const projectRunRecordSchema = z.object({
   tokenUsage: tokenUsageSchema.optional(),
   resultSummary: nonBlank.optional(),
   error: nonBlank.optional(),
+  /** Additive (Phase 2): the plan currently active for this run, if any. */
+  activePlanId: id.optional(),
   createdAt: timestamp,
   updatedAt: timestamp,
   phaseChangedAt: timestamp,
   version: z.number().int().min(1),
 }).strict() as z.ZodType<ProjectRunRecord>
 
+/**
+ * High-level run event stream (Phase 1 run events + Phase 2 plan events).
+ * Extending the enum is additive: stored records are unchanged, so the
+ * domain version stays 0 (architecture doc §4).
+ */
+export const RUN_EVENT_TYPES = [
+  'run.created', 'run.phase.changed', 'run.completed',
+  'plan.created', 'plan.approval.requested', 'plan.approved', 'plan.rejected',
+  'plan.superseded', 'plan.completed', 'run.replanned',
+] as const satisfies readonly ProjectRunEventRecord['type'][]
+
 export const projectRunEventRecordSchema = z.object({
   id,
   runId: id,
   projectId: id,
-  type: z.enum(['run.created', 'run.phase.changed', 'run.completed']),
+  type: z.enum(RUN_EVENT_TYPES),
   title: nonBlank,
   detail: nonBlank.optional(),
   seq: z.number().int().min(1),
@@ -62,5 +78,7 @@ export const dshProjectsDomainSpec = defineDomain({
   tables: {
     runs: domainTable<RunId, ProjectRunRecord>(projectRunRecordSchema),
     run_events: domainTable<RunEventId, ProjectRunEventRecord>(projectRunEventRecordSchema),
+    // Additive (Phase 2): versioned Run Plans.
+    plans: domainTable<PlanId, RunPlanRecord>(runPlanRecordSchema),
   },
 })

@@ -80,7 +80,7 @@ export interface TransitionRunOptions {
  * survives a process restart because the domain reloads on `start()`.
  */
 export class ProjectRunService {
-  private domain: Domain<typeof dshProjectsDomainSpec> | undefined
+  private openedDomain: Domain<typeof dshProjectsDomainSpec> | undefined
   private runs: KvTable<RunId, ProjectRunRecord> | undefined
   private events: KvTable<RunEventId, ProjectRunEventRecord> | undefined
 
@@ -92,17 +92,28 @@ export class ProjectRunService {
 
   /** Open the `dsh_projects` domain; all records become readable. */
   async start(): Promise<void> {
-    if (this.domain !== undefined) throw new Error('dsh-projects: Run service is already started')
+    if (this.openedDomain !== undefined) throw new Error('dsh-projects: Run service is already started')
     const domain = await this.ctx.storageDomain.open(dshProjectsDomainSpec)
-    this.domain = domain
+    this.openedDomain = domain
     this.runs = domain.table('runs')
     this.events = domain.table('run_events')
   }
 
+  /**
+   * The opened `dsh_projects` domain. Sibling services (Phase 2 plans) borrow
+   * this handle instead of opening the domain again — one open per domain
+   * name; this service remains the owner that closes it on `stop()`.
+   */
+  domain(): Domain<typeof dshProjectsDomainSpec> {
+    const domain = this.openedDomain
+    if (domain === undefined) throw new DashboardDomainError('run.notStarted', 'Run service is not started')
+    return domain
+  }
+
   /** Drain and close the domain; idempotent. */
   async stop(): Promise<void> {
-    const domain = this.domain
-    this.domain = undefined
+    const domain = this.openedDomain
+    this.openedDomain = undefined
     this.runs = undefined
     this.events = undefined
     await domain?.close()

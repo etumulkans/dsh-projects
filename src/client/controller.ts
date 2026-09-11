@@ -4,6 +4,7 @@ import type { ClientConnectionRpc, RpcResult } from '@deepseek-ai/dsh-client-con
 import type { DashboardSnapshot, TaskTimelinePage } from '../runtime/types.ts'
 import type { AddDiscoveryRootInput, ProjectScanResult, RegisterProjectInput } from '../catalog/types.ts'
 import type { CreateRunInput, ProjectRunPhase, RunDetailView } from '../runs/types.ts'
+import type { CreatePlanInput, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
 import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
 import {
   DashboardRequestError,
@@ -45,6 +46,14 @@ export interface DashboardDataPort {
     resultSummary?: string
   }): Promise<void>
   loadRunDetail(runId: string): Promise<RunDetailView>
+  createPlan(input: CreatePlanInput): Promise<RunPlanRecord>
+  loadPlans(runId: string): Promise<readonly RunPlanRecord[]>
+  planTransition(input: {
+    planId: string
+    status: RunPlanStatus
+    expectedRevision?: number
+    replanReason?: string
+  }): Promise<RunPlanRecord>
 }
 
 /** Root overlay visibility shared by the sidebar trigger and shell-overlay entry. */
@@ -191,6 +200,50 @@ export class DashboardDataController implements DashboardDataPort {
     }
   }
 
+  async createPlan(input: CreatePlanInput): Promise<RunPlanRecord> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'planCreate', input) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseRunPlan(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async loadPlans(runId: string): Promise<readonly RunPlanRecord[]> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'planList', { runId }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseRunPlanList(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async planTransition(input: {
+    planId: string
+    status: RunPlanStatus
+    expectedRevision?: number
+    replanReason?: string
+  }): Promise<RunPlanRecord> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'planTransition', input) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseRunPlan(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
   private async readState(): Promise<void> {
     await this.call('state', {}, false)
   }
@@ -288,6 +341,39 @@ function parseRunDetail(value: unknown): RunDetailView {
     throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run detail data')
   }
   return value as RunDetailView
+}
+
+function parseRunPlan(value: unknown): RunPlanRecord {
+  if (!isRunPlanRecord(value)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run Plan data')
+  }
+  return value as RunPlanRecord
+}
+
+function parseRunPlanList(value: unknown): readonly RunPlanRecord[] {
+  if (!Array.isArray(value) || !value.every(isRunPlanRecord)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run Plan list data')
+  }
+  return value as readonly RunPlanRecord[]
+}
+
+function isRunPlanRecord(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const plan = value as Record<string, unknown>
+  return typeof plan.id === 'string'
+    && typeof plan.runId === 'string'
+    && typeof plan.projectId === 'string'
+    && typeof plan.version === 'number'
+    && typeof plan.pattern === 'string'
+    && typeof plan.rationale === 'string'
+    && Array.isArray(plan.assumptions)
+    && Array.isArray(plan.successCriteria)
+    && Array.isArray(plan.tasks)
+    && typeof plan.status === 'string'
+    && (plan.replanReason === undefined || typeof plan.replanReason === 'string')
+    && (plan.supersedesPlanId === undefined || typeof plan.supersedesPlanId === 'string')
+    && typeof plan.createdAt === 'string'
+    && typeof plan.revision === 'number'
 }
 
 function isRunView(value: unknown): boolean {

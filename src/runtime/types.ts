@@ -9,6 +9,7 @@ import type {
 } from '../catalog/types.ts'
 import type { CreateTaskInput, TaskSourceCredentialStatus, UpdateTaskInput } from '../task-source/index.ts'
 import type { CreateRunInput, ProjectRunPhase, ProjectRunSummary, RunDetailView } from '../runs/types.ts'
+import type { CreatePlanInput, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
 
 export interface TokenTotals {
   readonly input: number
@@ -185,6 +186,14 @@ export interface DashboardRpcMap {
   readonly runTransition: {
     input: { runId: string; to: ProjectRunPhase; expectedVersion?: number; error?: string; resultSummary?: string }
     output: DashboardSnapshot
+  }
+  /** Phase 2: versioned Run Plans. Mutations return the affected record (the plan list is not part of the snapshot). */
+  readonly planCreate: { input: CreatePlanInput; output: RunPlanRecord }
+  readonly planList: { input: { runId: string }; output: readonly RunPlanRecord[] }
+  readonly planDetail: { input: { planId: string }; output: RunPlanRecord }
+  readonly planTransition: {
+    input: { planId: string; status: RunPlanStatus; expectedRevision?: number; replanReason?: string }
+    output: RunPlanRecord
   }
 }
 

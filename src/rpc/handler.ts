@@ -5,6 +5,9 @@ import type { RpcResult } from '@deepseek-ai/dsh-client-connection/client'
 import { DashboardDomainError, encodeDashboardError } from '../runtime/errors.ts'
 import { RUN_PHASES } from '../runs/state-machine.ts'
 import type { ProjectRunService } from '../runs/run-service.ts'
+import { RUN_PLAN_PATTERNS, RUN_PLAN_STATUSES } from '../plans/spec.ts'
+import type { RunPlanService } from '../plans/plan-service.ts'
+import type { CreatePlanInput, PlannedTaskInput, RunPlanPattern, RunPlanStatus } from '../plans/types.ts'
 import type { DashboardSnapshot } from '../runtime/types.ts'
 
 /** Dispatch the intentionally small Dashboard RPC surface. */
@@ -15,6 +18,7 @@ export async function handleDashboardRpc(
   signal: AbortSignal,
   ready: Promise<void> = Promise.resolve(),
   runs?: ProjectRunService,
+  plans?: RunPlanService,
 ): Promise<RpcResult<unknown>> {
   if (signal.aborted) {
     return failure('cancelled', localizedError('request.cancelled', 'Dashboard request was cancelled'))
@@ -156,6 +160,39 @@ export async function handleDashboardRpc(
         })
         return success(await snapshotWithRuns(runtime, runs))
       }
+      case 'planCreate': {
+        if (plans === undefined) return badRequest('planCreate is unavailable: the Run Plan service is not mounted')
+        const input = readCreatePlan(payload)
+        if (typeof input === 'string') return badRequest(input)
+        return success(await plans.createPlan(input))
+      }
+      case 'planList': {
+        if (plans === undefined) return badRequest('planList is unavailable: the Run Plan service is not mounted')
+        const runId = readStringField(payload, 'runId')
+        if (runId === undefined) return badRequest('planList requires a non-empty `runId`')
+        return success(plans.planList(runId))
+      }
+      case 'planDetail': {
+        if (plans === undefined) return badRequest('planDetail is unavailable: the Run Plan service is not mounted')
+        const planId = readStringField(payload, 'planId')
+        if (planId === undefined) return badRequest('planDetail requires a non-empty `planId`')
+        return success(plans.planDetail(planId))
+      }
+      case 'planTransition': {
+        if (plans === undefined) return badRequest('planTransition is unavailable: the Run Plan service is not mounted')
+        const planId = readStringField(payload, 'planId')
+        if (planId === undefined) return badRequest('planTransition requires a non-empty `planId`')
+        const status = readPlanStatus(payload)
+        if (status === undefined) return badRequest('planTransition requires a valid `status`')
+        const expectedRevision = readOptionalInteger(payload, 'expectedRevision', 1, Number.MAX_SAFE_INTEGER)
+        if (expectedRevision === false) return badRequest('planTransition `expectedRevision` must be a positive integer when provided')
+        const replanReason = readOptionalString(payload, 'replanReason')
+        if (replanReason === false) return badRequest('planTransition `replanReason` must be a non-empty string when provided')
+        return success(await plans.transitionPlan(planId, status, {
+          ...(expectedRevision === undefined ? {} : { expectedRevision }),
+          ...(replanReason === undefined ? {} : { replanReason }),
+        }))
+      }
       default:
         return badRequest(`unknown Dashboard endpoint ${JSON.stringify(endpoint)}`)
     }
@@ -255,6 +292,77 @@ function readRunPhase(value: unknown): import('../runs/types.ts').ProjectRunPhas
   return typeof field === 'string' && (RUN_PHASES as readonly string[]).includes(field)
     ? (field as import('../runs/types.ts').ProjectRunPhase)
     : undefined
+}
+
+function readPlanStatus(value: unknown): RunPlanStatus | undefined {
+  const object = readObject(value)
+  const field = object?.['status']
+  return typeof field === 'string' && (RUN_PLAN_STATUSES as readonly string[]).includes(field)
+    ? (field as RunPlanStatus)
+    : undefined
+}
+
+function readCreatePlan(value: unknown): CreatePlanInput | string {
+  const object = readObject(value)
+  const runId = readStringField(object, 'runId')
+  if (runId === undefined) return 'planCreate requires a non-empty `runId`'
+  const pattern = object?.['pattern']
+  if (typeof pattern !== 'string' || !(RUN_PLAN_PATTERNS as readonly string[]).includes(pattern)) {
+    return 'planCreate `pattern` must be one of direct | prompt-chain | parallel-workers | supervisor | router | evaluation-loop'
+  }
+  const rationale = readOptionalString(object, 'rationale')
+  if (rationale === false) return 'planCreate `rationale` must be a non-empty string when provided'
+  const assumptions = readStringArray(object, 'assumptions')
+  if (assumptions === false) return 'planCreate `assumptions` must be an array of strings when provided'
+  const successCriteria = readStringArray(object, 'successCriteria')
+  if (successCriteria === false) return 'planCreate `successCriteria` must be an array of strings when provided'
+  const tasks = readPlannedTasks(object)
+  if (typeof tasks === 'string') return tasks
+  const replanReason = readOptionalString(object, 'replanReason')
+  if (replanReason === false) return 'planCreate `replanReason` must be a non-empty string when provided'
+  return {
+    runId,
+    pattern: pattern as RunPlanPattern,
+    rationale: rationale ?? '',
+    ...(assumptions === undefined ? {} : { assumptions }),
+    ...(successCriteria === undefined ? {} : { successCriteria }),
+    ...(tasks === undefined ? {} : { tasks }),
+    ...(replanReason === undefined ? {} : { replanReason }),
+  }
+}
+
+function readPlannedTasks(value: unknown): readonly PlannedTaskInput[] | undefined | string {
+  const object = readObject(value)
+  const field = object?.['tasks']
+  if (field === undefined) return undefined
+  if (!Array.isArray(field)) return 'planCreate `tasks` must be an array when provided'
+  const tasks: PlannedTaskInput[] = []
+  for (let index = 0; index < field.length; index += 1) {
+    const item = readObject(field[index])
+    const title = item === undefined ? undefined : readStringField(item, 'title')
+    const description = item === undefined ? undefined : readStringField(item, 'description')
+    if (title === undefined) return `planCreate task t${index + 1} requires a non-empty \`title\``
+    if (description === undefined) return `planCreate task t${index + 1} requires a non-empty \`description\``
+    const dependencies = item === undefined ? undefined : readStringArray(item, 'dependencies')
+    if (dependencies === false) return `planCreate task t${index + 1} \`dependencies\` must be an array of task ids when provided`
+    const acceptanceCriteria = item === undefined ? undefined : readStringArray(item, 'acceptanceCriteria')
+    if (acceptanceCriteria === false) return `planCreate task t${index + 1} \`acceptanceCriteria\` must be an array of strings when provided`
+    tasks.push({
+      title,
+      description,
+      ...(dependencies === undefined ? {} : { dependencies }),
+      ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
+    })
+  }
+  return tasks
+}
+
+function readStringArray(value: unknown, key: string): string[] | undefined | false {
+  const object = readObject(value)
+  if (object === undefined || !(key in object)) return undefined
+  const field = object[key]
+  if (!Array.isArray(field) || field.some(item => typeof item !== 'string')) return false
+  return [...field]
 }
 
 function success<T>(value: T): RpcResult<T> {

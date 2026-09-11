@@ -25,6 +25,7 @@ import { LinearTaskSource } from './linear/source.ts'
 import { LocalTaskSource } from './local/source.ts'
 import { DashboardOrchestrator } from './orchestrator/orchestrator.ts'
 import { handleDashboardRpc } from './rpc/handler.ts'
+import { RunPlanService } from './plans/plan-service.ts'
 import { ProjectRunService } from './runs/run-service.ts'
 import { ScopedTaskSourceRegistry, TaskSourceRegistry } from './task-source/index.ts'
 import { DashboardRuntimeCoordinator } from './runtime/coordinator.ts'
@@ -78,6 +79,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
     discoveryRoots: config.discovery.roots,
   })
   const runService = new ProjectRunService(ctx, catalog)
+  // Phase 2: Run Plans borrow the shared dsh_projects domain from the Run
+  // service (one open per domain name); it starts/stops just inside it.
+  const planService = new RunPlanService(ctx, runService)
   const sourceRegistry = new TaskSourceRegistry(ctx)
   const runner = new HarnessAgentRunner(ctx, {
     permissionPreset: agentProfile.permissionPreset,
@@ -131,12 +135,13 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const startup = catalog.start().then(async () => {
     if (disposed) return
     await runService.start()
+    planService.start()
     await runtime.start()
   })
 
   ctx.connection.rpc.handle(
     '/dsh-dashboard',
-    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup, runService),
+    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup, runService, planService),
     { authority: 'trusted-host' },
   )
 
@@ -148,6 +153,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
       disposed = true
       await startup.catch(() => undefined)
       await runtime.stop()
+      planService.stop()
       await runService.stop()
       await catalog.stop()
     }

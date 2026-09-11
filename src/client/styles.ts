@@ -625,6 +625,57 @@ export const DASHBOARD_STYLES = String.raw`
 .dshd-modal .dshd-modal-card > footer .dshd-primary { color: #fff; border-color: var(--dshd-blue); background: var(--dshd-blue); }
 .dshd-modal .dshd-modal-card > footer .dshd-primary:hover { border-color: #0856dc; background: #0856dc; }
 .dshd-modal .dshd-modal-card > footer .dshd-primary:disabled { opacity: .55; cursor: default; }
+.dshd-inspector-section .dshd-inspector-section-action { display: flex; justify-content: flex-end; margin: -10px 0 14px; }
+.dshd-inspector-section .dshd-inspector-section-action button { min-height: 30px; padding: 0 10px; border: 1px solid #ccd5e3; border-radius: 6px; background: #fff; display: inline-flex; align-items: center; gap: 6px; color: #273750; font-size: 11px; white-space: nowrap; }
+.dshd-inspector-section .dshd-inspector-section-action button:hover { background: #f9fbfe; border-color: #aab6c9; }
+.dshd-inspector-section .dshd-inspector-section-action button:disabled { opacity: .55; cursor: default; }
+.dshd-plan-chip { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border: 1px solid #bcd7f2; border-radius: 999px; background: #eef5fe; color: #164ec3; font-size: 10px; white-space: nowrap; }
+.dshd-plan-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #2f7df6; }
+.dshd-plan-empty { color: #79869a; font-size: 11px; }
+.dshd-plan-notice { padding: 8px 11px; border-radius: 6px; font-size: 11px; margin-bottom: 10px; }
+.dshd-plan-notice[data-tone="success"] { border: 1px solid #bfe3c8; background: #eefaf1; color: #1d7a3c; }
+.dshd-plan-notice[data-tone="error"] { border: 1px solid #e5b6bc; background: #fff2f4; color: #c52b3a; overflow-wrap: anywhere; }
+.dshd-plan-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.dshd-plan-item { border: 1px solid #dde4ee; border-radius: 8px; overflow: hidden; }
+.dshd-plan-row { width: 100%; display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 10px 12px; border: 0; background: #fff; text-align: left; cursor: pointer; }
+.dshd-plan-row:hover { background: #f8fafd; }
+.dshd-plan-version { font-weight: 640; font-size: 12px; color: #1d2b43; }
+.dshd-plan-status { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 560; white-space: nowrap; }
+.dshd-plan-status-draft { background: #eef1f6; color: #52617a; }
+.dshd-plan-status-awaiting-approval { background: #fff6e6; color: #9a6b00; }
+.dshd-plan-status-active { background: #eef5fe; color: #164ec3; }
+.dshd-plan-status-superseded { background: #f1f3f7; color: #8b95a7; text-decoration: line-through; }
+.dshd-plan-status-completed { background: #eefaf1; color: #1d7a3c; }
+.dshd-plan-pattern { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: #52617a; }
+.dshd-plan-task-count { font-size: 10px; color: #79869a; white-space: nowrap; }
+.dshd-plan-row small { color: #79869a; font-size: 10px; white-space: nowrap; }
+.dshd-plan-detail { border-top: 1px solid #e6ebf3; background: #fbfcfe; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.dshd-plan-bullets { margin: 0; padding-left: 16px; font-size: 11px; color: #42506a; line-height: 1.5; display: flex; flex-direction: column; gap: 3px; }
+.dshd-plan-tasks { display: flex; flex-direction: column; gap: 8px; }
+.dshd-plan-subtitle { font-size: 11px; font-weight: 580; color: #52617a; }
+.dshd-plan-tasks-empty { font-size: 11px; color: #79869a; }
+.dshd-plan-task { border: 1px solid #e2e8f2; border-radius: 7px; background: #fff; padding: 10px 11px; display: flex; flex-direction: column; gap: 5px; }
+.dshd-plan-task strong { font-size: 11px; font-weight: 600; color: #1d2b43; }
+.dshd-plan-task p { margin: 0; font-size: 11px; color: #42506a; line-height: 1.5; }
+.dshd-plan-deps { font-size: 10px; color: #65738b; }
+.dshd-plan-actions { display: flex; gap: 8px; padding-top: 4px; }
+.dshd-plan-actions button { min-height: 32px; padding: 0 12px; border: 1px solid #ccd5e3; border-radius: 6px; background: #fff; color: #273750; font-size: 11px; white-space: nowrap; }
+.dshd-plan-actions button:hover { background: #f9fbfe; border-color: #aab6c9; }
+.dshd-plan-actions button:disabled { opacity: .55; cursor: default; }
+.dshd-plan-actions .dshd-primary { color: #fff; border-color: var(--dshd-blue); background: var(--dshd-blue); }
+.dshd-plan-actions .dshd-primary:hover { background: #164ec3; border-color: #164ec3; }
+.dshd-plan-actions .dshd-danger { color: #c52b3a; border-color: #e5b6bc; }
+.dshd-plan-actions .dshd-danger:hover { background: #fff2f4; border-color: #d68f99; }
+.dshd-plan-dialog { width: min(640px, 100%); }
+.dshd-plan-dialog select { width: 100%; height: 38px; padding: 0 10px; border: 1px solid #cfd7e4; border-radius: 6px; background: #fff; font: inherit; font-size: 12px; }
+.dshd-plan-task-editor { border: 1px solid #d7deea; border-radius: 8px; padding: 10px 11px; display: flex; flex-direction: column; gap: 8px; background: #fff; }
+.dshd-plan-task-editor > header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dshd-plan-task-editor > header strong { font-size: 11px; color: #1d2b43; }
+.dshd-plan-dep-picker, .dshd-plan-dep-option { font-size: 10px; color: #52617a; display: inline-flex; align-items: center; gap: 4px; }
+.dshd-plan-task-editor .dshd-plain-control { margin-left: auto; min-height: 26px; padding: 0 8px; font-size: 10px; }
+.dshd-plan-task-editor input, .dshd-plan-task-editor textarea { width: 100%; border: 1px solid #cfd7e4; border-radius: 6px; background: #fff; font: inherit; font-size: 12px; }
+.dshd-plan-task-editor input { height: 34px; padding: 0 10px; }
+.dshd-plan-task-editor textarea { resize: vertical; min-height: 54px; padding: 8px 10px; line-height: 1.45; }
 `
 
 /** Install once per browser plugin lifetime. */
