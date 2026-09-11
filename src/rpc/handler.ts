@@ -8,6 +8,7 @@ import type { ProjectRunService } from '../runs/run-service.ts'
 import { RUN_PLAN_PATTERNS, RUN_PLAN_STATUSES } from '../plans/spec.ts'
 import type { RunPlanService } from '../plans/plan-service.ts'
 import type { CreatePlanInput, PlannedTaskInput, RunPlanPattern, RunPlanStatus } from '../plans/types.ts'
+import type { CoordinatorService } from '../coordinator/coordinator-service.ts'
 import type { DashboardSnapshot } from '../runtime/types.ts'
 
 /** Dispatch the intentionally small Dashboard RPC surface. */
@@ -19,6 +20,7 @@ export async function handleDashboardRpc(
   ready: Promise<void> = Promise.resolve(),
   runs?: ProjectRunService,
   plans?: RunPlanService,
+  coordinator?: CoordinatorService,
 ): Promise<RpcResult<unknown>> {
   if (signal.aborted) {
     return failure('cancelled', localizedError('request.cancelled', 'Dashboard request was cancelled'))
@@ -192,6 +194,12 @@ export async function handleDashboardRpc(
           ...(expectedRevision === undefined ? {} : { expectedRevision }),
           ...(replanReason === undefined ? {} : { replanReason }),
         }))
+      }
+      case 'runCoordinate': {
+        if (coordinator === undefined) return badRequest('runCoordinate is unavailable: the Coordinator service is not mounted')
+        const runId = readUuidField(payload, 'runId')
+        if (runId === undefined) return badRequest('runCoordinate requires a uuid `runId`')
+        return success(await coordinator.coordinate(runId))
       }
       default:
         return badRequest(`unknown Dashboard endpoint ${JSON.stringify(endpoint)}`)

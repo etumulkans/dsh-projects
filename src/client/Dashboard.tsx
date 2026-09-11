@@ -140,6 +140,7 @@ export function DashboardOverlay({ ui, data, openSession, t }: DashboardOverlayP
           onCreateRun={input => data.createRun(input)}
           onRunTransition={input => data.runTransition(input)}
           onLoadRunDetail={runId => data.loadRunDetail(runId)}
+          onCoordinateRun={runId => data.coordinateRun(runId)}
           onPlanCreate={input => data.createPlan(input)}
           onLoadPlans={runId => data.loadPlans(runId)}
           onPlanTransition={input => data.planTransition(input)}
@@ -178,6 +179,8 @@ export interface DashboardSurfaceProps {
     readonly resultSummary?: string
   }) => Promise<void>) | undefined
   readonly onLoadRunDetail?: ((runId: string) => Promise<RunDetailView>) | undefined
+  /** Phase 3: start one Coordinator Lead session for a created/planning run. */
+  readonly onCoordinateRun?: ((runId: string) => Promise<void>) | undefined
   readonly onPlanCreate?: ((input: CreatePlanInput) => Promise<RunPlanRecord>) | undefined
   readonly onLoadPlans?: ((runId: string) => Promise<readonly RunPlanRecord[]>) | undefined
   readonly onPlanTransition?: ((input: {
@@ -225,6 +228,7 @@ export function DashboardSurface({
   onCreateRun,
   onRunTransition,
   onLoadRunDetail,
+  onCoordinateRun,
   onPlanCreate,
   onLoadPlans,
   onPlanTransition,
@@ -576,6 +580,7 @@ export function DashboardSurface({
           onRefresh={(runId) => runAction('refresh', onRefresh, t('feedback.refreshed'))}
           refreshPending={isPending('refresh')}
           onLoadDetail={onLoadRunDetail}
+          onCoordinateRun={onCoordinateRun}
           onLoadPlans={onLoadPlans}
           onPlanCreate={onPlanCreate}
           onPlanTransition={onPlanTransition}
@@ -2062,7 +2067,7 @@ function RunListView({ summary, runs, global, busy, selectedRunId, onSelect, onN
   )
 }
 
-function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cancelPending, pausePending, resumePending, onRefresh, refreshPending, onLoadDetail, onLoadPlans, onPlanCreate, onPlanTransition }: {
+function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cancelPending, pausePending, resumePending, onRefresh, refreshPending, onLoadDetail, onCoordinateRun, onLoadPlans, onPlanCreate, onPlanTransition }: {
   readonly run: ProjectRunView
   readonly global: boolean
   readonly onClose: () => void
@@ -2075,6 +2080,7 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
   readonly onRefresh: (runId: string) => Promise<void>
   readonly refreshPending: boolean
   readonly onLoadDetail?: ((runId: string) => Promise<RunDetailView>) | undefined
+  readonly onCoordinateRun?: ((runId: string) => Promise<void>) | undefined
   readonly onLoadPlans?: ((runId: string) => Promise<readonly RunPlanRecord[]>) | undefined
   readonly onPlanCreate?: ((input: CreatePlanInput) => Promise<RunPlanRecord>) | undefined
   readonly onPlanTransition?: ((input: {
@@ -2099,6 +2105,28 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
   const [supersedeTarget, setSupersedeTarget] = useState<RunPlanRecord | undefined>()
   const [pendingPlanIds, setPendingPlanIds] = useState<readonly string[]>([])
   const [planNotice, setPlanNotice] = useState<{ readonly tone: 'success' | 'error'; readonly message: string } | undefined>()
+
+  // Phase 3: one-shot coordination. The RPC returns once the Lead session is
+  // started; progress is observed through the event stream + refresh.
+  const [coordinatePending, setCoordinatePending] = useState(false)
+  const [coordinateNotice, setCoordinateNotice] = useState<{ readonly tone: 'success' | 'error'; readonly message: string } | undefined>()
+
+  const coordinate = async (): Promise<void> => {
+    if (onCoordinateRun === undefined) return
+    setCoordinatePending(true)
+    setCoordinateNotice(undefined)
+    try {
+      await onCoordinateRun(run.id)
+      setCoordinateNotice({ tone: 'success', message: t('feedback.runCoordinated') })
+      await onRefresh(run.id)
+      void loadDetail()
+      void loadPlans()
+    } catch (coordinateError) {
+      setCoordinateNotice({ tone: 'error', message: dashboardErrorMessage(coordinateError, t) })
+    } finally {
+      setCoordinatePending(false)
+    }
+  }
 
   const loadPlans = async (): Promise<void> => {
     if (onLoadPlans === undefined) return
@@ -2164,6 +2192,20 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
   }, [run.id, onLoadDetail])
 
   const events = detail?.events ?? []
+  // Phase 3: the newest coordinator event drives the section status (events
+  // are newest-first). `started` without a later outcome = in progress.
+  const coordinatorEvent = events.find(event =>
+    event.type === 'run.coordinator.started' ||
+    event.type === 'run.coordinator.completed' ||
+    event.type === 'run.coordinator.failed',
+  )
+  const coordinatorVisible = run.coordinatorSessionId !== undefined || coordinatorEvent !== undefined
+  const coordinatorState = coordinatorEvent === undefined ? 'progress' : (
+    coordinatorEvent.type === 'run.coordinator.completed' ? 'complete' : coordinatorEvent.type === 'run.coordinator.failed' ? 'failed' : 'progress'
+  )
+  const coordinatorStateLabel = coordinatorState === 'complete'
+    ? t('runs.coordinator.complete')
+    : coordinatorState === 'failed' ? t('runs.coordinator.failed') : t('runs.coordinator.progress')
   return (
     <>
       <aside
@@ -2190,6 +2232,9 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
         ) : null}
       </div>
       <div className="dshd-inspector-body">
+        {coordinateNotice !== undefined ? (
+          <div className="dshd-plan-notice" data-tone={coordinateNotice.tone} role="status">{coordinateNotice.message}</div>
+        ) : null}
         <InspectorSection title={t('runs.goal')}>
           <p className="dshd-inspector-description">{run.goal}</p>
         </InspectorSection>
@@ -2209,6 +2254,23 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
           {run.completedAt !== undefined ? <InspectorRow label={t('runs.completed')}><span>{relativeTime(run.completedAt, t)}</span></InspectorRow> : null}
           {run.tokenUsage !== undefined ? <InspectorRow label={t('runs.tokens')}><span>{compactNumber(run.tokenUsage.total, t)}</span></InspectorRow> : null}
         </InspectorSection>
+        {coordinatorVisible ? (
+          <InspectorSection title={t('runs.coordinator')}>
+            <div className="dshd-coordinator" data-state={coordinatorState}>
+              <span className="dshd-coordinator-status">{coordinatorStateLabel}</span>
+            </div>
+            {run.coordinatorSessionId !== undefined ? (
+              <InspectorRow label={t('runs.coordinator.session')}>
+                <span className="dshd-mono">{run.coordinatorSessionId.slice(-8)}</span>
+              </InspectorRow>
+            ) : null}
+            {coordinatorEvent?.detail !== undefined && coordinatorEvent.type !== 'run.coordinator.started' ? (
+              <InspectorRow label={coordinatorState === 'failed' ? t('runs.error') : t('runs.coordinator.summary')}>
+                <span>{coordinatorEvent.detail}</span>
+              </InspectorRow>
+            ) : null}
+          </InspectorSection>
+        ) : null}
         <InspectorSection
           title={t('plans.title')}
           action={!terminal && onPlanCreate !== undefined ? (
@@ -2389,6 +2451,17 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
                 onClick={() => { void onPause(run, run.version).catch(() => undefined) }}
               >
                 <PauseIcon size={14} /><span>{t('runs.pause')}</span>
+              </button>
+            ) : null}
+            {(!suspended && (run.phase === 'created' || run.phase === 'planning') && onCoordinateRun !== undefined) ? (
+              <button
+                type="button"
+                className="dshd-primary"
+                disabled={coordinatePending}
+                aria-busy={coordinatePending}
+                onClick={() => { void coordinate().catch(() => undefined) }}
+              >
+                <span>{coordinatePending ? t('runs.coordinatePending') : t('runs.coordinate')}</span>
               </button>
             ) : null}
             {onCancel !== undefined ? (
@@ -2770,9 +2843,9 @@ function runSourceLabel(source: ProjectRunView['source'], t: ReturnType<typeof u
 }
 
 function runEventTone(type: ProjectRunEventView['type']): 'green' | 'amber' | 'red' | 'gray' {
-  if (type === 'run.completed' || type === 'plan.completed' || type === 'plan.approved') return 'green'
-  if (type === 'plan.rejected') return 'red'
-  if (type === 'run.created' || type === 'plan.created') return 'gray'
+  if (type === 'run.completed' || type === 'plan.completed' || type === 'plan.approved' || type === 'run.coordinator.completed') return 'green'
+  if (type === 'plan.rejected' || type === 'run.coordinator.failed') return 'red'
+  if (type === 'run.created' || type === 'plan.created' || type === 'run.coordinator.started') return 'gray'
   return 'amber'
 }
 

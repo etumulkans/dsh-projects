@@ -14,6 +14,13 @@ import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ProjectCatalog } from '../src/catalog/catalog.ts'
+import { CoordinatorService } from '../src/coordinator/coordinator-service.ts'
+import { PlanRunCoupler } from '../src/coordinator/coupling.ts'
+import type {
+  CoordinatorDriver,
+  CoordinatorDriverInput,
+  CoordinatorDriverResult,
+} from '../src/coordinator/session-driver.ts'
 import { RunPlanService } from '../src/plans/plan-service.ts'
 import { dshProjectsDomainSpec } from '../src/runs/spec.ts'
 import { ProjectRunService } from '../src/runs/run-service.ts'
@@ -51,6 +58,21 @@ async function boot(root: string): Promise<BootedStorage> {
 }
 
 const PROJECT_ID = '123e4567-e89b-42d3-a456-426614174000'
+
+/**
+ * Yield to the task queue until the coordinator settlement events are
+ * persisted. Each real-JSON write is a whole-file rewrite with fsync, so the
+ * settlement chain needs a generous budget of slow yields.
+ */
+async function settleCoordinator(runService: ProjectRunService, runId: string): Promise<void> {
+  for (let i = 0; i < 400; i += 1) {
+    const detail = await runService.runDetail(runId)
+    if (detail.events.some(event =>
+      event.type === 'run.coordinator.completed' || event.type === 'run.coordinator.failed')) return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  throw new Error('coordination did not settle in time')
+}
 
 function catalogFixture(): ProjectCatalog {
   return {
@@ -174,6 +196,102 @@ describe('ProjectRunService against real JSON storage', () => {
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(2)
     // 10 boot-1 events + 3 boot-2 events (resume, finalize, completed)
     expect(Object.keys(medium.tables.run_events ?? {})).toHaveLength(13)
+
+    dispose()
+  })
+
+  it('persists coordinator state (session id, plan, phase, events) across a domain reopen', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projects-run-it-'))
+    temporaryRoots.push(root)
+    const { ctx, facility, dispose } = await boot(root)
+    const clock = () => new Date(Date.UTC(2026, 7, 14, 3, 0, 0)).toISOString()
+    const agentProfile = { id: 'it', permissionPreset: 'it-preset', workerHost: 'local' }
+    // The Lead session "submits" one orchestrated plan, then completes.
+    const driver: CoordinatorDriver = {
+      async start(input: CoordinatorDriverInput): Promise<CoordinatorDriverResult> {
+        await input.onPlanSubmit({
+          pattern: 'supervisor',
+          rationale: 'coordinate the integration work',
+          tasks: [{ title: 'implement', description: 'build it' }],
+          summary: 'Supervisor plan: implement then verify.',
+        })
+        return { kind: 'completed' }
+      },
+    }
+
+    // --- boot 1: coordinate a run; the orchestrated plan requests approval ---
+    const first = new ProjectRunService(ctx, catalogFixture(), clock)
+    await first.start()
+    const firstCoupler = new PlanRunCoupler(ctx, first)
+    const firstPlans = new RunPlanService(ctx, first, clock, { onPlanStatus: event => firstCoupler.handle(event) })
+    firstPlans.start()
+    const firstCoordinator = new CoordinatorService(ctx, catalogFixture(), first, firstPlans, agentProfile, clock, driver)
+    firstCoordinator.start()
+    const run = await first.createRun({ goal: 'Integration: coordinator survives a restart', sourceRef: 'IT-C' }, { mode: 'project', projectId: PROJECT_ID })
+    const started = await firstCoordinator.coordinate(run.id)
+    expect(started).toMatchObject({ phase: 'planning' })
+    expect(started.coordinatorSessionId).toMatch(/^dsh-coordinator-/u)
+    await settleCoordinator(first, run.id)
+    const settled = await first.runDetail(run.id)
+    expect(settled.run).toMatchObject({ phase: 'awaiting_approval' })
+    expect(settled.run.coordinatorSessionId).toBe(started.coordinatorSessionId)
+    const planV1 = firstPlans.planList(run.id)[0]!
+    expect(planV1).toMatchObject({ version: 1, status: 'awaiting-approval', pattern: 'supervisor' })
+    expect(settled.events.some(event => event.type === 'run.coordinator.started')).toBe(true)
+    expect(settled.events.some(event => event.type === 'run.coordinator.completed')).toBe(true)
+    firstCoordinator.stop()
+    firstPlans.stop()
+    await first.stop()
+    await facility.closeAll()
+
+    // --- boot 2: reopen the same medium; all coordinator state comes back ---
+    const second = new ProjectRunService(ctx, catalogFixture(), clock)
+    await second.start()
+    const secondCoupler = new PlanRunCoupler(ctx, second)
+    const secondPlans = new RunPlanService(ctx, second, clock, { onPlanStatus: event => secondCoupler.handle(event) })
+    secondPlans.start()
+    try {
+      const detail = await second.runDetail(run.id)
+      expect(detail.run).toMatchObject({
+        id: run.id,
+        phase: 'awaiting_approval',
+        coordinatorSessionId: started.coordinatorSessionId,
+      })
+      expect(detail.events.map(event => event.type)).toEqual([
+        'run.coordinator.completed',
+        'run.phase.changed',
+        'plan.approval.requested',
+        'plan.created',
+        'run.coordinator.started',
+        'run.phase.changed',
+        'run.created',
+      ])
+      expect(detail.events.some(event => event.type === 'run.coordinator.completed' && event.detail === 'Supervisor plan: implement then verify.')).toBe(true)
+
+      // A manual approval on the second boot completes the coupled flow.
+      await secondPlans.transitionPlan(planV1.id, 'active')
+      const afterApproval = await second.runDetail(run.id)
+      expect(afterApproval.run).toMatchObject({ phase: 'executing', activePlanId: planV1.id })
+      expect(afterApproval.run.coordinatorSessionId).toBe(started.coordinatorSessionId)
+    } finally {
+      secondPlans.stop()
+      await second.stop()
+    }
+
+    // The medium table set is unchanged by Phase 3 (no new tables).
+    const entries = await readdir(root, { recursive: true })
+    const mediumFile = entries.find(entry => String(entry).includes('dsh_projects') && String(entry).endsWith('.json'))
+    expect(mediumFile).toBeDefined()
+    const medium = JSON.parse(await readFile(join(root, String(mediumFile)), 'utf8')) as {
+      unit: { name: string; version: number }
+      tables: Record<string, Record<string, unknown>>
+    }
+    expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
+    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs'])
+    expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
+    expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(1)
+    // 7 boot-1 events + 2 boot-2 events (approve, phase change to executing)
+    expect(Object.keys(medium.tables.run_events ?? {})).toHaveLength(9)
 
     dispose()
   })

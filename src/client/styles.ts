@@ -635,6 +635,11 @@ export const DASHBOARD_STYLES = String.raw`
 .dshd-plan-notice { padding: 8px 11px; border-radius: 6px; font-size: 11px; margin-bottom: 10px; }
 .dshd-plan-notice[data-tone="success"] { border: 1px solid #bfe3c8; background: #eefaf1; color: #1d7a3c; }
 .dshd-plan-notice[data-tone="error"] { border: 1px solid #e5b6bc; background: #fff2f4; color: #c52b3a; overflow-wrap: anywhere; }
+.dshd-coordinator { display: inline-flex; margin-bottom: 10px; }
+.dshd-coordinator-status { padding: 3px 9px; border-radius: 999px; font-size: 10px; white-space: nowrap; border: 1px solid #ccd5e3; background: #f4f7fc; color: #4a5a75; }
+.dshd-coordinator[data-state="progress"] .dshd-coordinator-status { border-color: #bcd7f2; background: #eef5fe; color: #164ec3; }
+.dshd-coordinator[data-state="complete"] .dshd-coordinator-status { border-color: #bfe3c8; background: #eefaf1; color: #1d7a3c; }
+.dshd-coordinator[data-state="failed"] .dshd-coordinator-status { border-color: #e5b6bc; background: #fff2f4; color: #c52b3a; }
 .dshd-plan-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .dshd-plan-item { border: 1px solid #dde4ee; border-radius: 8px; overflow: hidden; }
 .dshd-plan-row { width: 100%; display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 10px 12px; border: 0; background: #fff; text-align: left; cursor: pointer; }

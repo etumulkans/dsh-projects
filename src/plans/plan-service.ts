@@ -82,6 +82,15 @@ interface PlanTables {
 }
 
 /**
+ * Phase 3 optional hooks. `onPlanStatus` is awaited after a plan status
+ * transition has fully succeeded (plan update, built-in run coupling, event
+ * append, Cordis emit); omitting it preserves the Phase 2 behavior.
+ */
+export interface RunPlanServiceHooks {
+  readonly onPlanStatus?: (event: PlanStatusChangedEvent) => Promise<void>
+}
+
+/**
  * Owns Run Plan state inside the shared `dsh_projects` domain (opened by
  * {@link ProjectRunService}). Run coupling — setting/clearing
  * `run.activePlanId` and superseding the prior active plan — happens in the
@@ -94,6 +103,7 @@ export class RunPlanService {
     private readonly ctx: Context,
     private readonly runService: ProjectRunService,
     private readonly clock: () => string = () => new Date().toISOString(),
+    private readonly hooks: RunPlanServiceHooks = {},
   ) {}
 
   /** Borrow the shared domain tables; requires the Run service to be started. */
@@ -321,21 +331,34 @@ export class RunPlanService {
       }
       throw error
     }
-    await this.applyRunCoupling(tables, run, before, next)
+    const statusEvent = await this.applyRunCoupling(tables, run, before, next)
+    // Phase 3: the guarded run-phase coupling observes the fully-persisted
+    // transition; a hook failure never undoes the plan transition.
+    await this.hooks.onPlanStatus?.(statusEvent)
     return next
   }
 
   /**
    * Keep `run.activePlanId` and the prior active plan consistent with the new
    * status, then append the matching run event(s) and emit Cordis events.
+   * Returns the status-change payload so the Phase 3 hook can reuse it.
    */
   private async applyRunCoupling(
     tables: PlanTables,
     run: ProjectRunRecord | undefined,
     before: RunPlanRecord,
     next: RunPlanRecord,
-  ): Promise<void> {
+  ): Promise<PlanStatusChangedEvent> {
     const at = this.clock()
+    const statusEvent: PlanStatusChangedEvent = {
+      runId: next.runId,
+      projectId: next.projectId,
+      planId: next.id,
+      version: next.version,
+      from: before.status,
+      to: next.status,
+      at,
+    }
     switch (next.status) {
       case 'active': {
         // Spec §5.4: the prior active plan is retired with the NEW plan's stored
@@ -383,26 +406,10 @@ export class RunPlanService {
             detail: prior === undefined ? `Plan → v${next.version}` : `Plan v${prior.version} → v${next.version}`,
             at,
           })
-          this.ctx.emit('dsh-projects/run/replanned', {
-            runId: next.runId,
-            projectId: next.projectId,
-            planId: next.id,
-            version: next.version,
-            from: before.status,
-            to: next.status,
-            at,
-          })
+          this.ctx.emit('dsh-projects/run/replanned', statusEvent)
         }
-        this.ctx.emit('dsh-projects/plan/approved', {
-          runId: next.runId,
-          projectId: next.projectId,
-          planId: next.id,
-          version: next.version,
-          from: before.status,
-          to: next.status,
-          at,
-        })
-        return
+        this.ctx.emit('dsh-projects/plan/approved', statusEvent)
+        return statusEvent
       }
       case 'superseded': {
         if (run !== undefined && run.activePlanId === next.id) {
@@ -420,16 +427,8 @@ export class RunPlanService {
           detail: truncateDetail(next.replanReason ?? 'superseded'),
           at,
         })
-        this.ctx.emit('dsh-projects/plan/superseded', {
-          runId: next.runId,
-          projectId: next.projectId,
-          planId: next.id,
-          version: next.version,
-          from: before.status,
-          to: next.status,
-          at,
-        })
-        return
+        this.ctx.emit('dsh-projects/plan/superseded', statusEvent)
+        return statusEvent
       }
       case 'completed': {
         await this.appendRunEvent({
@@ -439,16 +438,8 @@ export class RunPlanService {
           title: `Plan v${next.version} completed`,
           at,
         })
-        this.ctx.emit('dsh-projects/plan/completed', {
-          runId: next.runId,
-          projectId: next.projectId,
-          planId: next.id,
-          version: next.version,
-          from: before.status,
-          to: next.status,
-          at,
-        })
-        return
+        this.ctx.emit('dsh-projects/plan/completed', statusEvent)
+        return statusEvent
       }
       case 'awaiting-approval': {
         await this.appendRunEvent({
@@ -458,16 +449,8 @@ export class RunPlanService {
           title: `Plan v${next.version} approval requested`,
           at,
         })
-        this.ctx.emit('dsh-projects/plan/approval-requested', {
-          runId: next.runId,
-          projectId: next.projectId,
-          planId: next.id,
-          version: next.version,
-          from: before.status,
-          to: next.status,
-          at,
-        })
-        return
+        this.ctx.emit('dsh-projects/plan/approval-requested', statusEvent)
+        return statusEvent
       }
       case 'draft': {
         await this.appendRunEvent({
@@ -477,16 +460,8 @@ export class RunPlanService {
           title: `Plan v${next.version} rejected`,
           at,
         })
-        this.ctx.emit('dsh-projects/plan/rejected', {
-          runId: next.runId,
-          projectId: next.projectId,
-          planId: next.id,
-          version: next.version,
-          from: before.status,
-          to: next.status,
-          at,
-        })
-        return
+        this.ctx.emit('dsh-projects/plan/rejected', statusEvent)
+        return statusEvent
       }
     }
   }

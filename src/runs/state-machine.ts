@@ -97,6 +97,9 @@ export function transitionRun(
     // Phase 2: the active plan survives run phase transitions (only plan
     // coupling clears/sets it).
     ...(run.activePlanId === undefined ? {} : { activePlanId: run.activePlanId }),
+    // Phase 3: the coordinator session reference survives run phase
+    // transitions (only the Coordinator service sets it).
+    ...(run.coordinatorSessionId === undefined ? {} : { coordinatorSessionId: run.coordinatorSessionId }),
     createdAt: run.createdAt,
     updatedAt: context.now,
     phaseChangedAt: context.now,

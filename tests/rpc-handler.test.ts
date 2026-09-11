@@ -496,3 +496,72 @@ describe('Dashboard RPC Run Plans', () => {
     expect(transition).toMatchObject({ ok: false, error: { code: 'bad-request' } })
   })
 })
+
+describe('Dashboard RPC Coordinator (Phase 3)', () => {
+  it('dispatches a validated runCoordinate and returns the run record', async () => {
+    const coordinate = vi.fn(async () => ({ id: PLAN_RUN_ID, phase: 'planning', coordinatorSessionId: 'dsh-coordinator-abc' }))
+    const coordinator = { coordinate } as unknown as import('../src/coordinator/coordinator-service.ts').CoordinatorService
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const result = await handleDashboardRpc(
+      runtime,
+      'runCoordinate',
+      { runId: PLAN_RUN_ID },
+      new AbortController().signal,
+      Promise.resolve(),
+      undefined,
+      undefined,
+      coordinator,
+    )
+
+    expect(coordinate).toHaveBeenCalledWith(PLAN_RUN_ID)
+    expect(result).toEqual({ ok: true, value: { id: PLAN_RUN_ID, phase: 'planning', coordinatorSessionId: 'dsh-coordinator-abc' } })
+  })
+
+  it('rejects runCoordinate payloads before dispatch', async () => {
+    const coordinate = vi.fn(async () => ({}))
+    const coordinator = { coordinate } as unknown as import('../src/coordinator/coordinator-service.ts').CoordinatorService
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const signal = () => new AbortController().signal
+
+    const missing = await handleDashboardRpc(runtime, 'runCoordinate', {}, signal(), Promise.resolve(), undefined, undefined, coordinator)
+    expect(missing).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    const nonUuid = await handleDashboardRpc(runtime, 'runCoordinate', { runId: 'nope' }, signal(), Promise.resolve(), undefined, undefined, coordinator)
+    expect(nonUuid).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    expect(coordinate).not.toHaveBeenCalled()
+  })
+
+  it('maps coordinator domain errors to structured bad requests', async () => {
+    const coordinate = vi.fn(async () => {
+      throw new DashboardDomainError('coordinator.runPhaseInvalid', 'wrong phase', { runId: PLAN_RUN_ID, phase: 'executing' })
+    })
+    const coordinator = { coordinate } as unknown as import('../src/coordinator/coordinator-service.ts').CoordinatorService
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const result = await handleDashboardRpc(
+      runtime,
+      'runCoordinate',
+      { runId: PLAN_RUN_ID },
+      new AbortController().signal,
+      Promise.resolve(),
+      undefined,
+      undefined,
+      coordinator,
+    )
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (result.ok) throw new Error('expected failure')
+    expect(decodeDashboardError(result.error.message)).toMatchObject({
+      dashboardCode: 'coordinator.runPhaseInvalid',
+      params: { runId: PLAN_RUN_ID, phase: 'executing' },
+    })
+  })
+
+  it('reports runCoordinate as unavailable when no Coordinator service is mounted', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const result = await handleDashboardRpc(runtime, 'runCoordinate', { runId: PLAN_RUN_ID }, new AbortController().signal, Promise.resolve())
+    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
+})

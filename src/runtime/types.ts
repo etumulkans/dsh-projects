@@ -8,7 +8,7 @@ import type {
   RegisterProjectInput,
 } from '../catalog/types.ts'
 import type { CreateTaskInput, TaskSourceCredentialStatus, UpdateTaskInput } from '../task-source/index.ts'
-import type { CreateRunInput, ProjectRunPhase, ProjectRunSummary, RunDetailView } from '../runs/types.ts'
+import type { CreateRunInput, ProjectRunPhase, ProjectRunRecord, ProjectRunSummary, RunDetailView } from '../runs/types.ts'
 import type { CreatePlanInput, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
 
 export interface TokenTotals {
@@ -195,6 +195,8 @@ export interface DashboardRpcMap {
     input: { planId: string; status: RunPlanStatus; expectedRevision?: number; replanReason?: string }
     output: RunPlanRecord
   }
+  /** Phase 3: start one Coordinator Lead session for a created/planning run. */
+  readonly runCoordinate: { input: { runId: string }; output: ProjectRunRecord }
 }
 
 export function emptyTokens(): TokenTotals {

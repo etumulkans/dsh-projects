@@ -39,6 +39,8 @@ export interface ProjectRunRecord {
   readonly error?: string
   /** Additive (Phase 2): the plan currently active for this run, if any. */
   readonly activePlanId?: string
+  /** Additive (Phase 3): session id of the most recent Coordinator Lead session. */
+  readonly coordinatorSessionId?: string
   readonly createdAt: string
   readonly updatedAt: string
   readonly phaseChangedAt: string
@@ -46,8 +48,10 @@ export interface ProjectRunRecord {
 }
 
 /**
- * High-level run event types: Phase 1 run events + Phase 2 plan events.
- * The stream is per-run, so plan and run events interleave on one seq.
+ * High-level run event types: Phase 1 run events + Phase 2 plan events +
+ * Phase 3 coordinator events.
+ * The stream is per-run, so plan, coordinator, and run events interleave on
+ * one seq.
  */
 export type ProjectRunEventType =
   | 'run.created'
@@ -60,6 +64,9 @@ export type ProjectRunEventType =
   | 'plan.superseded'
   | 'plan.completed'
   | 'run.replanned'
+  | 'run.coordinator.started'
+  | 'run.coordinator.completed'
+  | 'run.coordinator.failed'
 
 /** High-level Run event; detailed agent activity stays in Harness session logs. */
 export interface ProjectRunEventRecord {
@@ -90,6 +97,8 @@ export interface ProjectRunView {
   readonly error?: string
   /** Additive (Phase 2): the plan currently active for this run, if any. */
   readonly activePlanId?: string
+  /** Additive (Phase 3): session id of the most recent Coordinator Lead session. */
+  readonly coordinatorSessionId?: string
   readonly createdAt: string
   readonly updatedAt: string
   readonly phaseChangedAt: string

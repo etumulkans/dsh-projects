@@ -46,6 +46,8 @@ export interface DashboardDataPort {
     resultSummary?: string
   }): Promise<void>
   loadRunDetail(runId: string): Promise<RunDetailView>
+  /** Phase 3: start one Coordinator Lead session for a created/planning run. */
+  coordinateRun(runId: string): Promise<void>
   createPlan(input: CreatePlanInput): Promise<RunPlanRecord>
   loadPlans(runId: string): Promise<readonly RunPlanRecord[]>
   planTransition(input: {
@@ -193,6 +195,18 @@ export class DashboardDataController implements DashboardDataPort {
       const result = await this.rpc.call('/dsh-dashboard', 'runDetail', { runId }) as RpcResult<unknown>
       if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
       return parseRunDetail(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async coordinateRun(runId: string): Promise<void> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'runCoordinate', { runId }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
     } catch (error) {
       throw normalizeDashboardError(error)
     } finally {

@@ -41,6 +41,8 @@ export const projectRunRecordSchema = z.object({
   error: nonBlank.optional(),
   /** Additive (Phase 2): the plan currently active for this run, if any. */
   activePlanId: id.optional(),
+  /** Additive (Phase 3): prefixed session id (`dsh-coordinator-<uuid>`), not a bare uuid. */
+  coordinatorSessionId: nonBlank.optional(),
   createdAt: timestamp,
   updatedAt: timestamp,
   phaseChangedAt: timestamp,
@@ -56,6 +58,7 @@ export const RUN_EVENT_TYPES = [
   'run.created', 'run.phase.changed', 'run.completed',
   'plan.created', 'plan.approval.requested', 'plan.approved', 'plan.rejected',
   'plan.superseded', 'plan.completed', 'run.replanned',
+  'run.coordinator.started', 'run.coordinator.completed', 'run.coordinator.failed',
 ] as const satisfies readonly ProjectRunEventRecord['type'][]
 
 export const projectRunEventRecordSchema = z.object({
