@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ProjectCatalog } from '../catalog/catalog.ts'
 import type {
   AddDiscoveryRootInput,
+  ProjectCatalogSelection,
   ProjectRecord,
   ProjectScanResult,
   ProjectView,
@@ -164,6 +165,11 @@ export class DashboardRuntimeCoordinator {
       this.globalSelected = true
       await this.refreshGlobal(true)
     })
+  }
+
+  /** Current catalog selection; `undefined` before startup completes. */
+  selection(): ProjectCatalogSelection | undefined {
+    return this.catalog.selection()
   }
 
   async snapshot(): Promise<DashboardSnapshot> {

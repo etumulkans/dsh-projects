@@ -581,6 +581,50 @@ export const DASHBOARD_STYLES = String.raw`
   .dshd-pulsing { animation: none; }
   .dshd-context > svg { transition: none; }
 }
+.dshd-table-note { padding: 10px 12px; color: var(--dshd-muted); font-size: 11px; }
+.dshd-run-table .dshd-table-head,
+.dshd-run-table > button { grid-template-columns: minmax(180px, 1.6fr) minmax(120px, .8fr) minmax(110px, .7fr) minmax(70px, .45fr) 100px; }
+.dshd-run-table[data-global="true"] .dshd-table-head,
+.dshd-run-table[data-global="true"] > button { grid-template-columns: minmax(160px, 1.4fr) minmax(120px, .8fr) minmax(120px, .7fr) minmax(110px, .65fr) minmax(70px, .45fr) 100px; }
+.dshd-run-table > button[data-selected] { background: #eef4fc; box-shadow: inset 2px 0 0 var(--dshd-blue); }
+.dshd-run-table > button > span { display: flex; align-items: center; gap: 8px; }
+.dshd-run-view header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.dshd-run-view header .dshd-primary { height: 38px; padding: 0 15px; border: 1px solid var(--dshd-blue); border-radius: 6px; background: #fff; color: var(--dshd-blue); display: inline-flex; align-items: center; gap: 8px; font-size: 13px; white-space: nowrap; }
+.dshd-run-view header .dshd-primary:hover { background: var(--dshd-blue); color: #fff; }
+.dshd-run-view header .dshd-primary:disabled { opacity: .55; cursor: default; }
+.dshd-inspector-footer { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--dshd-border); background: #fff; }
+.dshd-inspector-footer > button { min-height: 36px; padding: 0 12px; border: 1px solid #ccd5e3; border-radius: 6px; background: #fff; display: inline-flex; align-items: center; gap: 7px; color: #273750; font-size: 11px; white-space: nowrap; }
+.dshd-inspector-footer > button:hover { background: #f9fbfe; border-color: #aab6c9; }
+.dshd-inspector-footer > button:disabled { opacity: .55; cursor: default; }
+.dshd-inspector-footer .dshd-primary { color: #fff; border-color: var(--dshd-blue); background: var(--dshd-blue); }
+.dshd-inspector-footer .dshd-primary:hover { background: #164ec3; border-color: #164ec3; }
+.dshd-inspector-footer .dshd-danger { color: #c52b3a; border-color: #e5b6bc; }
+.dshd-inspector-footer .dshd-danger:hover { background: #fff2f4; border-color: #d68f99; }
+.dshd-inspector-footer > .dshd-plain-control { min-height: 36px; padding: 0 10px; font-size: 11px; margin-left: auto; }
+.dshd-run-events { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.dshd-run-event { display: grid; grid-template-columns: 13px minmax(0, 1fr) auto; gap: 9px; align-items: start; font-size: 11px; }
+.dshd-run-event > div { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.dshd-run-event strong { color: #1d2b43; font-weight: 570; }
+.dshd-run-event > div span { color: #65738b; line-height: 1.45; overflow-wrap: anywhere; }
+.dshd-run-event small { color: #79869a; white-space: nowrap; font-size: 10px; }
+.dshd-modal .dshd-modal-card { width: min(520px, 100%); max-height: calc(100% - 24px); overflow: auto; border: 1px solid #d7deea; border-radius: 10px; background: #fff; box-shadow: 0 24px 72px rgba(15, 27, 49, .22); padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.dshd-modal .dshd-modal-card > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.dshd-modal .dshd-modal-card > header h3 { margin: 0; font-size: 16px; font-weight: 620; letter-spacing: -.02em; }
+.dshd-modal .dshd-modal-card > header button { width: 28px; height: 28px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 5px; background: transparent; }
+.dshd-modal .dshd-modal-card > header button:hover { background: #f0f3f8; }
+.dshd-modal .dshd-modal-card > label { display: flex; flex-direction: column; gap: 7px; color: #52617a; font-size: 11px; font-weight: 560; }
+.dshd-modal .dshd-modal-card input,
+.dshd-modal .dshd-modal-card textarea { width: 100%; border: 1px solid #cfd7e4; border-radius: 6px; background: #fff; font: inherit; font-size: 12px; }
+.dshd-modal .dshd-modal-card input { height: 38px; padding: 0 10px; }
+.dshd-modal .dshd-modal-card textarea { resize: vertical; min-height: 108px; padding: 10px; line-height: 1.5; }
+.dshd-modal .dshd-modal-card input:hover,
+.dshd-modal .dshd-modal-card textarea:hover { border-color: #aeb9ca; }
+.dshd-modal .dshd-modal-card > footer { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }
+.dshd-modal .dshd-modal-card > footer button { min-width: 94px; height: 37px; padding: 0 15px; border: 1px solid #cbd4e2; border-radius: 6px; background: #fff; font-size: 12px; }
+.dshd-modal .dshd-modal-card > footer button:hover { border-color: #aeb9ca; background: #f8fafe; }
+.dshd-modal .dshd-modal-card > footer .dshd-primary { color: #fff; border-color: var(--dshd-blue); background: var(--dshd-blue); }
+.dshd-modal .dshd-modal-card > footer .dshd-primary:hover { border-color: #0856dc; background: #0856dc; }
+.dshd-modal .dshd-modal-card > footer .dshd-primary:disabled { opacity: .55; cursor: default; }
 `
 
 /** Install once per browser plugin lifetime. */

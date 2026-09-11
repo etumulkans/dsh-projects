@@ -159,6 +159,54 @@ export const fixtureSnapshot: DashboardSnapshot = {
     ],
     discoveryRoots: [{ id: 'cbf5928c-bc76-43e2-944a-d41e96044fd9', path: 'F:\\Dev\\Code\\05_Apps_Tools', maxDepth: 4, confirmationRequired: true, createdAt: clock, updatedAt: clock }],
   },
+  runs: {
+    projectId: '08b8e62d-5a7c-4a3a-a582-b63278347db0',
+    total: 3,
+    runs: [
+      {
+        id: '9f1c2a50-4d3e-4b8a-9c21-7e5b0a6d1c22',
+        projectId: '08b8e62d-5a7c-4a3a-a582-b63278347db0',
+        goal: '为本地任务源实现健康检查端点并补齐单元测试',
+        source: 'manual',
+        phase: 'executing',
+        startedAt: '2026-08-14T02:12:00.000Z',
+        tokenUsage: totals(42_300, 8_410, 118_900, 4_200, 1_310),
+        createdAt: '2026-08-14T02:10:00.000Z',
+        updatedAt: '2026-08-14T02:29:40.000Z',
+        phaseChangedAt: '2026-08-14T02:12:00.000Z',
+        version: 3,
+      },
+      {
+        id: '2b8d4e71-6f0a-4c1b-8d35-1a9c4f7e0b53',
+        projectId: '08b8e62d-5a7c-4a3a-a582-b63278347db0',
+        goal: '调研 Agent Teams 实验能力并输出适配层方案',
+        source: 'manual',
+        sourceRef: 'RESEARCH-7',
+        phase: 'paused',
+        suspendedFrom: 'planning',
+        createdAt: '2026-08-14T01:05:00.000Z',
+        updatedAt: '2026-08-14T01:40:00.000Z',
+        phaseChangedAt: '2026-08-14T01:40:00.000Z',
+        version: 4,
+      },
+      {
+        id: 'c47a90e2-51b3-4d6f-a8e0-3f2d9c817a46',
+        projectId: '08b8e62d-5a7c-4a3a-a582-b63278347db0',
+        goal: '修复全局看板跨项目状态归一化',
+        source: 'tracker',
+        sourceRef: 'ENG-219',
+        phase: 'succeeded',
+        startedAt: '2026-08-13T08:02:00.000Z',
+        completedAt: '2026-08-13T09:15:00.000Z',
+        resultSummary: '已修复并补充回归测试。',
+        tokenUsage: totals(88_150, 17_930, 240_600, 9_800, 3_420),
+        createdAt: '2026-08-13T08:00:00.000Z',
+        updatedAt: '2026-08-13T09:15:00.000Z',
+        phaseChangedAt: '2026-08-13T09:15:00.000Z',
+        version: 8,
+      },
+    ],
+  },
 }
 
 const localIssues: readonly TaskIssue[] = [
@@ -212,6 +260,11 @@ export const localFixtureSnapshot: DashboardSnapshot = {
   catalog: {
     ...fixtureSnapshot.catalog,
     projects: fixtureSnapshot.catalog.projects.map(project => ({ ...project, currentWorkspace: project.id === '4bceae56-7cc1-4419-a912-a6ea110448fb' })),
+  },
+  runs: {
+    projectId: '4bceae56-7cc1-4419-a912-a6ea110448fb',
+    total: 0,
+    runs: [],
   },
 }
 

@@ -8,6 +8,7 @@ import type {
   RegisterProjectInput,
 } from '../catalog/types.ts'
 import type { CreateTaskInput, TaskSourceCredentialStatus, UpdateTaskInput } from '../task-source/index.ts'
+import type { CreateRunInput, ProjectRunPhase, ProjectRunSummary, RunDetailView } from '../runs/types.ts'
 
 export interface TokenTotals {
   readonly input: number
@@ -128,6 +129,8 @@ export interface DashboardSnapshot {
   }
   readonly configuration: DashboardConfigurationView
   readonly catalog: ProjectCatalogView
+  /** Additive DSH Projects section; absent from Hosts without the Run service. */
+  readonly runs?: ProjectRunSummary
 }
 
 export interface IssueDetailView {
@@ -177,6 +180,12 @@ export interface DashboardRpcMap {
   readonly scanProjects: { input: { rootId: string }; output: ProjectScanResult }
   readonly registerProjectCandidate: { input: { token: string }; output: DashboardSnapshot }
   readonly registerProject: { input: RegisterProjectInput; output: DashboardSnapshot }
+  readonly runCreate: { input: CreateRunInput; output: DashboardSnapshot }
+  readonly runDetail: { input: { runId: string }; output: RunDetailView }
+  readonly runTransition: {
+    input: { runId: string; to: ProjectRunPhase; expectedVersion?: number; error?: string; resultSummary?: string }
+    output: DashboardSnapshot
+  }
 }
 
 export function emptyTokens(): TokenTotals {

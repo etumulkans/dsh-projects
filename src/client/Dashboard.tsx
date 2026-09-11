@@ -27,6 +27,7 @@ import type {
 } from '../runtime/types.ts'
 import { buildTaskTimelinePage } from '../runtime/timeline.ts'
 import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
+import type { CreateRunInput, ProjectRunEventView, ProjectRunPhase, ProjectRunView, RunDetailView } from '../runs/types.ts'
 import type { DashboardDataPort } from './controller.ts'
 import { DashboardUiController } from './controller.ts'
 import { dashboardErrorMessage } from './errors.ts'
@@ -135,6 +136,9 @@ export function DashboardOverlay({ ui, data, openSession, t }: DashboardOverlayP
           onScanProjects={rootId => data.scanProjects(rootId)}
           onRegisterProjectCandidate={token => data.registerProjectCandidate(token)}
           onRegisterProject={input => data.registerProject(input)}
+          onCreateRun={input => data.createRun(input)}
+          onRunTransition={input => data.runTransition(input)}
+          onLoadRunDetail={runId => data.loadRunDetail(runId)}
           onOpenSession={(sessionId) => { ui.close(); openSession(sessionId) }}
         />
       </DashboardI18nProvider>
@@ -161,10 +165,19 @@ export interface DashboardSurfaceProps {
   readonly onScanProjects: (rootId: string) => Promise<ProjectScanResult>
   readonly onRegisterProjectCandidate: (token: string) => Promise<void>
   readonly onRegisterProject: (input: RegisterProjectInput) => Promise<void>
+  readonly onCreateRun?: ((input: CreateRunInput) => Promise<void>) | undefined
+  readonly onRunTransition?: ((input: {
+    readonly runId: string
+    readonly to: ProjectRunPhase
+    readonly expectedVersion?: number
+    readonly error?: string
+    readonly resultSummary?: string
+  }) => Promise<void>) | undefined
+  readonly onLoadRunDetail?: ((runId: string) => Promise<RunDetailView>) | undefined
   readonly onOpenSession: (sessionId: string) => void
 }
 
-type Tab = 'board' | 'runtime' | 'projects' | 'configuration'
+type Tab = 'board' | 'runtime' | 'runs' | 'projects' | 'configuration'
 type RuntimePhaseFilter = Extract<IssueRuntimeView['phase'], 'running' | 'retrying' | 'blocked'>
 type RuntimeFilter = RuntimePhaseFilter | 'attention'
 type ActionToastState = { readonly tone: 'success' | 'error'; readonly message: string }
@@ -197,6 +210,9 @@ export function DashboardSurface({
   onScanProjects,
   onRegisterProjectCandidate,
   onRegisterProject,
+  onCreateRun,
+  onRunTransition,
+  onLoadRunDetail,
   onOpenSession,
 }: DashboardSurfaceProps) {
   const t = useDashboardTranslation()
@@ -209,6 +225,8 @@ export function DashboardSurface({
   const [sourceFilter, setSourceFilter] = useState('all')
   const [taskEditor, setTaskEditor] = useState<TaskEditorState | undefined>()
   const [deleteTarget, setDeleteTarget] = useState<TaskIssue | undefined>()
+  const [selectedRunId, setSelectedRunId] = useState<string | undefined>()
+  const [newRunOpen, setNewRunOpen] = useState(false)
   const [catalogDialog, setCatalogDialog] = useState<CatalogDialogState | undefined>()
   const [catalogBusy, setCatalogBusy] = useState(false)
   const [pendingActions, setPendingActions] = useState<ReadonlySet<string>>(() => new Set())
@@ -227,6 +245,14 @@ export function DashboardSurface({
   const selectedIssue = selectedKey === undefined ? undefined : issueMap.get(selectedKey)
   const selectedRuntime = selectedKey === undefined ? undefined : runtimeMap.get(selectedKey)
   const global = snapshot?.selection.mode === 'global'
+  const runsSummary = snapshot?.runs
+  const runsList = useMemo(() => {
+    const rows = runsSummary?.runs ?? []
+    if (deferredFilter === '') return rows
+    return rows.filter(run =>
+      `${run.goal} ${run.phase} ${run.source} ${run.projectName ?? ''}`.toLocaleLowerCase('en-US').includes(deferredFilter))
+  }, [deferredFilter, runsSummary])
+  const selectedRun = selectedRunId === undefined ? undefined : (runsSummary?.runs ?? []).find(run => run.id === selectedRunId)
   const viewScope = global
     ? 'global'
     : `project:${snapshot?.selection.mode === 'project' ? snapshot.selection.projectId ?? snapshot.context?.projectRef ?? 'unknown' : 'unknown'}`
@@ -292,6 +318,8 @@ export function DashboardSurface({
     setSelectedKey(undefined)
     setTaskEditor(undefined)
     setDeleteTarget(undefined)
+    setSelectedRunId(undefined)
+    setNewRunOpen(false)
     setFilter('')
     setRuntimeFilter(undefined)
     setSourceFilter('all')
@@ -352,7 +380,7 @@ export function DashboardSurface({
                     </button>
                     {filterOpen ? (
                       <div className="dshd-filter-popover">
-                        <input autoFocus value={filter} onChange={event => setFilter(event.currentTarget.value)} placeholder={tab === 'projects' ? t('shell.filterProjects') : t('shell.filterIssues')} aria-label={tab === 'projects' ? t('shell.filterProjects') : t('shell.filterIssues')} />
+                        <input autoFocus value={filter} onChange={event => setFilter(event.currentTarget.value)} placeholder={tab === 'projects' ? t('shell.filterProjects') : tab === 'runs' ? t('runs.filterAria') : t('shell.filterIssues')} aria-label={tab === 'projects' ? t('shell.filterProjects') : tab === 'runs' ? t('runs.filterAria') : t('shell.filterIssues')} />
                         {filter !== '' ? <button type="button" onClick={() => setFilter('')}>{t('common.clear')}</button> : null}
                       </div>
                     ) : null}
@@ -406,6 +434,7 @@ export function DashboardSurface({
           <nav className="dshd-tabs" aria-label={t('shell.viewsAria')}>
             <TabButton active={tab === 'board'} onClick={() => setTab('board')}>{t('tab.board')}</TabButton>
             <TabButton active={tab === 'runtime'} onClick={() => setTab('runtime')}>{t('tab.runtime')}</TabButton>
+            <TabButton active={tab === 'runs'} onClick={() => setTab('runs')}>{t('tab.runs')}</TabButton>
             <TabButton active={tab === 'projects'} onClick={() => setTab('projects')}>{t('tab.projects')}</TabButton>
             <TabButton active={tab === 'configuration'} onClick={() => setTab('configuration')}>{t('tab.configuration')}</TabButton>
           </nav>
@@ -458,6 +487,17 @@ export function DashboardSurface({
             )
           ) : null}
           {tab === 'runtime' ? <RuntimeView snapshot={snapshot} sourceFilter={sourceFilter} onSelect={(key) => { setSelectedKey(key); setTab('board') }} /> : null}
+          {tab === 'runs' ? (
+            <RunListView
+              summary={runsSummary}
+              runs={runsList}
+              global={global}
+              busy={loading}
+              selectedRunId={selectedRunId}
+              onSelect={setSelectedRunId}
+              onNewRun={global || onCreateRun === undefined ? undefined : () => setNewRunOpen(true)}
+            />
+          ) : null}
           {tab === 'projects' ? (
             <ProjectsView
               snapshot={snapshot}
@@ -503,6 +543,35 @@ export function DashboardSurface({
           onEnterProject={selectedIssue.origin === undefined ? undefined : async () => {
             await runAction(`switch:${selectedIssue.origin!.projectId}`, () => onSwitchProject(selectedIssue.origin!.projectId), t('feedback.projectSwitched'))
             clearProjectScopedUi()
+          }}
+        />
+      ) : null}
+      {selectedRun !== undefined ? (
+        <RunInspector
+          key={selectedRun.id}
+          run={selectedRun}
+          global={global}
+          onClose={() => setSelectedRunId(undefined)}
+          onPause={onRunTransition === undefined ? undefined : (run, expectedVersion) => runAction(`run:pause:${run.id}`, () => onRunTransition({ runId: run.id, to: 'paused', expectedVersion }), t('feedback.runPaused'))}
+          onResume={onRunTransition === undefined ? undefined : (run, expectedVersion) => runAction(`run:resume:${run.id}`, () => onRunTransition({ runId: run.id, to: run.suspendedFrom ?? 'planning', expectedVersion }), t('feedback.runResumed'))}
+          onCancel={onRunTransition === undefined ? undefined : (run, expectedVersion) => runAction(`run:cancel:${run.id}`, () => onRunTransition({ runId: run.id, to: 'canceled', expectedVersion }), t('feedback.runCanceled'))}
+          cancelPending={(runId) => isPending(`run:cancel:${runId}`)}
+          pausePending={(runId) => isPending(`run:pause:${runId}`)}
+          resumePending={(runId) => isPending(`run:resume:${runId}`)}
+          onRefresh={(runId) => runAction('refresh', onRefresh, t('feedback.refreshed'))}
+          refreshPending={isPending('refresh')}
+          onLoadDetail={onLoadRunDetail}
+        />
+      ) : null}
+      {newRunOpen && onCreateRun !== undefined ? (
+        <NewRunDialog
+          onClose={() => setNewRunOpen(false)}
+          onSubmit={async (goal, sourceRef) => {
+            await runAction('run:create', () => onCreateRun({
+              goal,
+              ...(sourceRef === undefined ? {} : { sourceRef }),
+            }), t('feedback.runCreated'), false)
+            setNewRunOpen(false)
           }}
         />
       ) : null}
@@ -1916,6 +1985,311 @@ function ProjectScanDialog({ result, onClose, onRegister }: {
       </section>
     </div>
   )
+}
+
+function RunListView({ summary, runs, global, busy, selectedRunId, onSelect, onNewRun }: {
+  readonly summary?: import('../runs/types.ts').ProjectRunSummary | undefined
+  readonly runs: readonly ProjectRunView[]
+  readonly global: boolean
+  readonly busy: boolean
+  readonly selectedRunId?: string | undefined
+  readonly onSelect: (runId: string) => void
+  readonly onNewRun?: (() => void) | undefined
+}) {
+  const t = useDashboardTranslation()
+  const total = summary?.total ?? runs.length
+  return (
+    <div className="dshd-table-view dshd-run-view">
+      <header>
+        <div>
+          <h2>{t('runs.title')}</h2>
+          <p>{t('runs.description')}</p>
+        </div>
+        {onNewRun !== undefined ? <button type="button" className="dshd-primary" disabled={busy} onClick={onNewRun}><PlusIcon size={15} /><span>{t('runs.new')}</span></button> : null}
+      </header>
+      <div className="dshd-runtime-table dshd-run-table" data-global={global || undefined} role="table" aria-label={t('runs.tableAria')}>
+        <div className="dshd-table-head" role="row">
+          <span>{t('runs.goal')}</span>
+          {global ? <span>{t('runs.project')}</span> : null}
+          <span>{t('runs.phase')}</span>
+          <span>{t('runs.source')}</span>
+          <span>{t('runs.tokens')}</span>
+          <span>{t('runs.updated')}</span>
+        </div>
+        {runs.map(run => (
+          <button
+            type="button"
+            role="row"
+            key={run.id}
+            data-selected={selectedRunId === run.id || undefined}
+            onClick={() => onSelect(run.id)}
+          >
+            <strong title={run.goal}>{truncate(run.goal, 80)}</strong>
+            {global ? <span>{run.projectName ?? run.projectId}</span> : null}
+            <span><span className={`dshd-dot dshd-dot-${runPhaseTone(run.phase)}`} />{runPhaseLabel(run.phase, t)}</span>
+            <span>{runSourceLabel(run.source, t)}</span>
+            <span>{run.tokenUsage === undefined ? '—' : compactNumber(run.tokenUsage.total, t)}</span>
+            <span>{relativeTime(run.updatedAt, t)}</span>
+          </button>
+        ))}
+        {runs.length === 0 ? <div className="dshd-table-empty">{t('runs.empty')}</div> : null}
+        {total > runs.length ? <div className="dshd-table-note">{t('runs.showing', { shown: runs.length, total })}</div> : null}
+      </div>
+    </div>
+  )
+}
+
+function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cancelPending, pausePending, resumePending, onRefresh, refreshPending, onLoadDetail }: {
+  readonly run: ProjectRunView
+  readonly global: boolean
+  readonly onClose: () => void
+  readonly onPause?: ((run: ProjectRunView, expectedVersion: number) => Promise<void>) | undefined
+  readonly onResume?: ((run: ProjectRunView, expectedVersion: number) => Promise<void>) | undefined
+  readonly onCancel?: ((run: ProjectRunView, expectedVersion: number) => Promise<void>) | undefined
+  readonly cancelPending: (runId: string) => boolean
+  readonly pausePending: (runId: string) => boolean
+  readonly resumePending: (runId: string) => boolean
+  readonly onRefresh: (runId: string) => Promise<void>
+  readonly refreshPending: boolean
+  readonly onLoadDetail?: ((runId: string) => Promise<RunDetailView>) | undefined
+}) {
+  const t = useDashboardTranslation()
+  const [detail, setDetail] = useState<RunDetailView | undefined>()
+  const [detailError, setDetailError] = useState<unknown>()
+  const [detailLoading, setDetailLoading] = useState(false)
+  const terminal = isTerminalPhase(run.phase)
+  const suspended = run.phase === 'paused' || run.phase === 'blocked'
+
+  const loadDetail = async (): Promise<void> => {
+    if (onLoadDetail === undefined) return
+    setDetailLoading(true)
+    setDetailError(undefined)
+    try {
+      setDetail(await onLoadDetail(run.id))
+    } catch (loadError) {
+      setDetailError(loadError)
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (onLoadDetail === undefined) return
+    const timer = window.setTimeout(() => { void loadDetail() }, 0)
+    return () => window.clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run.id, onLoadDetail])
+
+  const events = detail?.events ?? []
+  return (
+    <aside
+      className="dshd-inspector"
+      aria-label={t('runs.inspectorAria', { goal: truncate(run.goal, 48) })}
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return
+        event.stopPropagation()
+        onClose()
+      }}
+    >
+      <header className="dshd-inspector-header">
+        <div><strong>{t('runs.title')}</strong><span title={run.goal}>{truncate(run.goal, 64)}</span></div>
+        <div>
+          <button type="button" aria-label={t('common.close')} onClick={onClose}><CloseIcon size={18} /></button>
+        </div>
+      </header>
+      <div className="dshd-inspector-status">
+        <Metric dot={runPhaseTone(run.phase)} label={runPhaseLabel(run.phase, t)} />
+        <span className="dshd-divider" />
+        <span>{runSourceLabel(run.source, t)}</span>
+      </div>
+      <div className="dshd-inspector-body">
+        <InspectorSection title={t('runs.goal')}>
+          <p className="dshd-inspector-description">{run.goal}</p>
+        </InspectorSection>
+        {run.resultSummary !== undefined ? (
+          <InspectorSection title={t('runs.result')}><p className="dshd-inspector-description">{run.resultSummary}</p></InspectorSection>
+        ) : null}
+        {run.error !== undefined ? (
+          <div className="dshd-inspector-attention" data-tone="retrying"><strong>{t('runs.error')}</strong><span>{run.error}</span></div>
+        ) : null}
+        <InspectorSection title={t('runs.details')}>
+          {global && run.projectName !== undefined ? <InspectorRow label={t('runs.project')}><span>{run.projectName}</span></InspectorRow> : null}
+          {run.sourceRef !== undefined ? <InspectorRow label={t('runs.sourceRef')}><span className="dshd-mono">{run.sourceRef}</span></InspectorRow> : null}
+          <InspectorRow label={t('runs.version')}><span>{run.version}</span></InspectorRow>
+          <InspectorRow label={t('runs.created')}><span>{absoluteTime(run.createdAt, t)}</span></InspectorRow>
+          <InspectorRow label={t('runs.updated')}><span>{relativeTime(run.updatedAt, t)}</span></InspectorRow>
+          {run.startedAt !== undefined ? <InspectorRow label={t('runs.started')}><span>{relativeTime(run.startedAt, t)}</span></InspectorRow> : null}
+          {run.completedAt !== undefined ? <InspectorRow label={t('runs.completed')}><span>{relativeTime(run.completedAt, t)}</span></InspectorRow> : null}
+          {run.tokenUsage !== undefined ? <InspectorRow label={t('runs.tokens')}><span>{compactNumber(run.tokenUsage.total, t)}</span></InspectorRow> : null}
+        </InspectorSection>
+        <InspectorSection title={t('runs.events')} grow>
+          {detailError !== undefined ? <div className="dshd-inspector-runtime-empty">{dashboardErrorMessage(detailError, t)}</div> : null}
+          {detailLoading && events.length === 0 ? <div className="dshd-inspector-runtime-empty">{t('runs.loadingEvents')}</div> : null}
+          {detailError === undefined && !detailLoading && events.length === 0 ? <div className="dshd-inspector-runtime-empty">{t('runs.noEvents')}</div> : null}
+          <ul className="dshd-run-events">
+            {events.map(event => (
+              <li key={event.id} className="dshd-run-event">
+                <span className={`dshd-dot dshd-dot-${runEventTone(event.type)}`} />
+                <div>
+                  <strong>{event.title}</strong>
+                  {event.detail !== undefined ? <span>{event.detail}</span> : null}
+                </div>
+                <small>{absoluteTime(event.at, t)}</small>
+              </li>
+            ))}
+          </ul>
+          {detail?.truncated ? <div className="dshd-table-note">{t('runs.eventsTruncated')}</div> : null}
+        </InspectorSection>
+      </div>
+      <footer className="dshd-inspector-footer">
+        {!terminal ? (
+          <>
+            {suspended && onResume !== undefined ? (
+              <button
+                type="button"
+                className="dshd-primary"
+                disabled={resumePending(run.id)}
+                aria-busy={resumePending(run.id)}
+                onClick={() => { void onResume(run, run.version).catch(() => undefined) }}
+              >
+                <PlayIcon size={14} /><span>{run.phase === 'paused' ? t('runs.resume') : t('runs.unblock')}</span>
+              </button>
+            ) : !suspended && onPause !== undefined ? (
+              <button
+                type="button"
+                className="dshd-primary"
+                disabled={pausePending(run.id)}
+                aria-busy={pausePending(run.id)}
+                onClick={() => { void onPause(run, run.version).catch(() => undefined) }}
+              >
+                <PauseIcon size={14} /><span>{t('runs.pause')}</span>
+              </button>
+            ) : null}
+            {onCancel !== undefined ? (
+              <button
+                type="button"
+                className="dshd-danger"
+                disabled={cancelPending(run.id)}
+                aria-busy={cancelPending(run.id)}
+                onClick={() => { void onCancel(run, run.version).catch(() => undefined) }}
+              >
+                <StopIcon size={14} /><span>{t('runs.cancel')}</span>
+              </button>
+            ) : null}
+          </>
+        ) : null}
+        <button
+          type="button"
+          className="dshd-plain-control"
+          disabled={refreshPending}
+          aria-busy={refreshPending}
+          onClick={() => { void onRefresh(run.id).then(() => { void loadDetail() }).catch(() => undefined) }}
+        >
+          <RefreshIcon size={14} /><span>{t('common.refresh')}</span>
+        </button>
+      </footer>
+    </aside>
+  )
+}
+
+function NewRunDialog({ onClose, onSubmit }: {
+  readonly onClose: () => void
+  readonly onSubmit: (goal: string, sourceRef?: string) => Promise<void>
+}) {
+  const t = useDashboardTranslation()
+  const [goal, setGoal] = useState('')
+  const [sourceRef, setSourceRef] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>()
+  const goalId = useId()
+  const submit = async (): Promise<void> => {
+    if (busy || goal.trim() === '') return
+    setBusy(true)
+    setError(undefined)
+    try {
+      await onSubmit(goal.trim(), sourceRef.trim() === '' ? undefined : sourceRef.trim())
+    } catch (submitError) {
+      setError(submitError)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="dshd-modal" role="dialog" aria-modal="true" aria-label={t('runs.newTitle')} onKeyDown={(event) => { if (event.key === 'Escape') event.stopPropagation() }}>
+      <div className="dshd-modal-card">
+        <header><h3>{t('runs.newTitle')}</h3><button type="button" aria-label={t('common.close')} onClick={onClose}><CloseIcon size={18} /></button></header>
+        <label htmlFor={goalId}>{t('runs.goal')}</label>
+        <textarea
+          id={goalId}
+          autoFocus
+          rows={5}
+          value={goal}
+          placeholder={t('runs.goalPlaceholder')}
+          onChange={event => setGoal(event.currentTarget.value)}
+        />
+        <label htmlFor={`${goalId}-ref`}>{t('runs.sourceRef')}</label>
+        <input
+          id={`${goalId}-ref`}
+          value={sourceRef}
+          placeholder={t('runs.sourceRefPlaceholder')}
+          onChange={event => setSourceRef(event.currentTarget.value)}
+        />
+        {error !== undefined ? <div className="dshd-error" role="alert">{dashboardErrorMessage(error, t)}</div> : null}
+        <footer>
+          <button type="button" onClick={onClose}>{t('common.cancel')}</button>
+          <button type="button" className="dshd-primary" disabled={busy || goal.trim() === ''} aria-busy={busy} onClick={() => { void submit() }}>
+            <span>{t('runs.create')}</span>
+          </button>
+        </footer>
+      </div>
+    </div>
+  )
+}
+
+const RUN_PHASE_KEYS = {
+  created: 'runs.phase.created',
+  planning: 'runs.phase.planning',
+  awaiting_approval: 'runs.phase.awaiting_approval',
+  executing: 'runs.phase.executing',
+  integrating: 'runs.phase.integrating',
+  validating: 'runs.phase.validating',
+  finalizing: 'runs.phase.finalizing',
+  succeeded: 'runs.phase.succeeded',
+  failed: 'runs.phase.failed',
+  canceled: 'runs.phase.canceled',
+  paused: 'runs.phase.paused',
+  blocked: 'runs.phase.blocked',
+} as const satisfies Record<ProjectRunPhase, `runs.phase.${ProjectRunPhase}`>
+
+function runPhaseLabel(phase: ProjectRunPhase, t: ReturnType<typeof useDashboardTranslation>): string {
+  return t(RUN_PHASE_KEYS[phase])
+}
+
+function runPhaseTone(phase: ProjectRunPhase): 'green' | 'amber' | 'red' | 'gray' {
+  if (phase === 'succeeded') return 'green'
+  if (phase === 'failed' || phase === 'blocked') return 'red'
+  if (phase === 'canceled') return 'gray'
+  if (phase === 'paused' || phase === 'awaiting_approval' || phase === 'finalizing') return 'amber'
+  return 'green'
+}
+
+function isTerminalPhase(phase: ProjectRunPhase): boolean {
+  return phase === 'succeeded' || phase === 'failed' || phase === 'canceled'
+}
+
+function runSourceLabel(source: ProjectRunView['source'], t: ReturnType<typeof useDashboardTranslation>): string {
+  if (source === 'manual') return t('runs.sourceManual')
+  return source
+}
+
+function runEventTone(type: ProjectRunEventView['type']): 'green' | 'amber' | 'red' | 'gray' {
+  if (type === 'run.completed') return 'green'
+  if (type === 'run.created') return 'gray'
+  return 'amber'
+}
+
+function truncate(value: string, maximum: number): string {
+  return value.length <= maximum ? value : `${value.slice(0, maximum - 1)}…`
 }
 
 function ConfigurationView({ snapshot }: { readonly snapshot?: DashboardSnapshot | undefined }) {

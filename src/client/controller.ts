@@ -3,6 +3,7 @@
 import type { ClientConnectionRpc, RpcResult } from '@deepseek-ai/dsh-client-connection/client'
 import type { DashboardSnapshot, TaskTimelinePage } from '../runtime/types.ts'
 import type { AddDiscoveryRootInput, ProjectScanResult, RegisterProjectInput } from '../catalog/types.ts'
+import type { CreateRunInput, ProjectRunPhase, RunDetailView } from '../runs/types.ts'
 import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
 import {
   DashboardRequestError,
@@ -35,6 +36,15 @@ export interface DashboardDataPort {
   scanProjects(rootId: string): Promise<ProjectScanResult>
   registerProjectCandidate(token: string): Promise<void>
   registerProject(input: RegisterProjectInput): Promise<void>
+  createRun(input: CreateRunInput): Promise<void>
+  runTransition(input: {
+    runId: string
+    to: ProjectRunPhase
+    expectedVersion?: number
+    error?: string
+    resultSummary?: string
+  }): Promise<void>
+  loadRunDetail(runId: string): Promise<RunDetailView>
 }
 
 /** Root overlay visibility shared by the sidebar trigger and shell-overlay entry. */
@@ -154,6 +164,33 @@ export class DashboardDataController implements DashboardDataPort {
     await this.call('registerProject', input, false, true)
   }
 
+  async createRun(input: CreateRunInput): Promise<void> {
+    await this.call('runCreate', input, false, true)
+  }
+
+  async runTransition(input: {
+    runId: string
+    to: ProjectRunPhase
+    expectedVersion?: number
+    error?: string
+    resultSummary?: string
+  }): Promise<void> {
+    await this.call('runTransition', input, false, true)
+  }
+
+  async loadRunDetail(runId: string): Promise<RunDetailView> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'runDetail', { runId }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseRunDetail(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
   private async readState(): Promise<void> {
     await this.call('state', {}, false)
   }
@@ -237,6 +274,43 @@ function parseTimelinePage(value: unknown): TaskTimelinePage {
     throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported task timeline data')
   }
   return value as TaskTimelinePage
+}
+
+function parseRunDetail(value: unknown): RunDetailView {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run detail data')
+  }
+  const detail = value as { run?: unknown; events?: unknown; truncated?: unknown }
+  if (!isRunView(detail.run)
+    || !Array.isArray(detail.events)
+    || !detail.events.every(isRunEventView)
+    || typeof detail.truncated !== 'boolean') {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run detail data')
+  }
+  return value as RunDetailView
+}
+
+function isRunView(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const run = value as Record<string, unknown>
+  return typeof run.id === 'string'
+    && typeof run.projectId === 'string'
+    && typeof run.goal === 'string'
+    && typeof run.phase === 'string'
+    && typeof run.createdAt === 'string'
+    && typeof run.updatedAt === 'string'
+    && typeof run.version === 'number'
+}
+
+function isRunEventView(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const event = value as Record<string, unknown>
+  return typeof event.id === 'string'
+    && typeof event.type === 'string'
+    && typeof event.title === 'string'
+    && (event.detail === undefined || typeof event.detail === 'string')
+    && typeof event.seq === 'number'
+    && typeof event.at === 'string'
 }
 
 function isTimelineEvent(value: unknown): boolean {
