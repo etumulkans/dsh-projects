@@ -1,5 +1,56 @@
 # Maintenance Log — DSH Projects
 
+## Phase 4 build (Task DAG + team execution) — 2026-09-12
+
+**Status: no incidents.** Phase 4 build committed as `009d9bc`
+(intent `c7690b0`, spec `515422d`/correction `8773e22`); the build gate was
+advanced to Test. **`etumulkans/dsh-projects` PR #2**
+(`dsh-projects-phase-4` → `main`) opened 2026-09-12 and **merged 2026-09-12**
+(merge commit `13638b1`).
+
+### Verification
+
+- `pnpm run typecheck` — clean
+- `pnpm run build` — clean (dual tsdown, host + client)
+- `pnpm vitest run --no-file-parallelism` — 294 passed / 3 failed (297
+  total); the 3 failures are the pre-existing, documented macOS tmpdir
+  environment failures in `tests/project-catalog.test.ts`
+  (`/var/folders` vs `/private/var/folders` realpath mismatch), unrelated to
+  Phase 4. Every Phase 4 suite is green: task-service (12),
+  task-state-machine (12), task-scheduler (16), task-adapters (18, incl. the
+  import-isolation source scan), dashboard-tasks-interactions (4), rpc-handler
+  (33), run-storage-integration (4, incl. the materialization leg).
+- Working tree clean; `dsh_projects` storage domain remains at format version 0
+  (Phase 4 adds the `tasks` table to the spec's declared set — every declared
+  table is created on domain open; no migration needed for installed instances).
+- Invariant check: `agentTeams` appears in exactly one source file
+  (`src/tasks/team-adapter.ts`); `subagents` appears in none — enforced by a
+  test, not just by review.
+
+### Known issues (tracked, non-blocking)
+
+1. **`project-catalog.test.ts` × 3** — macOS sandbox realpath mismatch
+   (`/var/folders` vs `/private/var/folders`). Fails identically before and
+   after every Phase 4 commit; not a regression.
+2. **PR merged** — `etumulkans/dsh-projects` PR #2
+   (`dsh-projects-phase-4` → `main`, Phase 4 Task DAG + team execution)
+   opened and **merged 2026-09-12** (merge commit `13638b1`).
+   `dsh-projects-phase-4` is its head (kept as the release marker).
+3. **Running GUI lags the repo** — the dashboard at http://127.0.0.1:3080 still
+   serves a pre-Phase-1 build; the Phase 4 UI (Tasks 任务 section, retry 重试,
+   worker banner) is only visible after the plugin is reinstalled/restarted
+   against this checkout's Phase 4 build output.
+4. **Redundant branch** — `dsh-projects-phase-0-2` (v0.8.0 prefix of the
+   merged PR #1) can be deleted.
+
+### Follow-ups (next intent cycle)
+
+- ~~Merge PR #2 when reviewed~~ — done 2026-09-12 (merge commit `13638b1`);
+  the Test stage records the verification outcome for the merged branch.
+- Delete the redundant `dsh-projects-phase-0-2` branch.
+- Decide whether to fix the `project-catalog.test.ts` tmpdir expectations
+  (normalize `realpath` in the assertions) or keep them documented.
+
 ## Cycle 2 (post v0.9.0 deploy) — 2026-09-12
 
 **Status: no incidents.** Phase 3 (Coordinator Lead) released as v0.9.0
