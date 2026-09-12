@@ -1,630 +1,431 @@
-# Spec — Phase 4: Task DAG + team execution
+# Spec — Phase 5: Git isolation + integration
 
-**Gate:** Design · **Intent:** `intent.md` §7 · **Master spec:** `DSH_PROJECTS_SPEC.md` §73 Phase 4, §11–§15, §28–§29, §31 · **Architecture:** `docs/dsh-projects-architecture.md` §3.3–§3.6, §4
+**Gate:** Design · **Intent:** `intent.md` §9 · **Master spec:** `DSH_PROJECTS_SPEC.md` §73 Phase 5, §16, §17 · **Architecture:** `docs/dsh-projects-architecture.md`
 
 ## 1. Goal and success
 
-An **active** plan's `PlannedTask` list becomes a live **ProjectTask** DAG on the
-`dsh_projects` domain: dependency-gated scheduling, execution by real Harness
-agents behind a fakeable worker seam (a local `ctx.agents` worker by default,
-Agent Teams when configured and mounted), with task/agent state, retries, and
-lifecycle visible in the existing Dashboard (zh/en).
+Phase 4 executes every live task in the project's existing working tree
+(default concurrency 1). Phase 5 gives each live task its own Git worktree +
+branch (one writer per worktree), commits the task's work onto its branch
+before the task may reach `succeeded`, integrates the task branches in a
+dedicated integration worktree with a deterministic merge-in-order strategy,
+and drives the run through the already-declared
+`integrating → validating → finalizing → succeeded` phases (Phase 1 state
+machine — no new run phases). Git metadata becomes inspectable in the
+existing Dashboard (zh/en).
 
-**Success (master spec §73):** *Coordinator can execute several
-dependent/parallel tasks* — end-to-end, persisted, restart-surviving, with an
-explicit "execution unavailable" state instead of fake agents when the
-composition mounts no agent runtime.
+**Success (master spec §73 Phase 5):** *parallel coding Agents safely
+produce an integrated branch* — end-to-end, persisted, restart-surviving,
+with an explicit "no Git isolation" degradation (shared tree, real notice)
+instead of fake worktree data when the project is not a Git repository.
 
 ## 2. Invariants (from `intent.md` §3)
 
-1. No invented APIs — the worker adapters bind to the **installed** runtime
-   surfaces (architecture doc §3.5/§3.6) resolved through the Cordis context;
-   `ctx.agentTeams` (experimental) is touched by **exactly one file**; no new
-   package dependency.
-2. No placeholder APIs, no fake UI data — every control is backed by a real
-   service on persistent storage; absence of a runtime is an explicit state.
-3. Additive only — the `dsh_projects` domain stays at **format version 0**
-   (storage-domain initializes absent declared tables as empty); existing
-   record shapes only gain optional fields; `DashboardSnapshot.version` stays 2.
-4. The run state machine stays the single authority for run phases; no new run
-   phases. Task state has its own pure machine.
-5. UI extends the existing `DashboardSurface` inspector; zh/en parity
+1. **Preserve the existing safe workspace strategy** — reuse
+   `src/workspace/path-safety.ts` (leaf normalization, containment, symlink
+   protection) and the existing `WorkspaceManager` Git discipline; no new
+   package dependency; Git only via `node:child_process` `execFile`.
+2. **No placeholder APIs, no fake UI data** — worktree/branch/commit fields
+   are real `git` results or absent; a non-Git project shows an explicit
+   notice; a foreign worktree occupying an expected path is refused, never
+   adopted and never deleted.
+3. **Additive only** — the `dsh_projects` domain stays at **format version
+   0**; existing record shapes only gain optional fields;
+   `DashboardSnapshot.version` stays 2.
+4. **One writer per worktree** (master spec §16 default rule) — exclusive by
+   construction (unique per-task naming) + persisted identity + the
+   conflict guard of §4.3.
+5. **Never touch the repository's default/protected branch** (master spec
+   §17) — only `dsh/run-*` branches are created and deleted; the integration
+   output is the integrated branch, nothing more.
+6. The run state machine stays the single authority for run phases; the
+   completion pipeline reuses existing phases; no new phases.
+7. UI extends the existing `DashboardSurface` inspector; zh/en parity
    compile-enforced.
-6. State survives a process restart (real-JSON storage integration test).
-7. Repo green: `pnpm run typecheck`, `pnpm run build`, `pnpm vitest run`
+8. State survives a process restart (real-JSON storage integration test);
+   provisioning is idempotent so a restart can resume without corruption.
+9. Repo green: `pnpm run typecheck`, `pnpm run build`, `pnpm vitest run`
    (modulo the documented pre-existing environment failures).
 
-## 3. Storage
+## 3. Storage (additive, domain stays v0)
 
-### 3.1 New table `tasks` (additive, domain stays v0)
+### 3.1 Task record — `src/tasks/types.ts` + `src/tasks/spec.ts`
 
-`src/runs/spec.ts` gains (the domain spec is the single declaration site, as
-with `plans`):
-
-```ts
-tasks: domainTable<TaskId, ProjectTaskRecord>(projectTaskRecordSchema),
-```
-
-New medium table set: `['plans', 'run_events', 'runs', 'tasks']`.
-
-### 3.2 `ProjectTaskRecord` (zod, `src/tasks/spec.ts`)
-
-```ts
-export const TASK_STATUSES = [
-  'pending', 'ready', 'running', 'blocked', 'awaiting-review',
-  'succeeded', 'failed', 'canceled',
-] as const satisfies readonly ProjectTaskStatus[]
-
-export const projectTaskRecordSchema = z.object({
-  id,                                  // uuid
-  runId: id,
-  planId: id,                          // plan version that materialized this task
-  planTaskId: z.string().regex(/^t[1-9][0-9]*$/),  // position id in the plan
-  title: nonBlank,                     // ≤300 (validated at plan creation)
-  description: nonBlank,               // ≤4000
-  role: nonBlank.optional(),           // role label from the plan (spec §15)
-  dependencies: z.array(id).default([]),  // task UUIDs, resolved at materialization
-  status: z.enum(TASK_STATUSES),
-  assignedAgentId: nonBlank.optional(),    // native agent identity (session id / member name)
-  workspaceId: nonBlank.optional(),        // RESERVED — filled by Phase 5, never by Phase 4
-  acceptanceCriteria: z.array(nonBlank).default([]),
-  attempt: z.number().int().min(0),       // executions already STARTED (initial 0)
-  maxAttempts: z.number().int().min(1).optional(),
-  outputSummary: nonBlank.optional(),     // ≤1000, from the worker result
-  error: nonBlank.optional(),
-  tokenUsage: tokenUsageSchema.optional(),// only when the runtime provides usage
-  startedAt: timestamp.optional(),        // last execution start
-  completedAt: timestamp.optional(),      // terminal transition time
-  createdAt: timestamp,
-  updatedAt: timestamp,
-  version: z.number().int().min(1),       // CAS, bumps on every accepted transition
-}).strict() as z.ZodType<ProjectTaskRecord>
-```
-
-`awaiting-review` is declared for schema completeness (master spec §11) but is
-**unreachable in Phase 4** — no edge enters or leaves it (Phase 7 approval
-modes own it). Phase 4 never writes `workspaceId`.
-
-### 3.3 Additive optional fields on existing records
-
-- `ProjectRunRecord` / `ProjectRunView`: `maxConcurrentAgents?: number`
-  (`int ≥ 1`, ≤ 50) — per-run task concurrency override; default
-  `DEFAULT_TASK_CONCURRENCY = 1` (intent §7.2, shared-tree safety pre-Phase 5).
-- `ProjectRunView`: `taskCounts?: TaskCountsView` —
-  `{ total, pending, ready, running, blocked, failed, succeeded }` (counts of
-  the run's tasks by status; absent when the Host has no task service).
-- `RunDetailView`: `tasks?: readonly ProjectTaskView[]` — the run's tasks in
-  plan (topological) order; absent when the Host has no task service.
-- `ProjectRunSummary` (snapshot `runs` section): `worker?: 'local' | 'agent-team' | 'unavailable'` —
-  the worker kind the Host can currently execute tasks with (host-level,
-  additive optional).
-
-### 3.4 Run event stream (additive types)
-
-`RUN_EVENT_TYPES` grows by 5 (13 → 18). Master spec §28 names per-task
-`task.created`; materialization of up to 50 tasks would flood the per-run audit
-stream, so the stream carries **one aggregate + per-task state changes**
-(spec-level decision, documented here):
-
-| Type | When | Detail (≤200, truncated) |
+| Field | Type | Notes |
 | --- | --- | --- |
-| `tasks.materialized` | a plan's tasks materialize | `plan v{N}: {M} tasks` |
-| `task.ready` | task becomes ready | task title |
-| `task.started` | an execution starts | `agent {assignedAgentId tail}, attempt {k}/{max}` |
-| `task.completed` | task succeeds | output summary |
-| `task.failed` | a task reaches terminal `failed` | `{error}; attempt {k}/{max}` (or `retries exhausted`) |
+| `workspaceId` | `string?` | RESERVED in Phase 4, populated in Phase 5: the canonical worktree path. Absent for non-Git projects and shared-tree runs. |
+| `branch` | `string?` | Task branch name (`dsh/run-<short>/<leaf>`); set together with `workspaceId`. |
+| `baseCommit` | `string?` | Full SHA of the repository `HEAD` at provisioning (creation only). |
+| `headCommit` | `string?` | Full SHA of the task branch after the task's commit; equal to `baseCommit` when the task produced no changes. Set on `succeeded`. |
 
-Cordis events (payloads persist-first, same pattern as Phase 2/3):
-`dsh-projects/tasks/materialized`, `dsh-projects/task/ready`,
-`dsh-projects/task/started`, `dsh-projects/task/completed`,
-`dsh-projects/task/failed` — `{ runId, projectId, taskId?, planId, at }`
-(`taskId` omitted on `tasks.materialized`).
+`ProjectTaskView` gains the same four optional fields (lossless projection).
 
-## 4. Task state machine (pure — `src/tasks/state-machine.ts`)
+### 3.2 Run record — `src/runs/types.ts` + `src/runs/spec.ts`
 
-Single authority for task status invariants; the same shape as
-`runs/state-machine.ts` + `plans/state-machine.ts` (pure table + `transitionTask`
-producing the next record; persistence/coupling/events are the service's job).
+| Field | Type | Notes |
+| --- | --- | --- |
+| `integrationBranch` | `string?` | Set when integration completes (direct CAS update on the borrowed `runs` table — the Phase 3 `coordinatorSessionId` pattern). Survives to `succeeded`. |
+| `integrationHead` | `string?` | Full SHA of the integrated branch tip at integration completion. |
 
-```
-pending         → ready | blocked | canceled
-ready           → running | canceled
-running         → succeeded | failed | ready | canceled
-blocked         → ready | canceled
-awaiting-review → (none — unreachable in Phase 4)
-succeeded / failed / canceled → (terminal)
-failed          → ready        // operator retry (taskRetry RPC), the one edge into a "live" state from terminal
-```
+The run view spreads the record, so both flow automatically into
+`runDetail` and the snapshot run summary.
 
-Rules:
+### 3.3 Run event types — additive to `RUN_EVENT_TYPES`
 
-- Transition to the current status is a **rejected no-op** (idempotency comes
-  from CAS on `version`, not silent re-entry) — `TaskTransitionError`.
-- `running → ready` is the internal retry edge: the service may only take it
-  while `attempt < maxAttempts` (the service enforces the budget; the machine
-  enforces the edge).
-- `failed → ready` (operator retry) is allowed only from `failed`; it does not
-  change `attempt` (the next `ready → running` bumps it).
-- `blocked → ready` re-readies a task whose failed dependency was retried and
-  later succeeded (dependency recovery, computed by the scheduler).
-- Terminal entry sets `completedAt`; `failed` carries `error`; `succeeded`
-  carries `outputSummary`.
-- Every accepted transition bumps `version` and refreshes `updatedAt`.
-- `transitionTask(task, to, context)` validates the edge and returns the next
-  record; `context` carries `error?`/`outputSummary?` (required by target,
-  enforced) — explicit-optional discipline applies (no `undefined` props).
+`run.integration.started` (detail: the integration branch),
+`run.integration.completed` (detail: integrated branch + merged task
+positions), `run.integration.failed` (detail: conflicting paths or the
+error, truncated to `EVENT_DETAIL_LIMIT`).
 
-## 5. DAG scheduler (pure — `src/tasks/scheduler.ts`)
+Extending the enum is additive (stored records unchanged) → the domain
+version stays 0. The medium table set is unchanged:
+`['plans', 'run_events', 'runs', 'tasks']`.
 
-Pure functions over the run's task list; **generalizes the existing
-`src/orchestrator/scheduling.ts` helpers** (intent §7.1.3, master spec §12:
-do not build a parallel mechanism):
+## 4. Git workspace model — `src/tasks/git-workspace.ts` + `src/workspace/git.ts`
 
-- `failureRetryDelay(attempt, maximumMs)` — **reused as-is** from
-  `orchestrator/scheduling.ts` (10 s, doubling, capped). Constant
-  `MAX_RETRY_DELAY_MS = 300_000` (5 min) in `src/tasks/constants.ts`.
-- `compareTasks(left, right)` — new sibling of `compareCandidates`: earliest
-  `createdAt`, then `id` (`localeCompare`) — deterministic pick order.
-- `stateLimit`-style counting — the concurrency check counts `running` tasks
-  against the effective limit (`run.maxConcurrentAgents ?? 1`); the helper
-  itself is a 3-line local count (the orchestrator's `stateLimit` reads a
-  config map keyed by state, which has no task analogue — documented
-  deviation: reuse where the shape fits, generalize where it doesn't).
+### 4.1 Shared Git helper (extraction, behavior unchanged)
 
-```ts
-/** Throws TaskGraphError (code task.dagInvalid) on unknown dep, self-dep, or cycle. */
-export function validateTaskGraph(tasks: readonly ProjectTaskRecord[]): void
+`runGit(cwd, args, timeoutMs, signal?)` — the exact helper
+`WorkspaceManager` uses today (`execFile('git', ['-C', cwd, …])`, bounded
+output buffer, abort-aware, stderr-tailed error message) — is extracted from
+`src/workspace/manager.ts` into `src/workspace/git.ts`. The existing
+`WorkspaceManager` and the new task worktree module both import it.
+`tests/workspace-manager.test.ts` staying green is the regression proof.
 
-/**
- * The minimal transition set that brings the statuses in line with the
- * dependency facts (pure, idempotent — returns [] when nothing changes):
- * - pending, all deps succeeded        → ready
- * - pending, any dep terminal failed   → blocked
- * - blocked, all deps succeeded again  → ready   (dependency recovery)
- */
-export function computeDependencyTransitions(
-  tasks: readonly ProjectTaskRecord[],
-): readonly { readonly taskId: string; readonly to: 'ready' | 'blocked' }[]
+New constant: `GIT_OPERATION_TIMEOUT_MS = 30_000` (`src/tasks/constants.ts`).
 
-/**
- * The ready tasks eligible for an execution slot NOW: status ready,
- * concurrency slot free (running < limit), and retry backoff elapsed
- * (no backoff for first attempts; `updatedAt + failureRetryDelay(attempt,
- * MAX_RETRY_DELAY_MS) ≤ now` for re-ready retries). Deterministic order via
- * compareTasks; returns at most `freeSlots` ids.
- */
-export function pickReadyTasks(
-  tasks: readonly ProjectTaskRecord[],
-  limit: number,
-  now: number,
-): readonly string[]
-```
+### 4.2 Naming (pure, deterministic)
 
-Cycle detection is Kahn's algorithm over the task `dependencies` map. Because
-plan creation already constrains dependencies to earlier tasks (Phase 2,
-`plan.taskDependencyInvalid`), cycles and unknown refs are impossible by
-construction — `validateTaskGraph` is the defensive second line at
-materialization (intent §7.1.2: invalid DAGs are rejected, never persisted).
-
-## 6. Worker seam and adapters (master spec §13/§14/§31)
-
-### 6.1 The seam (fakeable — `src/tasks/worker.ts`)
-
-The same pattern as the Phase 3 `CoordinatorDriver`: the service talks to a
-narrow interface; tests inject a fake; production adapters bind to the
-installed runtime.
-
-```ts
-export interface TaskWorkerInput {
-  readonly taskId: string
-  readonly runId: string
-  readonly projectId: string
-  /** Plugin-generated session id (`dsh-task-<uuid>`), as in Phase 3. */
-  readonly sessionId: string
-  readonly cwd: string            // the project root (Phase 4: shared tree, Phase 5 isolates)
-  readonly title: string
-  readonly description: string
-  readonly role?: string
-  readonly acceptanceCriteria: readonly string[]
-  readonly attempt: number
-  readonly signal: AbortSignal
-}
-
-export interface TaskWorkerResult {
-  readonly kind: 'succeeded' | 'failed'
-  /** Concise human-readable summary; required on success (≤1000). */
-  readonly summary?: string
-  /** Required on failure. */
-  readonly error?: string
-  /** The native agent identity actually used (session id / member name). */
-  readonly agentId?: string
-  readonly tokenUsage?: TokenTotals   // only when the runtime reports usage
-  readonly turnCount?: number
-}
-
-export type TaskWorkerKind = 'local' | 'agent-team' | 'unavailable'
-
-export interface TaskWorker {
-  readonly kind: TaskWorkerKind
-  start(input: TaskWorkerInput): Promise<TaskWorkerResult>
-  /** Best-effort stop of one live agent; resolves even when unknown. */
-  stop(agentId: string): Promise<void>
-}
-```
-
-Semantics: `start` resolves exactly once (success, failure, or — when
-`signal` aborts — a failure with `error: 'task execution aborted'`). The
-service never interprets worker internals; summaries/errors are truncated and
-persisted by the service. A success result without a usable summary (blank /
->1000) is treated by the service as a failure (`error: 'worker returned no
-usable summary'`) — a task without a summary cannot be `succeeded`.
-
-**Design correction (grounded in the installed Harness source, supersedes the
-intent's "BackgroundAgentAdapter over `ctx.subagents`"):** the `ctx.subagents`
-surface (`packages/subagent` in the Harness checkout) is an **agent-to-agent
-delegation API** — `startContinuable`'s request requires
-`parent: Agent` ("The spawning agent. In-process providers derive workspace,
-lineage, and delegation depth from its durable session state"), and
-`sendMessage`/`interrupt` require a live sender/authority Agent. A
-service-initiated task worker has no parent Agent, so that surface is **not
-usable for Phase 4 service-initiated tasks** and is not implemented (invariant
-1 + 2: no invented APIs, no placeholder adapters). It remains the foundation
-for coordinator *delegation* (master spec §49 territory, later phase). The
-MVP worker is the **local Harness worker** per master spec §31 — the
-`ctx.agents.create` mechanism that architecture doc §3.3 designates as the
-"Phase 4+ worker foundation" and that `HarnessAgentRunner` /
-`HarnessCoordinatorDriver` already use.
-
-### 6.2 `LocalTaskWorker` (default, always available — `src/tasks/local-adapter.ts`)
-
-`ctx.agents` is a hard dependency of this plugin (it is in the `inject`
-list), so the local worker is available in every composition of the plugin.
-It mirrors the `HarnessAgentRunner`/`HarnessCoordinatorDriver` mechanism:
-
-- `ctx.agents.create({ sessionId, meta: { cwd }, agentOptions: { provider, model },
-  signal, setup })` — model via `ctx.agentDefaultModel.currentSelection()` +
-  `installModelSelection`; permission preset via
-  `ctx.permissionPresets.set(session, …)`.
-- `setup` registers the result-reporting tool **`dsh_projects_report_task_result`**
-  (the `defineTool` seam, same schema-subset discipline as Phase 3's
-  `dsh_projects_submit_plan`): input `{ kind: 'succeeded' | 'failed',
-  summary?: string, error?: string }`, **reportable exactly once** per session
-  (a second call is a tool error).
-- One `followup(createUserMessage(…))` carrying the task prompt (title,
-  description, role guidance, acceptance criteria, cwd note, the report
-  contract); `whenIdle()`; `ctx.sessions.flush(session)`;
-  `lastTurnEnd` scan (the `harness-runner.ts` helper shape:
-  `completed` / `error` / `blocked`).
-- Result: the tool report when it was made (summary/error pass through; the
-  service enforces the summary rule); when the session ends **without** a
-  report → `{ kind: 'failed', error: 'session ended without reporting a task
-  result' }` (an `error`/`blocked` turn-end carries the native reason).
-- `tokenUsage`/`turnCount`: accumulated from the session's
-  `session/event` stream (`assistant/message` usage, `addUsage` pattern from
-  `harness-runner.ts`); omitted when the stream reports none.
-- `stop(agentId)`: resolves the tracked session's AbortController (the
-  service tracks `agentId → AbortController`); the adapter's `finally`
-  flushes + disposes the handle.
-
-### 6.3 `TeamTaskWorker` (opt-in — `src/tasks/team-adapter.ts`)
-
-**The only file in the codebase that may reference the experimental
-`ctx.agentTeams` surface** (architecture doc §4; invariant 1). The installed
-`TeamService` is caller-scoped — every method takes `caller: Agent` — so the
-adapter establishes **one Lead session per run** (`ctx.agents.create`, the
-every-live-root-is-an-implicit-Lead rule, architecture doc §3.5) and, per
-task, `spawnTeammate(leadAgent, …)`; task work is posted through the native
-task board (`createTask`/`assignTask`), results arrive via the team task
-board / mailbox (`updateTask` completion carrying the summary), interruption
-via `interrupt(leadAgent, targetName)` on cancellation/retirement. Teammates
-are disposed when their work settles. Because the surface is explicitly
-experimental, this adapter is expected to be the only file that needs
-significant modification if the API changes (master spec §13).
-
-### 6.4 Availability and selection (honest degradation)
-
-- The experimental surface is **resolved through the Cordis context at
-  startup** (structural typing in the adapter files; no package imports — the
-  plugin's dependency list is unchanged; the experimental package is
-  host-mounted, architecture doc §3.5). `ctx.subagents` is not referenced by
-  any file (enforced by the source-scan test, §12).
-- Additive optional plugin config (`src/config.ts`):
-  `projects?: { taskWorker?: 'local' | 'agent-teams' }`, default `'local'`.
-- Resolution at `ProjectTaskService.start()`:
-  - `'local'` (default) → `LocalTaskWorker` (always constructible —
-    `ctx.agents` is injected).
-  - `'agent-teams'`: `ctx.agentTeams` present → `TeamTaskWorker`; absent →
-    `UnavailableWorker` — **no silent fallback** to the local worker (the
-    operator asked for teams; silently getting local execution is a lie).
-    The structured error surfaces instead (intent §7.1.4, invariant 2).
-- `UnavailableWorker.start` rejects with `DashboardDomainError('task.workerUnavailable', …)`.
-  The service never starts a task with it: scheduling simply finds no eligible
-  worker, the run-level state and UI show *execution unavailable* (a
-  `task.workerUnavailable` error on any explicit action), and no task leaves
-  `pending`/`ready` with a fake identity.
-
-## 7. `ProjectTaskService` (host — `src/tasks/task-service.ts`)
-
-Owns task state inside the shared `dsh_projects` domain (borrowed from
-`ProjectRunService.domain()`, one open per domain). Mirrors
-`CoordinatorService`'s structure (tables on start, `stop()` aborts in-flight
-worker signals and drops references, background work tracked per task).
-
-```ts
-constructor(
-  ctx, catalog, runService,
-  clock: () => string = () => new Date().toISOString(),
-  worker: TaskWorker,                 // resolved in src/index.ts (§6.4)
-  retryClock?: () => number,          // injectable now() for backoff (tests)
-)
-start(): void                          // borrow tables { tasks, runs, run_events, plans }; subscribe run-phase events; start tick interval
-stop(): void                           // abort in-flight signals, clear interval, unsubscribe, drop refs — idempotent
-workerKind(): TaskWorkerKind           // for the snapshot projection
-```
-
-### 7.1 Materialization (from the plan hook)
-
-`handlePlanStatus(event: PlanStatusChangedEvent)` — the Phase 4 half of the
-`RunPlanService.onPlanStatus` hook (wired next to `PlanRunCoupler` in
-`src/index.ts`, awaited sequentially; a hook failure never undoes the plan
-transition):
-
-| plan `to` | action |
+| Function | Result |
 | --- | --- |
-| `active` | retire the run's live tasks, then materialize the plan's tasks (below) |
-| `superseded` / `completed` | if the event's plan is the run's `activePlanId`: retire the run's live tasks (the new active plan materializes on its own `active` event) |
-| `draft` (rejected) / `awaiting-approval` | no-op (tasks only exist once a plan is active) |
+| `shortRunId(runId)` | First 8 characters of the run UUID (hex — ref-safe). |
+| `taskLeaf(planTaskId)` | `workspaceLeaf(planTaskId)` from `path-safety.ts` — always normalized; the function never trusts its input even though the schema already enforces `^t[1-9][0-9]*$`. |
+| `taskBranchName(runId, planTaskId)` | `dsh/run-<shortRunId>/<leaf>` (master spec §16). |
+| `integrationBranchName(runId)` | `dsh/run-<shortRunId>/integration`. |
+| `taskWorktreePath(projectRoot, runId, planTaskId)` | `<projectRoot>/worktree/run-<shortRunId>/<leaf>` (master spec §16 example layout). |
+| `integrationWorktreePath(projectRoot, runId)` | `<projectRoot>/worktree/run-<shortRunId>/integration`. |
 
-**Retire:** every non-terminal task of the run → `canceled` (CAS; running
-tasks also `worker.stop(assignedAgentId)`), so a superseded plan's work never
-keeps running.
+Every name is derived from `(projectRoot, runId, planTaskId)` — **never from
+task title/description text** (master spec §16: “Never trust task text
+directly as a filesystem path”). An 8-character short id can in principle
+collide across runs; the conflict guard of §4.3 is the backstop (a foreign
+identity at that location is refused, never adopted). The `worktree/`
+directory is untracked in the main checkout — by design (master spec §16
+layout); the harness never writes the project's `.gitignore`.
 
-**Materialize** (plan with `tasks.length === 0` → no-op with a log line — a
-taskless `direct` plan means the run has nothing to execute):
+### 4.3 `TaskWorktreeManager` (host module)
 
-1. `validateTaskGraph` over the plan tasks (mapped to would-be records) —
-   `task.dagInvalid` aborts with zero rows written.
-2. Persist all rows: `status: 'pending'`, `attempt: 0`,
-   `dependencies` resolved from plan positions (`tN` → that task's new uuid),
-   `role`/`acceptanceCriteria` copied, `maxAttempts: DEFAULT_MAX_ATTEMPTS (3)`.
-3. One `tasks.materialized` run event + Cordis emit.
-4. `tick()` — the first ready wave is computed and started immediately.
+`provisionTaskWorktree({ repositoryRoot, projectRoot, runId, planTaskId }) → { path, branch, baseCommit?, createdNow }`:
 
-### 7.2 The tick (scheduler application)
+1. Compute path/branch; `assertContained(projectRoot, path)`; create the
+   `worktree/run-<short>/` parent with the existing manager's discipline
+   (real directory, not a symlink, `realpath` revalidation).
+2. **Idempotent reuse (restart safety):** when the path already exists it is
+   adopted only if it is a real directory, a worktree of `repositoryRoot`
+   (common-directory equality — the `WorkspaceManager.assertGitWorktree`
+   check), and its checked-out branch equals the expected task branch. All
+   three → reuse (`createdNow: false`, no `baseCommit` returned — the
+   persisted record keeps the original base). Any mismatch →
+   `task.workspaceConflict` (one-writer invariant; the foreign tree is
+   neither adopted nor deleted).
+3. **Create:** `git -C <repositoryRoot> worktree add -b <branch> <path>
+   HEAD`, then `baseCommit = git rev-parse HEAD` (repository root), then
+   revalidate (common-directory check). Any Git failure →
+   `task.worktreeFailed` (message carries the stderr tail).
 
-`tick()` is the single application point for scheduling decisions; guarded by
-an in-tick flag (re-entrant calls coalesce into one trailing run). Triggered
-by: materialization, every worker result, `taskRetry`, run-phase events, and a
-5-second interval (retry backoff elapsing; belt-and-braces after crashes of
-the event flow — Phase 10 owns full reconciliation).
+`commitTaskWork({ path, planTaskId, title }) → { headCommit, committed }`:
 
-Per tick (each step through the CAS path, events per §3.4):
+- `git -C <path> status --porcelain`; when changes exist: `git add -A` +
+  `git commit -m "dsh task <planTaskId>: <title ≤ 120 chars>"`. The commit
+  uses the repository's configured identity — **no invented identity**; a
+  missing identity is `task.commitFailed` with an actionable message.
+  Clean tree → `committed: false`.
+- `headCommit = git rev-parse HEAD` (equals `baseCommit` when nothing was
+  committed).
 
-1. `computeDependencyTransitions` → apply `pending→ready`, `pending→blocked`,
-   `blocked→ready` (idempotent: nothing to do when statuses already agree).
-2. Dead-DAG check (intent §7.1.9): if the run is `executing`, the task set is
-   non-empty, and **no** task is `pending`/`ready`/`running`/`blocked-recoverable`
-   (i.e. every remaining non-terminal task is `blocked` on a terminal `failed`
-   dependency) with at least one `failed` → `runService.transitionRun(runId,
-   'blocked')` guarded to `from executing` (guard miss = logged no-op, the
-   `PlanRunCoupler` pattern). The run stays `blocked` (retryable: resume →
-   `executing` → `tick()`; a retried dependency can unblock dependents via
-   `blocked → ready`).
-3. `pickReadyTasks` (limit = `run.maxConcurrentAgents ?? 1`,
-   `now = retryClock()`) → for each id, `startExecution(task)`.
-4. All-succeeded check: nothing to do to the run (intent §7.1.9 decision —
-   the run stays `executing` until Phase 5 integration); the tick simply
-   stops finding work.
+`removeTaskWorktree({ repositoryRoot, projectRoot, path }) → boolean`:
 
-### 7.3 Execution lifecycle
+- `git -C <repositoryRoot> worktree remove --force <path>`; when git reports
+  no registered worktree (a crashed mid-creation), fall back to a
+  revalidated plain removal (real directory, `assertContained`, not a
+  symlink) and `rm`. Returns whether anything was removed.
 
-`startExecution(task)`:
+`removeBranch({ repositoryRoot, branch }) → boolean`: `git branch -D
+<branch>`; “not found” → `false`.
 
-1. CAS `ready → running` (sets `attempt + 1`, `startedAt`,
-   `assignedAgentId` = the generated `dsh-task-<uuid>` sessionId — a
-   placeholder until the runtime confirms its own identity), `task.started`
-   event.
-2. `worker.start(input)` as a tracked background promise (per-task map, like
-   the coordinator's `inFlight`); on the result, if `agentId` is present it
-   overwrites the placeholder inside the same CAS as the status move.
-   - **succeeded** → CAS `running → succeeded` (summary, `tokenUsage`,
-     `completedAt`), `task.completed` event, `tick()`.
-   - **failed**, `attempt < maxAttempts` → CAS `running → ready`
-     (retry; backoff computed from `updatedAt`/`attempt` on the next tick),
-     `tick()`.
-   - **failed**, `attempt >= maxAttempts` → CAS `running → failed` (error,
-     `completedAt`), `task.failed` event, `tick()` (dead-DAG check may block
-     the run).
-   - **abort** (stop/cancel/retirement) → the CAS is skipped when the task is
-     already `canceled` (stale-result no-op, logged).
-   - every path `worker`-side cleanup happens inside the adapter; the service
-     only persists.
+All operations are idempotent and safe to re-run (restart, resume, cleanup
+retries).
 
-`taskRetry(taskId)` (operator RPC, §9): CAS `failed → ready` (only from
-`failed`; otherwise `task.retryNotAllowed` / `task.unknown` /
-`task.notStarted`), `tick()`.
+## 5. Integration strategy — `src/tasks/integration.ts`
 
-**Run cancellation propagation:** the service subscribes
-`ctx.on('dsh-projects/run/phase-changed', …)` in `start()` (unsubscribed in
-`stop()`): on `to === 'canceled'` for a run with live tasks → retire (§7.1) —
-no RPC-side wiring needed.
+Master spec §17: “The exact strategy should be configurable. Support at
+minimum a clean, deterministic integration path.” The strategy is a seam
+with one shipped implementation:
+
+```ts
+interface IntegrationStrategy {
+  readonly name: string
+  run(input: IntegrationInput): Promise<IntegrationOutcome>
+}
+```
+
+`MergeInOrderStrategy` (the only MVP strategy):
+
+1. Provision the integration worktree (§4.3; branch
+   `dsh/run-<short>/integration`, from the repository `HEAD` at integration
+   time). On a re-run (resume after a failed attempt) the previous attempt's
+   integration worktree + branch are removed first (best-effort) and a fresh
+   one is provisioned — deterministic re-run.
+2. For every non-empty task — `headCommit !== baseCommit` — in numeric
+   `planTaskId` order (plan order): `git -C <integrationPath> merge --no-ff
+   <taskBranch> -m "dsh merge <planTaskId>"`.
+3. **Conflict:** capture `git diff --name-only --diff-filter=U`, then
+   `git merge --abort` → outcome `conflict` with `conflictingPaths`; the
+   integration worktree + branch are kept for inspection; no force
+   resolution, no silent skip.
+4. Outcome: `{ status: 'integrated' | 'conflict', integratedBranch,
+   integratedHead, merged: string[], skipped: string[], conflictingPaths? }`
+   (`skipped` = tasks that produced no commits).
+
+`verifyIntegration({ repositoryRoot, integrationPath, integrationBranch,
+taskBranches }) → { ok, missing? }` (the validating-phase check): the
+branch resolves (`rev-parse --verify`), the worktree is sound
+(common-directory check), and every merged task branch is an ancestor of the
+integrated branch (`git merge-base --is-ancestor`).
+
+## 6. `ProjectTaskService` extension (host — `src/tasks/task-service.ts`)
+
+Constructor gains two optional parameters (after `worker`):
+`worktreeManager?: TaskWorktreeManager` and
+`integrationStrategy?: IntegrationStrategy` (default `MergeInOrderStrategy`).
+`worktreeManager === undefined` ⇒ no isolation at all (Phase 4 behavior;
+test seam). Production wiring always passes the real manager + strategy.
+
+- **`beginExecution` (task → running):** after the CAS to `running`, before
+  dispatch: `source = catalog.projectWorkspaceSource(run.projectId)` (the
+  existing per-project decision — `worktree` when the project has a Git
+  repository, `controlled-directory` otherwise).
+  - `worktree` strategy + manager: `provisionTaskWorktree`; on success a
+    second CAS adds `workspaceId` (path), `branch`, and `baseCommit`
+    (creation only). On failure the attempt settles through the **existing
+    settlement path** as a synthetic failed worker result
+    (`kind: 'failed', error: 'worktree provisioning failed: …'`) — the
+    attempt budget, backoff, and events all apply unchanged; the next
+    attempt re-provisions idempotently.
+  - `controlled-directory` (or no manager): no fields; the worker's
+    `cwd` stays `project.root` (exactly Phase 4).
+- **`executeTask`:** `cwd = started.workspaceId ?? project.root`; the worker
+  input gains the optional `branch` (§6.1 below).
+- **`settleResult` success path (worktree tasks only):** before the CAS to
+  `succeeded`, `commitTaskWork` — a commit failure settles the attempt as a
+  failed result (`task.commitFailed`, retryable); on success the CAS adds
+  `headCommit`. **After** the transition, `removeTaskWorktree` (best-effort:
+  a failure is a warn log — the task is already `succeeded`; the run's
+  finalization is the authoritative cleanup). A task can never reach
+  `succeeded` with uncommitted work (intent §9.1.3).
+- **Failure / cancel / retirement:** no commit; the worktree is kept for
+  inspection (cleanup only at run finalization, §7).
+- **Retry (new attempt):** provisioning is idempotent → the same worktree is
+  reused **as-is** — the previous attempt's uncommitted work is visible to
+  the agent; no `git reset`, no silent discard.
+- **`stop()`:** unchanged (abort in-flight workers; no filesystem cleanup;
+  cross-restart reconciliation is Phase 10).
+
+### 6.1 Worker seam (additive)
+
+`TaskWorkerInput.branch?: string` — `LocalTaskWorker` uses it for one line
+of prompt guidance (“You are working in a dedicated Git worktree on branch
+<b>; your changes will be committed to this branch.”); `TeamTaskWorker` and
+fakes ignore it. `worker.ts` is otherwise unchanged; import isolation
+(`agentTeams` in exactly one file) is untouched.
+
+## 7. Run completion pipeline (driven by the existing tick)
+
+A new section 4 of `tickOnce`, handling non-terminal runs; the existing
+execution sections are untouched. Every step re-reads persisted state and
+every run transition goes through `ProjectRunService.transitionRun`
+(guard miss = logged no-op, the PlanRunCoupler pattern). The tick
+coalescing serializes pipeline steps per process.
+
+1. **All-succeeded detection (run `executing`):** the run has ≥ 1 task and
+   **every** task is `succeeded` → Git project: `transitionRun(run,
+   'integrating')`; non-Git project: `transitionRun(run, 'finalizing')`
+   (the state machine allows `executing → finalizing` directly; no
+   integration branch exists for non-Git runs).
+2. **`integrating`:**
+   - Crash-safety leg: a `run.integration.completed` event exists and
+     `verifyIntegration` passes (crash between the event and the phase move)
+     → `transitionRun(run, 'validating')` without re-merging.
+   - Otherwise: persist `run.integration.started`; remove a previous failed
+     attempt's integration worktree + branch (best-effort); run the
+     strategy:
+     - `integrated` → CAS the run record adding `integrationBranch` +
+       `integrationHead` (coordinator pattern); persist
+       `run.integration.completed`; `transitionRun(run, 'validating')`.
+     - `conflict` / error → persist `run.integration.failed` (detail:
+       conflicting paths or the error, truncated); `transitionRun(run,
+       'blocked', { error })`. Retryable: task branches are immutable, so a
+       resume re-runs the integration deterministically.
+3. **`validating`:** `verifyIntegration` → ok: `transitionRun(run,
+   'finalizing')`; not ok (e.g. the branch was deleted outside the harness):
+   `run.integration.failed` + `blocked` (a human repairs the git state and
+   resumes). MVP validation is **structural** (branch resolvable, worktree
+   sound, merged task branches are ancestors of the integrated branch);
+   running project test/build commands is a non-goal (§14).
+4. **`finalizing`:** remove all task branches and the integration worktree
+   (the integration branch is kept); then `transitionRun(run, 'succeeded',
+   { resultSummary: 'integrated branch <name> @ <short head>' })` (non-Git:
+   `all tasks succeeded (no Git isolation)`). Cleanup operations are
+   idempotent; a persistently failing cleanup keeps the run in `finalizing`
+   (warn log, retried on the next tick; a human may cancel —
+   `finalizing → canceled` is a legal edge) — never a fabricated `succeeded`
+   with incomplete cleanup.
+5. **Blocked runs:** the pipeline does not touch them — the existing
+   `runTransition` RPC resumes them (`blocked → integrating` is dynamically
+   allowed via `suspendedFrom`) and the next tick re-enters step 2.
 
 ## 8. Events and errors
 
-- Run event types: +5 (`§3.4`); `RUN_EVENT_TYPES` is 18 entries.
-- New `DashboardErrorCode`s (5, `task.*` namespace) — every code has a real
-  generation path; internal CAS conflicts on expected concurrent moves are
-  logged no-ops (the stale-result discipline), not client errors:
+- Persisted event types: the three additive types of §3.3.
+- Cordis: **no new Cordis event types** — the run's
+  `integrating/validating/finalizing` moves already fire
+  `dsh-projects/run/phase-changed` (Phase 1), which the GUI's existing
+  run-refresh path handles.
+- New `DashboardDomainError` codes (all settle through the generic
+  execution-failure path — attempt budget + backoff apply;
+  `task.workspaceConflict` is persistent by nature, so retries exhaust to a
+  terminal `failed`):
 
 | Code | When |
 | --- | --- |
-| `task.notStarted` | service not started |
-| `task.unknown` | unknown task id (operator retry on a missing task) |
-| `task.retryNotAllowed` | `taskRetry` on a non-`failed` task |
-| `task.workerUnavailable` | selected worker runtime absent from the composition |
-| `task.dagInvalid` | materialization graph validation failure (defensive) |
+| `task.worktreeFailed` | Worktree provisioning/validation infrastructure error (message carries the stderr tail). |
+| `task.workspaceConflict` | A foreign worktree occupies the expected path (wrong branch, or not a worktree of this repository). |
+| `task.commitFailed` | The final commit could not be created (e.g. the repository has no git identity). |
 
-Client `ERROR_TRANSLATION_KEYS` + zh/en `locales.ts` entries for all 7 (the
-`satisfies Record<DashboardErrorCode, DashboardLocaleKey>` map keeps parity
-compile-enforced).
+The client maps all three to zh/en strings (`src/client/errors.ts`,
+`src/client/locales.ts`).
 
-## 9. RPC (additive, trusted-host)
+## 9. RPC (additive — no new endpoints)
 
-| Endpoint | Input | Output | Notes |
-| --- | --- | --- | --- |
-| `runDetail` (existing) | `{ runId }` | `RunDetailView` **+ additive optional `tasks`** | tasks in plan order; absent when the Host has no task service (older hosts unaffected) |
-| `state` / `refresh` (existing) | — | `DashboardSnapshot` | `runs` section gains `worker` + per-view `taskCounts` (both additive optional) |
-| `taskRetry` (new) | `{ taskId: string }` | `ProjectTaskRecord` | uuid validation; structured errors per §8; absent task service → bad-request |
-
-`handleDashboardRpc` gains a 9th optional parameter `taskService?`
-(`ProjectTaskService | undefined`) — the same additive-parameter pattern as
-`coordinator` (8th) in Phase 3.
+- `runDetail`: tasks flow through `taskList` (additive optional fields of
+  §3.1); the run view spreads the record (`integrationBranch` /
+  `integrationHead` automatic); integration events flow through the event
+  list.
+- `snapshot`: run summary rows carry the run view (automatic).
+- `taskRetry`, `runTransition`, and every other endpoint are unchanged
+  (resume of a blocked integration = `runTransition` back to
+  `suspendedFrom`).
 
 ## 10. UI (existing Dashboard surface, zh/en parity)
 
-New **Tasks** inspector section (`inspector.tasks` — zh `任务`, en `Tasks`) in
-`RunInspector`, ordered after the Coordinator section:
-
-- **Worker banner** (from `ProjectRunSummary.worker`):
-  - `unavailable` → notice `执行不可用：当前组合未挂载代理运行时` /
-    “Execution unavailable: no agent runtime is mounted in this composition”
-    (no task rows are fake; real pending/ready tasks still render).
-  - `local` / `agent-team` → small kind label (zh `本地代理` / `代理团队`).
-- **Per-task row** (DAG/plan order): status pill (8 statuses, zh labels:
-  待调度/就绪/运行中/受阻/待审/已完成/失败/已取消), title, role, dependency
-  titles (or `tN`), `attempt/maxAttempts` (e.g. `2/3`), agent tail (last 8 of
-  `assignedAgentId`, when set) + started-relative time, tokens when present,
-  output-summary or error row (truncated like the Coordinator section).
-  Blocked rows name the failed dependency.
-- **Retry action** on `failed` rows only: calls the new `onTaskRetry(taskId)`
-  port (controller: `taskRetry` → RPC `taskRetry`), pending state
-  `重试中…` / `Retrying…`, success feedback `任务已重新排队` /
-  “Task re-queued”, error notice via `dashboardErrorMessage` + re-enable.
-- `RunInspector`/surface gain `onTaskRetry?` + `tasks` from `runDetail`;
-  `fixture.ts` gains a deterministic tasks section on the executing fixture
-  run (mixed statuses incl. one blocked-on-failed-dep, one failed with
-  `attempt: 3`, `worker: 'local'`) — fixture-labeled local-mode data only,
-  as in the existing runs fixture.
-- `styles.ts`: `.dshd-tasks*` classes following the Coordinator section's
-  visual language.
-
-No new tab, no second shell (invariant 5). The run list's row keeps its
-current shape; `taskCounts` is surfaced in the inspector header line
-(`任务 3/7 完成` style, zh/en).
+- **Task rows** (inspector Tasks section): when `branch` is present, a mono
+  chip with the branch name + the 7-char `headCommit` short; non-Git tasks
+  render nothing extra.
+- **Integration panel** (new inspector subsection, visible when the run has
+  tasks and its phase is one of `integrating` / `validating` / `finalizing`,
+  or it is `succeeded` with an `integrationBranch`):
+  - `integrating` → “Integrating…” + the planned integration branch (mono).
+  - `validating` → “Validating integration…”
+  - `finalizing` → “Finalizing (cleanup)…”.
+  - `succeeded` + `integrationBranch` → the integrated branch + short head
+    (mono).
+  - `blocked` + the latest `run.integration.failed` event → the error, the
+    conflicting-paths list, and a hint that resuming re-runs the integration
+    from the task branches.
+- **Non-Git notice** (run level; when the project's workspace source is
+  `controlled-directory` and the run has tasks): “This project has no Git
+  repository — tasks run in the shared working tree without isolation.”
+- zh/en parity: new locale keys in `src/client/locales.ts` (both maps),
+  compile-enforced by the existing i18n regression suite.
+- No new controls (no push/PR buttons — §14).
 
 ## 11. Module layout & wiring
 
-```
-src/tasks/
-  types.ts          TaskId, ProjectTaskStatus, ProjectTaskRecord, ProjectTaskView,
-                    TaskCountsView, TaskGraphError payload types
-  spec.ts           TASK_STATUSES, projectTaskRecordSchema (zod, §3.2)
-  constants.ts      DEFAULT_TASK_CONCURRENCY, DEFAULT_MAX_ATTEMPTS, MAX_RETRY_DELAY_MS,
-                    MAX_SUMMARY_LENGTH (1000), EVENT_DETAIL_LIMIT (200), TICK_INTERVAL_MS (5000)
-  state-machine.ts  ALLOWED_TASK_TRANSITIONS, transitionTask, TaskTransitionError (pure)
-  scheduler.ts      validateTaskGraph, computeDependencyTransitions, pickReadyTasks,
-                    compareTasks (pure; reuses orchestrator/scheduling.ts failureRetryDelay)
-  worker.ts         TaskWorker seam, TaskWorkerInput/Result/Kind, UnavailableWorker
-  local-adapter.ts   LocalTaskWorker (ctx.agents mechanism, §6.2; report tool `dsh_projects_report_task_result`)
-  team-adapter.ts     TeamTaskWorker (only file touching ctx.agentTeams — experimental)
-  task-service.ts   ProjectTaskService (§7), task.* Cordis event declarations
-src/runs/spec.ts    + tasks table, RUN_EVENT_TYPES +5, run schema +maxConcurrentAgents
-src/runs/types.ts   +5 event types, ProjectTaskView, TaskCountsView,
-                    ProjectRunView +taskCounts?, RunDetailView +tasks?
-src/config.ts       + optional projects.taskWorker ('local' | 'agent-teams')
-src/rpc/handler.ts  9th param taskService?; taskRetry case; runDetail + tasks;
-                    snapshot runs + worker/taskCounts
-src/index.ts        worker resolution (§6.4) → ProjectTaskService; hook chain
-                    onPlanStatus: coupler → taskService; start/stop chain;
-                    snapshot projection wiring
-src/client/         controller.ts +taskRetry port; errors.ts +5 keys;
-                    locales.ts + zh/en; Dashboard.tsx Tasks section;
-                    fixture.ts tasks; styles.ts .dshd-tasks*
-```
-
-Wiring (`src/index.ts`, following the Phase 3 chain):
-
-```ts
-const worker = resolveTaskWorker(ctx, config.projects?.taskWorker ?? 'local')
-const taskService = new ProjectTaskService(ctx, catalog, runService, undefined, worker)
-const planService = new RunPlanService(ctx, runService, undefined, {
-  onPlanStatus: async event => {
-    await coupler.handle(event)
-    await taskService.handlePlanStatus(event)
-  },
-})
-// startup:  runService.start() → planService.start() → coordinator.start() → taskService.start() → runtime.start()
-// disposal: runtime.stop() → taskService.stop() → coordinator.stop() → planService.stop() → runService.stop()
-```
-
-`taskService.start()` throws `task.workerUnavailable`-free: it always starts
-(the worker kind may be `unavailable` — that is a state, not a startup
-failure), so the Dashboard boots in every composition.
+| File | Change |
+| --- | --- |
+| `src/workspace/git.ts` | **New** — shared `runGit` helper (extracted, behavior unchanged). |
+| `src/workspace/manager.ts` | Imports `runGit` from `git.ts` (private helper removed); behavior unchanged. |
+| `src/tasks/git-workspace.ts` | **New** — naming functions (§4.2) + `TaskWorktreeManager` (§4.3). |
+| `src/tasks/integration.ts` | **New** — `IntegrationStrategy` seam + `MergeInOrderStrategy` + `verifyIntegration` (§5). |
+| `src/tasks/task-service.ts` | Worktree provisioning in `beginExecution`, commit + worktree removal in `settleResult`, pipeline section 4 in `tickOnce`, new constructor parameters (§6, §7). |
+| `src/tasks/worker.ts` | `TaskWorkerInput.branch?` (additive, optional; §6.1). |
+| `src/tasks/local-adapter.ts` | One worktree prompt line when `input.branch` is present. |
+| `src/tasks/types.ts`, `src/tasks/spec.ts` | Task record/view fields (§3.1). |
+| `src/runs/types.ts`, `src/runs/spec.ts` | Run record fields + event types (§3.2, §3.3); `maxConcurrentAgents` comment updated (worktrees make > 1 safe; the default stays 1). |
+| `src/tasks/constants.ts` | `GIT_OPERATION_TIMEOUT_MS`; `DEFAULT_TASK_CONCURRENCY` comment updated. |
+| `src/index.ts` | Construct the `TaskWorktreeManager` + default strategy; pass both to `ProjectTaskService`. |
+| `src/client/locales.ts`, `src/client/Dashboard.tsx` | §10. |
+| `src/tasks/team-adapter.ts`, `src/tasks/scheduler.ts`, `src/tasks/state-machine.ts`, `src/runs/state-machine.ts` | **Unchanged** (import isolation + pure modules untouched; the run machine already has every phase/edge needed). |
 
 ## 12. Test plan
 
 | File | Cases (spec-level) |
 | --- | --- |
-| `tests/task-state-machine.test.ts` (new) | full allowed-edge table + representative forbidden edges; idempotent re-entry rejection; terminal invariants; `running→ready` budget edge; `failed→ready` only from failed; version bumps; `completedAt`/`error`/`outputSummary` carry-over; `awaiting-review` unreachable |
-| `tests/task-scheduler.test.ts` (new) | `validateTaskGraph`: ok / cycle / unknown dep / self-dep; `computeDependencyTransitions`: all-deps-succeeded → ready, any-failed → blocked, recovery → ready, idempotent no-op; `pickReadyTasks`: concurrency cap, retry backoff (injected `now`), deterministic order, empty when saturated |
-| `tests/task-service.test.ts` (new) | in-memory domain + fake worker + injected clocks: materialization 1:1 (deps resolved, role/criteria copied, `maxAttempts` default) + `tasks.materialized` event; taskless plan no-op; zero rows on `task.dagInvalid`; retirement on `superseded` (running task stopped) and on re-activation; first ready wave respects default concurrency 1 + `run.maxConcurrentAgents` override; success path (summary/tokens persisted, `task.completed`); failure with retries (attempt bump, backoff elapses via injected `retryClock`, re-ready, second attempt succeeds); exhausted → `failed` + dead-DAG → run `blocked` (guard: run must be `executing`); dependency recovery unblocks (`blocked → ready`); `taskRetry` happy + `task.retryNotAllowed` + `task.unknown`; run-canceled event → all live tasks `canceled` + worker stopped; stale worker result after cancel is a logged no-op; unavailable worker → tasks never leave pending/ready, `task.workerUnavailable` on action, no fake identities; restart persistence (stop, new service on same medium, state intact); `stop()` aborts in-flight worker signal |
-| `tests/task-adapters.test.ts` (new) | `LocalTaskWorker` against a fake `ctx.agents` (create/followup/whenIdle/flush/dispose mapping, report-tool result, session-ended-without-report → failed result, usage accumulation, abort → failed result); `TeamTaskWorker` against a fake `TeamService` + fake agents (Lead spawn, per-task teammate spawn, assign/interrupt/dispose mapping); `UnavailableWorker` rejects with `task.workerUnavailable`; **import isolation**: a source-scan test asserting `agentTeams` appears only in `src/tasks/team-adapter.ts` and `ctx.subagents`/`subagents` appears in no file — the invariant-1 check |
-| `tests/rpc-handler.test.ts` (extended) | `taskRetry` dispatch returns the record; non-uuid → bad-request; absent service → bad-request; `task.retryNotAllowed`/`task.unknown` mapped via `decodeDashboardError` with `{ taskId }`; `runDetail` includes `tasks` when the service is present and omits them (absent property) when not |
-| `tests/dashboard-tasks-interactions.test.tsx` (new, jsdom zh) | Tasks section renders mixed statuses from `runDetail` (pills, deps, attempt `2/3`, agent tail, summary/error rows, blocked names the failed dep); retry button appears only on `failed`, calls `onTaskRetry(taskId)`, pending `重试中…`, then refresh; worker-unavailable banner renders the zh notice; `worker: 'local'` label; no fake data — empty task list renders the section's empty state |
-| `tests/run-storage-integration.test.ts` (extended) | coordinator leg extended: activated plan materializes tasks on the real JSON backend; a fake worker completes one task; after a domain reopen the task statuses, events, and run phase survive; medium table set `['plans', 'run_events', 'runs', 'tasks']`; a second boot's `taskRetry` re-runs a failed task |
-| regression | every existing suite green, unchanged files untouched except the additive edits listed in §11 |
+| `tests/git-workspace.test.ts` (new; real Git fixture repos — the `workspace-manager.test.ts` pattern: `git init` + `-c user.name/user.email` commits in a temp dir) | naming: deterministic branch/worktree names; leaf normalization (never trusts input); ref-safety. provision: creates worktree + branch from `HEAD` with `baseCommit`; idempotent reuse (same identity → `createdNow: false`, no re-creation); foreign branch at the path → `task.workspaceConflict`; path that is not a worktree of the repo → `task.workspaceConflict`; containment (a crafted leaf cannot escape the project root). commitTaskWork: dirty tree → exactly one commit on the task branch (`committed: true`, `headCommit` advances); clean tree → `committed: false` with `headCommit === baseCommit`; missing identity → `task.commitFailed`. removal: worktree remove + branch `-D`; double removal is a no-op; fallback removal of an unregistered tree (revalidated). |
+| `tests/integration-strategy.test.ts` (new; real Git fixtures) | two task branches with disjoint changes → integrated branch contains both, plan-ordered merge commits, `merged`/`skipped` correct, `integratedHead` = tip; overlapping changes → `conflict` + exact `conflictingPaths` + worktree aborted back to base (no partial merge state), task branches untouched; empty task (`headCommit === baseCommit`) skipped; `verifyIntegration`: ok / missing branch → not ok / tampered worktree → not ok; the strategy seam accepts a fake implementation. |
+| `tests/task-service.test.ts` (extended; in-memory domain + fake worker + **fake worktree-manager seam** + fake strategy) | worktree provisioning on running (the fake worker receives `cwd` = worktree path and `branch`); the task record gains `workspaceId`/`branch`/`baseCommit`; commit before `succeeded` (fake manager called with the task identity; commit failure → failed attempt with `task.commitFailed`, retryable); a succeeded task's worktree is removed, its branch kept; a failed task's worktree is kept; retry reuses the worktree (idempotent provision, no reset); non-Git project (`controlled-directory` source) → `cwd = project.root`, no worktree fields, manager never called; `worktreeManager === undefined` → Phase 4 behavior. Pipeline: all-succeeded + Git → run `integrating` (+ `run.integration.started`); fake strategy `integrated` → run record gains `integrationBranch`/`integrationHead`, `run.integration.completed`, run `validating` → `finalizing` → `succeeded` (resultSummary names the branch), task branches + integration worktree removed, integration branch kept; conflict → `run.integration.failed` (paths in detail) + run `blocked`, task branches intact; resume (`transitionRun` back to `integrating`) → previous integration worktree cleaned + strategy re-runs → `succeeded`; non-Git all-succeeded → run `finalizing` → `succeeded` (no integration branch); crash-safety leg: completed event + run still `integrating` → verify passes → `validating` without re-merging. |
+| `tests/run-storage-integration.test.ts` (extended; real JSON domain + real Git fixture repo) | full pipeline on the real medium: two tasks whose fake workers write real files into real worktrees → all succeeded → integrating → the **real** `MergeInOrderStrategy` merges → succeeded; after a domain reopen the task `headCommit`s, the run's `integrationBranch`/`integrationHead`, and the integration events survive; the medium table set is unchanged. |
+| `tests/workspace-manager.test.ts` (regression) | green after the `runGit` extraction (behavior unchanged). |
+| `tests/rpc-handler.test.ts` (extended) | `runDetail.tasks[]` carries the additive Git fields when present (absent property when not); the run view carries `integrationBranch` when set; integration events appear in `runDetail.events`; no new endpoints. |
+| `tests/dashboard-tasks-interactions.test.tsx` (extended, jsdom zh) | a task row renders the branch chip + commit short when present and nothing when not; the integration panel renders its zh state per phase (integrating/validating/finalizing/succeeded); a blocked integration shows the conflicting paths + the resume hint; the non-Git notice renders only for `controlled-directory` projects. |
+| `tests/dashboard-i18n-regressions.test.tsx` | the new locale keys exist in both zh and en (existing parity mechanism). |
+| regression | every existing suite green; the Phase 4 import-isolation source scan still passes (the Git modules add no runtime surface); parallel execution at `maxConcurrentAgents > 1` proven with disjoint **and** conflicting file sets (worktrees make it safe — the Phase 4 concurrency rationale is retired). |
 
-Settlement in the service tests follows the Phase 3 `settle` pattern (poll the
-persisted outcome on the shared medium; generous slow-yield budget — the
-real-JSON lesson from Phase 3 applies to the integration leg).
+## 13. Acceptance criteria (maps to `intent.md` §9.4)
 
-## 13. Acceptance criteria (maps to `intent.md` §7.4)
+1. (§9.4.1) Every live task of a Git project runs in its own worktree +
+   branch with the §16 naming; the one-writer-per-worktree invariant holds
+   (unique naming + identity check + `task.workspaceConflict` guard,
+   tested); non-Git projects run in the shared tree with the explicit UI
+   notice and no Git metadata.
+2. (§9.4.2) Task work is committed onto the task branch before `succeeded`
+   (dirty tree committed by the service; empty tree = no-commit success; no
+   silently discarded work); `workspaceId`/`branch`/`baseCommit`/
+   `headCommit` are real git results or absent, never fabricated.
+3. (§9.4.3) All tasks succeeded → run `integrating` → the integrated branch
+   is produced by the deterministic merge-in-order strategy in the
+   integration worktree; a conflict is a structured failure (conflicting
+   paths persisted in the event), never force-resolved; the
+   default/protected branch is never touched (only `dsh/run-*` branches are
+   created or deleted).
+4. (§9.4.4) The completion pipeline is wired end-to-end on the existing
+   state machine (no new phases): `integrating → validating → finalizing →
+   succeeded`; a failed integration leaves the run `blocked` and a resume
+   re-runs the integration deterministically from the immutable task
+   branches.
+5. (§9.4.5) Cleanup: a succeeded task's worktree is removed after its
+   commit (branch kept); a terminal-succeeded run removes the task branches
+   + the integration worktree and keeps the integration branch; failed /
+   canceled runs keep worktrees for inspection; `stop()` removes nothing.
+6. (§9.4.6) UI: per-task branch + head-commit chip, the integration panel
+   (all phases + conflict detail), the integrated branch on success, the
+   non-Git notice — zh/en parity compile-enforced, no fabricated Git data.
+7. (§9.4.7) Storage: the new task/run fields + integration events survive a
+   real JSON domain reopen; `dsh_projects` stays format version 0; the
+   medium table set is unchanged.
+8. (§9.4.8) Repo green: typecheck, build, `pnpm vitest run` (modulo the
+   documented pre-existing environment failures); parallel execution at
+   concurrency > 1 proven by tests.
 
-1. Tasks materialize 1:1 from the active plan version with dependencies
-   resolved (plan positions → task uuids); a taskless plan is a no-op; an
-   invalid DAG is rejected at materialization with zero rows persisted;
-   superseding the active plan retires its live tasks (running ones stopped).
-2. DAG semantics hold end-to-end: a task is ready only when all dependencies
-   succeeded; a permanently failed dependency blocks dependents; a retried
-   dependency that later succeeds re-readies them; `validateTaskGraph` rejects
-   cycles/unknown refs; transitions are idempotent rejections.
-3. Ready tasks execute on real agents behind the seam (fake in tests):
-   `status`/`assignedAgentId`/`attempt` persist on the `tasks` table; retries
-   respect `maxAttempts` with the generalized `failureRetryDelay` backoff;
-   exhausted attempts → terminal `failed`; a dead DAG blocks the run (retryable
-   via the existing resume path); run cancellation cancels live tasks and
-   stops their workers.
-4. The agent lifecycle is inspectable in the inspector: per-task status/role/
-   attempt/summary/error, agent identity tail, start time, tokens when the
-   runtime provides them; the snapshot carries `worker` kind + `taskCounts`;
-   zh/en parity compile-enforced; no fabricated activity.
-5. Honest degradation: a composition without the selected runtime exposes
-   `worker: 'unavailable'`, the zh/en banner, `task.workerUnavailable` on
-   actions, and tasks never carry fake identities or leave scheduling states.
-6. Storage integration: task records + task events survive a real JSON domain
-   reopen; medium table set `['plans', 'run_events', 'runs', 'tasks']`;
-   `dsh_projects` stays format v0.
-7. Repo green: `pnpm run typecheck`, `pnpm run build`, `pnpm vitest run`
-   (modulo the documented pre-existing environment failures).
+## 14. Explicit non-goals (Phase 6+)
 
-## 14. Explicit non-goals (Phase 5+)
-
-- No per-task worktrees/branches, one-writer-per-worktree invariant,
-  integration worktree/strategy, Git metadata in the UI (Phase 5). Phase 4
-  tasks run in the project's existing working tree; default concurrency 1
-  (intent §7.2) bounds the risk.
-- No run completion pipeline: all tasks succeeded → the run stays `executing`
-  (intent §7.1.9); `integrating → validating → finalizing → succeeded`
-  arrives with Phase 5.
-- No Project Memory (6). No `ApprovalRequest` objects, no budgets —
-  `maxAttempts` is the only Phase 4 limit (7). No report artifacts (8). No
-  triggers (9).
-- No startup reconciliation of orphaned tasks/agents (Phase 10) — `stop()`
-  aborts and drops references without mutating state; a restart finds
-  `running` tasks persisted and the tick leaves them (recovery is Phase 10's
-  design).
-- No interactive re-planning loop from task failures (master spec §49) —
-  blocked runs are retried/replanned through the existing Phase 3 paths.
-- No monetary cost (master spec §29: unknown unless a reliable source exists);
-  tokens only from native session usage.
-- `awaiting-review` remains unreachable; `workspaceId` remains unset.
+- No automatic push/PR of the integrated branch (master spec §17's
+  “optional push → optional pull request → human review” stays optional:
+  the branch is produced and shown; a human pushes/reviews from it).
+- No interactive conflict-resolution UI — a conflict is a structured
+  failure with persisted conflicting paths; resolution happens via resume
+  (once the branches change) or a human's manual Git work in the
+  integration worktree (kept on failure).
+- No configurable validation command in the `validating` phase — MVP
+  validation is structural (branch resolvable, worktree sound, task
+  branches are ancestors of the integrated branch).
+- No integration strategies beyond `MergeInOrderStrategy` (the seam exists;
+  one implementation ships).
+- No Project Memory (6). No `ApprovalRequest` objects, no budgets (7). No
+  report artifacts (8). No triggers (9).
+- No startup reconciliation of orphaned worktrees/branches (10) —
+  `stop()` removes nothing; provisioning idempotency + the conflict guard
+  make a restart safe; orphan pruning belongs to Phase 10.
+- No monetary cost figures; token accounting only from native session
+  usage (unchanged from Phase 4).
+- `awaiting-review` remains unreachable (Phase 7 approval modes).
