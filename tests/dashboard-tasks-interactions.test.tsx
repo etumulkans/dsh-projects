@@ -184,6 +184,36 @@ describe('Dashboard Task execution interactions', () => {
     await waitFor(() => expect(onLoadRunDetail).toHaveBeenCalledWith(executingRun.id))
     expect(within(inspector).getByText('暂无任务')).toBeTruthy()
   })
+
+  it('renders the zh unavailable-worker banner when the composition has no runtime', async () => {
+    const emptyView: RunDetailView = { run: executingRun, truncated: false, events: [] }
+    const onLoadRunDetail = vi.fn(async (): Promise<RunDetailView> => emptyView)
+    const summary = fixtureSnapshot.runs!
+    const snapshot = { ...fixtureSnapshot, runs: { ...summary, worker: 'unavailable' as const } }
+    render(
+      <DashboardSurface
+        snapshot={snapshot}
+        onRefresh={async () => {}}
+        onPause={async () => {}}
+        onStop={async () => {}}
+        onCreateTask={async () => {}}
+        onUpdateTask={async () => {}}
+        onDeleteTask={async () => {}}
+        onSwitchProject={async () => {}}
+        onAddDiscoveryRoot={async () => {}}
+        onRemoveDiscoveryRoot={async () => {}}
+        onScanProjects={async () => ({ root: fixtureSnapshot.catalog.discoveryRoots[0]!, candidates: [], truncated: false })}
+        onRegisterProjectCandidate={async () => {}}
+        onRegisterProject={async () => {}}
+        onOpenSession={() => {}}
+        onLoadRunDetail={onLoadRunDetail}
+      />,
+    )
+
+    const inspector = await openRunInspector(executingRun)
+    await waitFor(() => expect(onLoadRunDetail).toHaveBeenCalledWith(executingRun.id))
+    expect(within(inspector).getByText('执行不可用：当前组合未挂载代理运行时')).toBeTruthy()
+  })
 })
 
 function renderDashboard(overrides: Partial<ComponentProps<typeof DashboardSurface>> = {}): void {

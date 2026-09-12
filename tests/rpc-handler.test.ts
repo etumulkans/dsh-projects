@@ -648,6 +648,30 @@ describe('Dashboard RPC Task execution', () => {
       dashboardCode: 'task.retryNotAllowed',
       params: { taskId: TASK_ID, status: 'ready' },
     })
+
+    // task.unknown rides the same structured mapping
+    const unknownService = fakeTaskService({
+      taskRetry: vi.fn(async () => {
+        throw new DashboardDomainError('task.unknown', 'unknown task', { taskId: TASK_ID })
+      }),
+    })
+    const unknown = await handleDashboardRpc(
+      runtime,
+      'taskRetry',
+      { taskId: TASK_ID },
+      new AbortController().signal,
+      Promise.resolve(),
+      undefined,
+      undefined,
+      undefined,
+      unknownService,
+    )
+    expect(unknown).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (unknown.ok) throw new Error('expected failure')
+    expect(decodeDashboardError(unknown.error.message)).toMatchObject({
+      dashboardCode: 'task.unknown',
+      params: { taskId: TASK_ID },
+    })
   })
 
   it('attaches the run tasks to runDetail only when a task service is mounted', async () => {
