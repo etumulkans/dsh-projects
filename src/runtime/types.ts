@@ -10,6 +10,7 @@ import type {
 import type { CreateTaskInput, TaskSourceCredentialStatus, UpdateTaskInput } from '../task-source/index.ts'
 import type { CreateRunInput, ProjectRunPhase, ProjectRunRecord, ProjectRunSummary, RunDetailView } from '../runs/types.ts'
 import type { CreatePlanInput, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
+import type { ProjectTaskRecord } from '../tasks/types.ts'
 
 export interface TokenTotals {
   readonly input: number
@@ -197,6 +198,8 @@ export interface DashboardRpcMap {
   }
   /** Phase 3: start one Coordinator Lead session for a created/planning run. */
   readonly runCoordinate: { input: { runId: string }; output: ProjectRunRecord }
+  /** Phase 4: re-queue one failed task (returns the updated task record). */
+  readonly taskRetry: { input: { taskId: string }; output: ProjectTaskRecord }
 }
 
 export function emptyTokens(): TokenTotals {

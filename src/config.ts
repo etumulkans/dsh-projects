@@ -18,6 +18,12 @@ export interface AgentProfileConfig {
   permissionPreset: string
   /** Optional Harness Agent Preset; absent selects the roster default. */
   agentPreset?: string
+  /**
+   * Optional role → Agent Preset id mapping (master spec §15): a task's role
+   * label selects the preset for its executing agent. No hard-coded provider
+   * or model names — presets are the existing Harness mechanism.
+   */
+  roles?: Record<string, string>
   /** Runtime host label exposed by observability and future Broker matching. */
   workerHost: string
 }
@@ -69,6 +75,15 @@ export interface Config {
   local?: {
     storePath: string
   }
+  /**
+   * DSH Projects Phase 4: task execution selection. `local` (default) always
+   * runs — `ctx.agents` is a hard plugin dependency; `agent-teams` requires the
+   * host composition to mount the experimental Agent Teams plugin, otherwise
+   * task execution is explicitly unavailable (no silent fallback).
+   */
+  projects?: {
+    taskWorker?: 'local' | 'agent-teams'
+  }
 }
 
 export const Config: z<Config> = z.object({
@@ -83,6 +98,7 @@ export const Config: z<Config> = z.object({
     // or elevate a sandbox/approval policy.
     permissionPreset: z.string().required(),
     agentPreset: z.string(),
+    roles: z.dict(z.string()),
     workerHost: z.string().default('local'),
   }),
   policyDefaults: z.object({
@@ -128,5 +144,8 @@ export const Config: z<Config> = z.object({
   }),
   local: z.object({
     storePath: z.string().default('~/.dsh-dashboard/tasks.json'),
+  }),
+  projects: z.object({
+    taskWorker: z.union(['local', 'agent-teams']),
   }),
 })

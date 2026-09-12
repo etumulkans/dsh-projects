@@ -2,6 +2,7 @@
 
 import type { ProjectId } from '../catalog/types.ts'
 import type { TokenTotals } from '../runtime/types.ts'
+import type { ProjectTaskView, TaskCountsView, TaskWorkerKindView } from '../tasks/types.ts'
 
 export type RunId = string
 export type RunEventId = string
@@ -41,6 +42,8 @@ export interface ProjectRunRecord {
   readonly activePlanId?: string
   /** Additive (Phase 3): session id of the most recent Coordinator Lead session. */
   readonly coordinatorSessionId?: string
+  /** Additive (Phase 4): per-run task concurrency override (default 1). */
+  readonly maxConcurrentAgents?: number
   readonly createdAt: string
   readonly updatedAt: string
   readonly phaseChangedAt: string
@@ -49,9 +52,9 @@ export interface ProjectRunRecord {
 
 /**
  * High-level run event types: Phase 1 run events + Phase 2 plan events +
- * Phase 3 coordinator events.
- * The stream is per-run, so plan, coordinator, and run events interleave on
- * one seq.
+ * Phase 3 coordinator events + Phase 4 task lifecycle.
+ * The stream is per-run, so plan, coordinator, task, and run events
+ * interleave on one seq.
  */
 export type ProjectRunEventType =
   | 'run.created'
@@ -67,6 +70,11 @@ export type ProjectRunEventType =
   | 'run.coordinator.started'
   | 'run.coordinator.completed'
   | 'run.coordinator.failed'
+  | 'tasks.materialized'
+  | 'task.ready'
+  | 'task.started'
+  | 'task.completed'
+  | 'task.failed'
 
 /** High-level Run event; detailed agent activity stays in Harness session logs. */
 export interface ProjectRunEventRecord {
@@ -99,6 +107,10 @@ export interface ProjectRunView {
   readonly activePlanId?: string
   /** Additive (Phase 3): session id of the most recent Coordinator Lead session. */
   readonly coordinatorSessionId?: string
+  /** Additive (Phase 4): per-run task concurrency override (default 1). */
+  readonly maxConcurrentAgents?: number
+  /** Additive (Phase 4): per-status task counts for this run, when the Host has a task service. */
+  readonly taskCounts?: TaskCountsView
   readonly createdAt: string
   readonly updatedAt: string
   readonly phaseChangedAt: string
@@ -122,12 +134,16 @@ export interface ProjectRunSummary {
   readonly projectId?: ProjectId
   readonly runs: readonly ProjectRunView[]
   readonly total: number
+  /** Additive (Phase 4): the task worker kind the Host can currently execute with. */
+  readonly worker?: TaskWorkerKindView
 }
 
 export interface RunDetailView {
   readonly run: ProjectRunView
   readonly events: readonly ProjectRunEventView[]
   readonly truncated: boolean
+  /** Additive (Phase 4): the run's tasks in plan order; absent when the Host has no task service. */
+  readonly tasks?: readonly ProjectTaskView[]
 }
 
 export interface CreateRunInput {

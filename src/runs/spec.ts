@@ -1,24 +1,22 @@
-/** Harness storage-domain declaration for DSH Projects Run state (Phase 1) + Run Plans (Phase 2). */
+/** Harness storage-domain declaration for DSH Projects Run state (Phase 1) + Run Plans (Phase 2) + Tasks (Phase 4). */
 
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
 import { runPlanRecordSchema } from '../plans/spec.ts'
 import type { RunPlanRecord } from '../plans/types.ts'
 import type { PlanId } from '../plans/types.ts'
+import { projectTaskRecordSchema, tokenUsageSchema } from '../tasks/spec.ts'
+import type { ProjectTaskRecord } from '../tasks/types.ts'
+import type { TaskId } from '../tasks/types.ts'
 import type { ProjectRunEventRecord, ProjectRunRecord, RunEventId, RunId } from './types.ts'
+
+// Re-exported for existing importers (the schema lives in `tasks/spec.ts` so
+// the runs ↔ tasks spec import edge stays one-way).
+export { tokenUsageSchema }
 
 const id = z.uuid()
 const nonBlank = z.string().trim().min(1)
 const timestamp = z.string().refine(value => Number.isFinite(Date.parse(value)), 'expected an ISO timestamp')
-
-const tokenUsageSchema = z.object({
-  input: z.number().int().min(0),
-  output: z.number().int().min(0),
-  cacheRead: z.number().int().min(0),
-  cacheWrite: z.number().int().min(0),
-  reasoning: z.number().int().min(0),
-  total: z.number().int().min(0),
-})
 
 export const projectRunRecordSchema = z.object({
   id,
@@ -43,6 +41,11 @@ export const projectRunRecordSchema = z.object({
   activePlanId: id.optional(),
   /** Additive (Phase 3): prefixed session id (`dsh-coordinator-<uuid>`), not a bare uuid. */
   coordinatorSessionId: nonBlank.optional(),
+  /**
+   * Additive (Phase 4): per-run task concurrency override. Absent uses the
+   * default of 1 (shared working tree pre-Phase 5).
+   */
+  maxConcurrentAgents: z.number().int().min(1).max(50).optional(),
   createdAt: timestamp,
   updatedAt: timestamp,
   phaseChangedAt: timestamp,
@@ -59,6 +62,9 @@ export const RUN_EVENT_TYPES = [
   'plan.created', 'plan.approval.requested', 'plan.approved', 'plan.rejected',
   'plan.superseded', 'plan.completed', 'run.replanned',
   'run.coordinator.started', 'run.coordinator.completed', 'run.coordinator.failed',
+  // Additive (Phase 4): task lifecycle. One aggregate materialization event
+  // plus per-task ready/started/completed/failed (spec §3.4).
+  'tasks.materialized', 'task.ready', 'task.started', 'task.completed', 'task.failed',
 ] as const satisfies readonly ProjectRunEventRecord['type'][]
 
 export const projectRunEventRecordSchema = z.object({
@@ -83,5 +89,7 @@ export const dshProjectsDomainSpec = defineDomain({
     run_events: domainTable<RunEventId, ProjectRunEventRecord>(projectRunEventRecordSchema),
     // Additive (Phase 2): versioned Run Plans.
     plans: domainTable<PlanId, RunPlanRecord>(runPlanRecordSchema),
+    // Additive (Phase 4): durable Project Task DAG rows.
+    tasks: domainTable<TaskId, ProjectTaskRecord>(projectTaskRecordSchema),
   },
 })

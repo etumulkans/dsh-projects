@@ -56,6 +56,8 @@ export interface DashboardDataPort {
     expectedRevision?: number
     replanReason?: string
   }): Promise<RunPlanRecord>
+  /** Phase 4: re-queue one failed task (the view refreshes from the next snapshot). */
+  taskRetry(taskId: string): Promise<void>
 }
 
 /** Root overlay visibility shared by the sidebar trigger and shell-overlay entry. */
@@ -258,6 +260,18 @@ export class DashboardDataController implements DashboardDataPort {
     }
   }
 
+  async taskRetry(taskId: string): Promise<void> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'taskRetry', { taskId }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
   private async readState(): Promise<void> {
     await this.call('state', {}, false)
   }
@@ -347,11 +361,12 @@ function parseRunDetail(value: unknown): RunDetailView {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run detail data')
   }
-  const detail = value as { run?: unknown; events?: unknown; truncated?: unknown }
+  const detail = value as { run?: unknown; events?: unknown; truncated?: unknown; tasks?: unknown }
   if (!isRunView(detail.run)
     || !Array.isArray(detail.events)
     || !detail.events.every(isRunEventView)
-    || typeof detail.truncated !== 'boolean') {
+    || typeof detail.truncated !== 'boolean'
+    || (detail.tasks !== undefined && (!Array.isArray(detail.tasks) || !detail.tasks.every(isTaskView)))) {
     throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run detail data')
   }
   return value as RunDetailView
@@ -388,6 +403,32 @@ function isRunPlanRecord(value: unknown): boolean {
     && (plan.supersedesPlanId === undefined || typeof plan.supersedesPlanId === 'string')
     && typeof plan.createdAt === 'string'
     && typeof plan.revision === 'number'
+}
+
+function isTaskView(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const task = value as Record<string, unknown>
+  return typeof task.id === 'string'
+    && typeof task.runId === 'string'
+    && typeof task.planId === 'string'
+    && typeof task.planTaskId === 'string'
+    && typeof task.title === 'string'
+    && (task.role === undefined || typeof task.role === 'string')
+    && Array.isArray(task.dependencies)
+    && typeof task.status === 'string'
+    && (task.assignedAgentId === undefined || typeof task.assignedAgentId === 'string')
+    && Array.isArray(task.acceptanceCriteria)
+    && typeof task.attempt === 'number'
+    && (task.maxAttempts === undefined || typeof task.maxAttempts === 'number')
+    && (task.outputSummary === undefined || typeof task.outputSummary === 'string')
+    && (task.error === undefined || typeof task.error === 'string')
+    && (task.tokenUsage === undefined || (task.tokenUsage !== null && typeof task.tokenUsage === 'object'))
+    && (task.turnCount === undefined || typeof task.turnCount === 'number')
+    && (task.startedAt === undefined || typeof task.startedAt === 'string')
+    && (task.completedAt === undefined || typeof task.completedAt === 'string')
+    && typeof task.createdAt === 'string'
+    && typeof task.updatedAt === 'string'
+    && typeof task.version === 'number'
 }
 
 function isRunView(value: unknown): boolean {

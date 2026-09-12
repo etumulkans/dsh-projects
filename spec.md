@@ -452,16 +452,16 @@ no RPC-side wiring needed.
 ## 8. Events and errors
 
 - Run event types: +5 (`§3.4`); `RUN_EVENT_TYPES` is 18 entries.
-- New `DashboardErrorCode`s (7, `task.*` namespace):
+- New `DashboardErrorCode`s (5, `task.*` namespace) — every code has a real
+  generation path; internal CAS conflicts on expected concurrent moves are
+  logged no-ops (the stale-result discipline), not client errors:
 
 | Code | When |
 | --- | --- |
 | `task.notStarted` | service not started |
-| `task.unknown` | unknown task id (RPC, stale results) |
-| `task.transitionInvalid` | rejected task edge |
-| `task.versionConflict` | stale CAS on an operator action |
+| `task.unknown` | unknown task id (operator retry on a missing task) |
 | `task.retryNotAllowed` | `taskRetry` on a non-`failed` task |
-| `task.workerUnavailable` | no agent runtime in the composition / selected kind absent |
+| `task.workerUnavailable` | selected worker runtime absent from the composition |
 | `task.dagInvalid` | materialization graph validation failure (defensive) |
 
 Client `ERROR_TRANSLATION_KEYS` + zh/en `locales.ts` entries for all 7 (the
@@ -537,7 +537,7 @@ src/rpc/handler.ts  9th param taskService?; taskRetry case; runDetail + tasks;
 src/index.ts        worker resolution (§6.4) → ProjectTaskService; hook chain
                     onPlanStatus: coupler → taskService; start/stop chain;
                     snapshot projection wiring
-src/client/         controller.ts +taskRetry port; errors.ts +7 keys;
+src/client/         controller.ts +taskRetry port; errors.ts +5 keys;
                     locales.ts + zh/en; Dashboard.tsx Tasks section;
                     fixture.ts tasks; styles.ts .dshd-tasks*
 ```

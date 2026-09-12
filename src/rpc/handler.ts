@@ -9,6 +9,7 @@ import { RUN_PLAN_PATTERNS, RUN_PLAN_STATUSES } from '../plans/spec.ts'
 import type { RunPlanService } from '../plans/plan-service.ts'
 import type { CreatePlanInput, PlannedTaskInput, RunPlanPattern, RunPlanStatus } from '../plans/types.ts'
 import type { CoordinatorService } from '../coordinator/coordinator-service.ts'
+import type { ProjectTaskService } from '../tasks/task-service.ts'
 import type { DashboardSnapshot } from '../runtime/types.ts'
 
 /** Dispatch the intentionally small Dashboard RPC surface. */
@@ -21,6 +22,7 @@ export async function handleDashboardRpc(
   runs?: ProjectRunService,
   plans?: RunPlanService,
   coordinator?: CoordinatorService,
+  tasks?: ProjectTaskService,
 ): Promise<RpcResult<unknown>> {
   if (signal.aborted) {
     return failure('cancelled', localizedError('request.cancelled', 'Dashboard request was cancelled'))
@@ -32,10 +34,10 @@ export async function handleDashboardRpc(
     }
     switch (endpoint) {
       case 'state':
-        return success(await snapshotWithRuns(runtime, runs))
+        return success(await snapshotWithRuns(runtime, runs, tasks))
       case 'refresh':
         await runtime.refresh()
-        return success(await snapshotWithRuns(runtime, runs))
+        return success(await snapshotWithRuns(runtime, runs, tasks))
       case 'issue': {
         const key = readStringField(payload, 'key')
         if (key === undefined) return badRequest('issue requires a non-empty `key`')
@@ -135,13 +137,16 @@ export async function handleDashboardRpc(
         const input = readCreateRun(payload)
         if (typeof input === 'string') return badRequest(input)
         await runs.createRun(input, runtime.selection() ?? { mode: 'global' })
-        return success(await snapshotWithRuns(runtime, runs))
+        return success(await snapshotWithRuns(runtime, runs, tasks))
       }
       case 'runDetail': {
         if (runs === undefined) return badRequest('runDetail is unavailable: the Project Run service is not mounted')
         const runId = readStringField(payload, 'runId')
         if (runId === undefined) return badRequest('runDetail requires a non-empty `runId`')
-        return success(await runs.runDetail(runId))
+        const detail = await runs.runDetail(runId)
+        // Additive (Phase 4): attach the run's tasks when a task service is mounted.
+        if (tasks === undefined) return success(detail)
+        return success({ ...detail, tasks: tasks.taskList(detail.run.id) })
       }
       case 'runTransition': {
         if (runs === undefined) return badRequest('runTransition is unavailable: the Project Run service is not mounted')
@@ -160,7 +165,7 @@ export async function handleDashboardRpc(
           ...(error === undefined ? {} : { error }),
           ...(resultSummary === undefined ? {} : { resultSummary }),
         })
-        return success(await snapshotWithRuns(runtime, runs))
+        return success(await snapshotWithRuns(runtime, runs, tasks))
       }
       case 'planCreate': {
         if (plans === undefined) return badRequest('planCreate is unavailable: the Run Plan service is not mounted')
@@ -200,6 +205,12 @@ export async function handleDashboardRpc(
         const runId = readUuidField(payload, 'runId')
         if (runId === undefined) return badRequest('runCoordinate requires a uuid `runId`')
         return success(await coordinator.coordinate(runId))
+      }
+      case 'taskRetry': {
+        if (tasks === undefined) return badRequest('taskRetry is unavailable: the Task service is not mounted')
+        const taskId = readUuidField(payload, 'taskId')
+        if (taskId === undefined) return badRequest('taskRetry requires a uuid `taskId`')
+        return success(await tasks.taskRetry(taskId))
       }
       default:
         return badRequest(`unknown Dashboard endpoint ${JSON.stringify(endpoint)}`)
@@ -263,12 +274,26 @@ function readUpdateTask(value: unknown): import('../task-source/index.ts').Updat
 }
 
 /** Attach the additive `runs` projection without disturbing the base Dashboard snapshot. */
-async function snapshotWithRuns(runtime: DashboardRuntimeCoordinator, runs?: ProjectRunService): Promise<DashboardSnapshot> {
+async function snapshotWithRuns(
+  runtime: DashboardRuntimeCoordinator,
+  runs?: ProjectRunService,
+  tasks?: ProjectTaskService,
+): Promise<DashboardSnapshot> {
   const snapshot = await runtime.snapshot()
   if (runs === undefined) return snapshot
   const selection = runtime.selection()
   if (selection === undefined) return snapshot
-  return { ...snapshot, runs: await runs.listForSnapshot(selection) }
+  const summary = await runs.listForSnapshot(selection)
+  // Additive (Phase 4): the worker kind + per-run task counts when a task service is mounted.
+  if (tasks === undefined) return { ...snapshot, runs: summary }
+  return {
+    ...snapshot,
+    runs: {
+      ...summary,
+      worker: tasks.workerKind(),
+      runs: summary.runs.map(view => ({ ...view, taskCounts: tasks.taskCounts(view.id) })),
+    },
+  }
 }
 
 const RUN_SOURCES = ['manual', 'tracker', 'schedule', 'webhook', 'repository-event', 'system'] as const

@@ -29,6 +29,7 @@ import { buildTaskTimelinePage } from '../runtime/timeline.ts'
 import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
 import type { CreateRunInput, ProjectRunEventView, ProjectRunPhase, ProjectRunView, RunDetailView } from '../runs/types.ts'
 import type { CreatePlanInput, PlannedTaskInput, RunPlanPattern, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
+import type { ProjectTaskView, TaskWorkerKindView } from '../tasks/types.ts'
 import type { DashboardDataPort } from './controller.ts'
 import { DashboardUiController } from './controller.ts'
 import { dashboardErrorMessage } from './errors.ts'
@@ -144,6 +145,7 @@ export function DashboardOverlay({ ui, data, openSession, t }: DashboardOverlayP
           onPlanCreate={input => data.createPlan(input)}
           onLoadPlans={runId => data.loadPlans(runId)}
           onPlanTransition={input => data.planTransition(input)}
+          onTaskRetry={taskId => data.taskRetry(taskId)}
           onOpenSession={(sessionId) => { ui.close(); openSession(sessionId) }}
         />
       </DashboardI18nProvider>
@@ -189,6 +191,8 @@ export interface DashboardSurfaceProps {
     readonly expectedRevision?: number
     readonly replanReason?: string
   }) => Promise<RunPlanRecord>) | undefined
+  /** Phase 4: re-queue one failed task from the Run inspector. */
+  readonly onTaskRetry?: ((taskId: string) => Promise<void>) | undefined
   readonly onOpenSession: (sessionId: string) => void
 }
 
@@ -232,6 +236,7 @@ export function DashboardSurface({
   onPlanCreate,
   onLoadPlans,
   onPlanTransition,
+  onTaskRetry,
   onOpenSession,
 }: DashboardSurfaceProps) {
   const t = useDashboardTranslation()
@@ -584,6 +589,8 @@ export function DashboardSurface({
           onLoadPlans={onLoadPlans}
           onPlanCreate={onPlanCreate}
           onPlanTransition={onPlanTransition}
+          onTaskRetry={onTaskRetry}
+          worker={snapshot?.runs?.worker}
         />
       ) : null}
       {newRunOpen && onCreateRun !== undefined ? (
@@ -2067,7 +2074,7 @@ function RunListView({ summary, runs, global, busy, selectedRunId, onSelect, onN
   )
 }
 
-function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cancelPending, pausePending, resumePending, onRefresh, refreshPending, onLoadDetail, onCoordinateRun, onLoadPlans, onPlanCreate, onPlanTransition }: {
+function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cancelPending, pausePending, resumePending, onRefresh, refreshPending, onLoadDetail, onCoordinateRun, onLoadPlans, onPlanCreate, onPlanTransition, onTaskRetry, worker }: {
   readonly run: ProjectRunView
   readonly global: boolean
   readonly onClose: () => void
@@ -2089,6 +2096,10 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
     readonly expectedRevision?: number
     readonly replanReason?: string
   }) => Promise<RunPlanRecord>) | undefined
+  /** Phase 4: re-queue one failed task. */
+  readonly onTaskRetry?: ((taskId: string) => Promise<void>) | undefined
+  /** Phase 4: the worker kind the Host can currently execute tasks with. */
+  readonly worker?: TaskWorkerKindView | undefined
 }) {
   const t = useDashboardTranslation()
   const [detail, setDetail] = useState<RunDetailView | undefined>()
@@ -2110,6 +2121,27 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
   // started; progress is observed through the event stream + refresh.
   const [coordinatePending, setCoordinatePending] = useState(false)
   const [coordinateNotice, setCoordinateNotice] = useState<{ readonly tone: 'success' | 'error'; readonly message: string } | undefined>()
+
+  // Phase 4: per-task retry (failed rows only); the task row re-renders from
+  // the next detail/snapshot load after the re-queue lands.
+  const [retryingTaskIds, setRetryingTaskIds] = useState<readonly string[]>([])
+  const [taskNotice, setTaskNotice] = useState<{ readonly tone: 'success' | 'error'; readonly message: string } | undefined>()
+
+  const retryTask = async (taskId: string): Promise<void> => {
+    if (onTaskRetry === undefined) return
+    setTaskNotice(undefined)
+    setRetryingTaskIds(current => [...current, taskId])
+    try {
+      await onTaskRetry(taskId)
+      setTaskNotice({ tone: 'success', message: t('runs.tasks.retried') })
+      await onRefresh(run.id)
+      void loadDetail()
+    } catch (retryError) {
+      setTaskNotice({ tone: 'error', message: dashboardErrorMessage(retryError, t) })
+    } finally {
+      setRetryingTaskIds(current => current.filter(id => id !== taskId))
+    }
+  }
 
   const coordinate = async (): Promise<void> => {
     if (onCoordinateRun === undefined) return
@@ -2206,6 +2238,16 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
   const coordinatorStateLabel = coordinatorState === 'complete'
     ? t('runs.coordinator.complete')
     : coordinatorState === 'failed' ? t('runs.coordinator.failed') : t('runs.coordinator.progress')
+  // Phase 4: tasks come from the additive `runDetail.tasks` field; the worker
+  // banner comes from the snapshot-level worker kind (spec §10).
+  const tasks = detail?.tasks
+  const taskById = useMemo(() => {
+    const map = new Map<string, ProjectTaskView>()
+    for (const task of detail?.tasks ?? []) map.set(task.id, task)
+    return map
+  }, [detail?.tasks])
+  const taskDepLabel = (depId: string): string => taskById.get(depId)?.planTaskId ?? depId.slice(-6)
+  const taskCounts = run.taskCounts
   return (
     <>
       <aside
@@ -2229,6 +2271,9 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
         <span>{runSourceLabel(run.source, t)}</span>
         {activePlan !== undefined ? (
           <span className="dshd-plan-chip" data-active="true">{t('runs.activePlan', { version: activePlan.version })}</span>
+        ) : null}
+        {taskCounts !== undefined && taskCounts.total > 0 ? (
+          <span className="dshd-tasks-chip">{t('runs.tasks.headerCounts', { done: taskCounts.succeeded, total: taskCounts.total })}</span>
         ) : null}
       </div>
       <div className="dshd-inspector-body">
@@ -2409,6 +2454,68 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
               </ul>
             </>
           ) : null}
+        </InspectorSection>
+        <InspectorSection title={t('inspector.tasks')}>
+          {worker !== undefined ? (
+            <div className="dshd-tasks-worker" data-kind={worker}>
+              {worker === 'unavailable'
+                ? t('runs.tasks.worker.unavailable')
+                : t(worker === 'local' ? 'runs.tasks.worker.local' : 'runs.tasks.worker.agentTeam')}
+            </div>
+          ) : null}
+          {taskNotice !== undefined ? (
+            <div className="dshd-plan-notice" data-tone={taskNotice.tone} role="status">{taskNotice.message}</div>
+          ) : null}
+          {tasks === undefined ? (
+            <div className="dshd-inspector-runtime-empty">{detailLoading ? t('runs.tasks.loading') : t('runs.tasks.empty')}</div>
+          ) : tasks.length === 0 ? (
+            <div className="dshd-tasks-empty">{t('runs.tasks.empty')}</div>
+          ) : (
+            <ul className="dshd-tasks-list">
+              {tasks.map(task => {
+                const retrying = retryingTaskIds.includes(task.id)
+                const failedDeps = task.dependencies.filter(depId => taskById.get(depId)?.status === 'failed')
+                return (
+                  <li key={task.id} className={`dshd-task-row dshd-task-row-${task.status}`}>
+                    <span className={`dshd-task-status dshd-task-status-${task.status}`}>{t(`runs.tasks.status.${task.status}`)}</span>
+                    <div className="dshd-task-main">
+                      <strong>{task.title}</strong>
+                      <div className="dshd-task-meta">
+                        {task.role !== undefined ? <span className="dshd-task-role">{task.role}</span> : null}
+                        {task.dependencies.length > 0 ? (
+                          <span className="dshd-task-deps">{t('runs.tasks.dependsOn', { deps: task.dependencies.map(taskDepLabel).join(', ') })}</span>
+                        ) : null}
+                        <span className="dshd-task-attempt">
+                          {task.maxAttempts !== undefined
+                            ? t('runs.tasks.attempt', { attempt: task.attempt, max: task.maxAttempts })
+                            : String(task.attempt)}
+                        </span>
+                        {task.assignedAgentId !== undefined ? <span className="dshd-task-agent">{task.assignedAgentId.slice(-8)}</span> : null}
+                        {task.startedAt !== undefined ? <small>{relativeTime(task.startedAt, t)}</small> : null}
+                        {task.tokenUsage !== undefined ? <span className="dshd-task-tokens">{compactNumber(task.tokenUsage.total, t)}</span> : null}
+                      </div>
+                      {task.status === 'blocked' && failedDeps.length > 0 ? (
+                        <span className="dshd-task-blocked">{t('runs.tasks.blockedBy', { deps: failedDeps.map(taskDepLabel).join(', ') })}</span>
+                      ) : null}
+                      {task.outputSummary !== undefined ? <p className="dshd-task-summary">{truncate(task.outputSummary, 160)}</p> : null}
+                      {task.error !== undefined ? <p className="dshd-task-error">{task.error}</p> : null}
+                    </div>
+                    {task.status === 'failed' && onTaskRetry !== undefined ? (
+                      <button
+                        type="button"
+                        className="dshd-plain-control"
+                        disabled={retrying}
+                        aria-busy={retrying}
+                        onClick={() => { void retryTask(task.id) }}
+                      >
+                        <span>{retrying ? t('runs.tasks.retrying') : t('runs.tasks.retry')}</span>
+                      </button>
+                    ) : null}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
         </InspectorSection>
         <InspectorSection title={t('runs.events')} grow>
           {detailError !== undefined ? <div className="dshd-inspector-runtime-empty">{dashboardErrorMessage(detailError, t)}</div> : null}

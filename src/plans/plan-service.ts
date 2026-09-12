@@ -30,6 +30,7 @@ const PLAN_LIST_LIMIT = 50
 const MAX_PLAN_RATIONALE_LENGTH = 2_000
 const MAX_PLAN_TASKS = 50
 const MAX_TASK_TITLE_LENGTH = 300
+const MAX_TASK_ROLE_LENGTH = 100
 const MAX_TASK_DESCRIPTION_LENGTH = 4_000
 const MAX_TASK_CRITERIA = 20
 const MAX_CRITERION_LENGTH = 500
@@ -169,6 +170,13 @@ export class RunPlanService {
           maxLength: MAX_TASK_TITLE_LENGTH,
         })
       }
+      const role = (taskInput.role ?? '').trim()
+      if (role.length > MAX_TASK_ROLE_LENGTH) {
+        throw new DashboardDomainError('plan.contentInvalid', `planned task ${id} role must be at most ${MAX_TASK_ROLE_LENGTH} characters`, {
+          task: id,
+          maxLength: MAX_TASK_ROLE_LENGTH,
+        })
+      }
       const description = taskInput.description.trim()
       if (description === '' || description.length > MAX_TASK_DESCRIPTION_LENGTH) {
         throw new DashboardDomainError('plan.contentInvalid', `planned task ${id} requires a description of at most ${MAX_TASK_DESCRIPTION_LENGTH} characters`, {
@@ -198,6 +206,7 @@ export class RunPlanService {
         id,
         title,
         description,
+        ...(role === '' ? {} : { role }),
         dependencies: [...(taskInput.dependencies ?? [])],
         acceptanceCriteria: [...criteria],
       })
