@@ -5,6 +5,7 @@ import { DashboardDomainError, decodeDashboardError } from '../src/runtime/error
 import type { DashboardRuntimeCoordinator } from '../src/runtime/coordinator.ts'
 import type { RunPlanService } from '../src/plans/plan-service.ts'
 import type { ProjectRunService } from '../src/runs/run-service.ts'
+import type { ProjectTaskService } from '../src/tasks/task-service.ts'
 import type { ProjectCatalogSelection } from '../src/catalog/types.ts'
 
 describe('Dashboard RPC project switching', () => {
@@ -563,5 +564,161 @@ describe('Dashboard RPC Coordinator (Phase 3)', () => {
     const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
     const result = await handleDashboardRpc(runtime, 'runCoordinate', { runId: PLAN_RUN_ID }, new AbortController().signal, Promise.resolve())
     expect(result).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
+})
+
+function fakeTaskService(overrides: Partial<Record<'taskList' | 'taskCounts' | 'taskRetry' | 'workerKind', unknown>> = {}) {
+  return {
+    taskList: vi.fn(() => []),
+    taskCounts: vi.fn(() => ({ total: 0, pending: 0, ready: 0, running: 0, blocked: 0, failed: 0, succeeded: 0 })),
+    taskRetry: vi.fn(async () => ({})),
+    workerKind: vi.fn(() => 'local'),
+    ...overrides,
+  } as unknown as ProjectTaskService
+}
+
+const TASK_ID = 'c1a2b3c4-d5e6-4f70-8192-a3b4c5d6e7f8'
+
+describe('Dashboard RPC Task execution', () => {
+  it('dispatches taskRetry with a validated uuid taskId', async () => {
+    const taskRetry = vi.fn(async (taskId: string) => ({ id: taskId, status: 'ready' }))
+    const tasks = fakeTaskService({ taskRetry })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const result = await handleDashboardRpc(
+      runtime,
+      'taskRetry',
+      { taskId: TASK_ID },
+      new AbortController().signal,
+      Promise.resolve(),
+      undefined,
+      undefined,
+      undefined,
+      tasks,
+    )
+
+    expect(taskRetry).toHaveBeenCalledWith(TASK_ID)
+    expect(result).toEqual({ ok: true, value: { id: TASK_ID, status: 'ready' } })
+  })
+
+  it('rejects invalid taskRetry payloads and a missing service before dispatch', async () => {
+    const taskRetry = vi.fn(async () => ({}))
+    const tasks = fakeTaskService({ taskRetry })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const signal = () => new AbortController().signal
+
+    const nonUuid = await handleDashboardRpc(
+      runtime, 'taskRetry', { taskId: 'nope' }, signal(), Promise.resolve(), undefined, undefined, undefined, tasks,
+    )
+    expect(nonUuid).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    const missing = await handleDashboardRpc(
+      runtime, 'taskRetry', {}, signal(), Promise.resolve(), undefined, undefined, undefined, tasks,
+    )
+    expect(missing).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    const unmounted = await handleDashboardRpc(runtime, 'taskRetry', { taskId: TASK_ID }, signal(), Promise.resolve())
+    expect(unmounted).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    expect(taskRetry).not.toHaveBeenCalled()
+  })
+
+  it('carries taskRetry domain errors as structured bad requests', async () => {
+    const taskRetry = vi.fn(async () => {
+      throw new DashboardDomainError('task.retryNotAllowed', 'not retryable', { taskId: TASK_ID, status: 'ready' })
+    })
+    const tasks = fakeTaskService({ taskRetry })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const result = await handleDashboardRpc(
+      runtime,
+      'taskRetry',
+      { taskId: TASK_ID },
+      new AbortController().signal,
+      Promise.resolve(),
+      undefined,
+      undefined,
+      undefined,
+      tasks,
+    )
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (result.ok) throw new Error('expected failure')
+    expect(decodeDashboardError(result.error.message)).toMatchObject({
+      dashboardCode: 'task.retryNotAllowed',
+      params: { taskId: TASK_ID, status: 'ready' },
+    })
+  })
+
+  it('attaches the run tasks to runDetail only when a task service is mounted', async () => {
+    const taskList = vi.fn(() => [{ id: TASK_ID, status: 'succeeded' }])
+    const tasks = fakeTaskService({ taskList })
+    const runs = fakeRunService({ runDetail: vi.fn(async () => ({ run: { id: PLAN_RUN_ID }, events: [], truncated: false })) })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const withTasks = await handleDashboardRpc(
+      runtime,
+      'runDetail',
+      { runId: PLAN_RUN_ID },
+      new AbortController().signal,
+      Promise.resolve(),
+      runs,
+      undefined,
+      undefined,
+      tasks,
+    )
+    expect(taskList).toHaveBeenCalledWith(PLAN_RUN_ID)
+    expect(withTasks).toMatchObject({
+      ok: true,
+      value: expect.objectContaining({
+        run: { id: PLAN_RUN_ID },
+        tasks: [{ id: TASK_ID, status: 'succeeded' }],
+      }),
+    })
+
+    const withoutTasks = await handleDashboardRpc(
+      runtime, 'runDetail', { runId: PLAN_RUN_ID }, new AbortController().signal, Promise.resolve(), runs,
+    )
+    expect(withoutTasks).toMatchObject({ ok: true, value: expect.objectContaining({ run: { id: PLAN_RUN_ID } }) })
+    if (withoutTasks.ok) expect(withoutTasks.value).not.toHaveProperty('tasks')
+  })
+
+  it('enriches state and refresh with the worker kind and per-run task counts', async () => {
+    const counts = { total: 2, pending: 0, ready: 0, running: 1, blocked: 0, failed: 0, succeeded: 1 }
+    const taskCounts = vi.fn((runId: string) => (runId === 'run-1' ? counts : { ...counts, total: 0 }))
+    const tasks = fakeTaskService({ taskCounts })
+    const projection = { runs: [{ id: 'run-1' }, { id: 'run-2' }], total: 2 }
+    const runs = fakeRunService({ listForSnapshot: vi.fn(async () => projection) })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const state = await handleDashboardRpc(
+      runtime, 'state', {}, new AbortController().signal, Promise.resolve(), runs, undefined, undefined, tasks,
+    )
+    expect(state).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        runs: expect.objectContaining({
+          worker: 'local',
+          runs: [
+            expect.objectContaining({ id: 'run-1', taskCounts: counts }),
+            expect.objectContaining({ id: 'run-2', taskCounts: { ...counts, total: 0 } }),
+          ],
+        }),
+      }),
+    })
+    expect(taskCounts).toHaveBeenNthCalledWith(1, 'run-1')
+    expect(taskCounts).toHaveBeenNthCalledWith(2, 'run-2')
+
+    const refresh = await handleDashboardRpc(
+      runtime, 'refresh', {}, new AbortController().signal, Promise.resolve(), runs, undefined, undefined, tasks,
+    )
+    expect(refresh).toMatchObject({ ok: true, value: expect.objectContaining({ runs: expect.objectContaining({ worker: 'local' }) }) })
+
+    const plain = await handleDashboardRpc(runtime, 'state', {}, new AbortController().signal, Promise.resolve(), runs)
+    expect(plain).toMatchObject({ ok: true, value: expect.objectContaining({ runs: projection }) })
+    if (plain.ok) {
+      expect(plain.value).not.toHaveProperty('worker')
+      expect((plain.value as { runs?: { runs?: unknown[] } }).runs?.runs?.[0]).not.toHaveProperty('taskCounts')
+    }
   })
 })

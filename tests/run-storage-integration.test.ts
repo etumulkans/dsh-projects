@@ -22,8 +22,11 @@ import type {
   CoordinatorDriverResult,
 } from '../src/coordinator/session-driver.ts'
 import { RunPlanService } from '../src/plans/plan-service.ts'
+import type { PlanStatusChangedEvent } from '../src/plans/plan-service.ts'
 import { dshProjectsDomainSpec } from '../src/runs/spec.ts'
 import { ProjectRunService } from '../src/runs/run-service.ts'
+import { ProjectTaskService } from '../src/tasks/task-service.ts'
+import type { TaskWorker, TaskWorkerInput, TaskWorkerResult } from '../src/tasks/worker.ts'
 
 const temporaryRoots: string[] = []
 const contexts: Context[] = []
@@ -191,7 +194,9 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs'])
+    // Phase 4 adds the `tasks` table to the domain (empty here — no tasks in
+    // this leg); every declared table is created on domain open.
+    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs', 'tasks'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(2)
     // 10 boot-1 events + 3 boot-2 events (resume, finalize, completed)
@@ -287,7 +292,9 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs'])
+    // Phase 4 adds the `tasks` table to the domain (empty here — no tasks in
+    // this leg); every declared table is created on domain open.
+    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs', 'tasks'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(1)
     // 7 boot-1 events + 2 boot-2 events (approve, phase change to executing)
@@ -327,6 +334,127 @@ describe('ProjectRunService against real JSON storage', () => {
 
     const third = new ProjectRunService(ctx, catalogFixture())
     await expect(third.start()).rejects.toThrow(/version/i)
+
+    dispose()
+  })
+
+  it('materializes plan tasks into the shared domain and persists them across a domain reopen', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projects-run-it-'))
+    temporaryRoots.push(root)
+    const { ctx, facility, dispose } = await boot(root)
+    const clock = () => new Date(Date.UTC(2026, 7, 14, 4, 0, 0)).toISOString()
+    // A worker that never resolves: the leg exercises materialization and
+    // persistence, not the adapters (covered by the unit suites). t1 starts
+    // and stays running; t2 waits on its dependency.
+    const worker: TaskWorker = {
+      kind: 'local',
+      start: (_input: TaskWorkerInput): Promise<TaskWorkerResult> => new Promise(() => undefined),
+      async stop(): Promise<void> { /* nothing to stop */ },
+    }
+
+    // --- boot 1: run -> executing, activate a two-task plan, materialize ---
+    const first = new ProjectRunService(ctx, catalogFixture(), clock)
+    await first.start()
+    const firstTasks = new ProjectTaskService(ctx, catalogFixture(), first, worker, clock)
+    firstTasks.start()
+    const firstPlans = new RunPlanService(ctx, first, clock, {
+      onPlanStatus: (event: PlanStatusChangedEvent) => firstTasks.handlePlanStatus(event),
+    })
+    firstPlans.start()
+    const run = await first.createRun(
+      { goal: 'Integration: tasks survive a real storage restart', sourceRef: 'IT-T' },
+      { mode: 'project', projectId: PROJECT_ID },
+    )
+    await first.transitionRun(run.id, 'planning')
+    await first.transitionRun(run.id, 'executing')
+    const plan = await firstPlans.createPlan({
+      runId: run.id,
+      pattern: 'supervisor',
+      rationale: 'two-step integration work',
+      tasks: [
+        { title: 'implement the feature', description: 'build it', acceptanceCriteria: ['it works'] },
+        { title: 'verify the feature', description: 'prove it', dependencies: ['t1'] },
+      ],
+    })
+    await firstPlans.transitionPlan(plan.id, 'active')
+
+    // Materialization (and the first tick) completed inside the awaited plan
+    // transition: t1 is running with a session id, t2 is pending on it.
+    const materialized = firstTasks.taskList(run.id)
+    expect(materialized).toHaveLength(2)
+    const byPosition = new Map(materialized.map(task => [task.planTaskId, task]))
+    expect(byPosition.get('t1')).toMatchObject({ status: 'running', attempt: 1 })
+    expect(byPosition.get('t1')!.assignedAgentId).toMatch(/^dsh-task-/u)
+    expect(byPosition.get('t2')).toMatchObject({ status: 'pending', attempt: 0 })
+    // The dependency resolved from the plan position to the real task id.
+    expect(byPosition.get('t2')!.dependencies).toEqual([byPosition.get('t1')!.id])
+    expect(firstTasks.taskCounts(run.id)).toMatchObject({ total: 2, running: 1, pending: 1 })
+
+    const detail = await first.runDetail(run.id)
+    expect(detail.events.some(event => event.type === 'tasks.materialized' && event.detail === 'plan v1: 2 tasks')).toBe(true)
+    expect(detail.events.some(event => event.type === 'task.started')).toBe(true)
+    firstPlans.stop()
+    firstTasks.stop()
+    await first.stop()
+    await facility.closeAll()
+
+    // --- boot 2: fresh services over the same medium ---
+    const second = new ProjectRunService(ctx, catalogFixture(), clock)
+    await second.start()
+    const secondTasks = new ProjectTaskService(ctx, catalogFixture(), second, worker, clock)
+    secondTasks.start()
+    const secondPlans = new RunPlanService(ctx, second, clock, {
+      onPlanStatus: (event: PlanStatusChangedEvent) => secondTasks.handlePlanStatus(event),
+    })
+    secondPlans.start()
+    try {
+      const tasks = secondTasks.taskList(run.id)
+      expect(tasks).toHaveLength(2)
+      const byPosition2 = new Map(tasks.map(task => [task.planTaskId, task]))
+      // The running task comes back exactly as persisted (zod-validated on
+      // the domain reopen), including its session identity.
+      expect(byPosition2.get('t1')).toMatchObject({
+        status: 'running',
+        attempt: 1,
+        title: 'implement the feature',
+        acceptanceCriteria: ['it works'],
+        maxAttempts: 3,
+      })
+      expect(byPosition2.get('t1')!.assignedAgentId).toBe(byPosition.get('t1')!.assignedAgentId)
+      expect(byPosition2.get('t2')).toMatchObject({
+        status: 'pending',
+        attempt: 0,
+        dependencies: [byPosition2.get('t1')!.id],
+      })
+      expect(secondTasks.taskCounts(run.id)).toMatchObject({ total: 2, running: 1, pending: 1 })
+
+      // The run and its task events survive with the task stream intact.
+      const reopened = await second.runDetail(run.id)
+      expect(reopened.run).toMatchObject({ phase: 'executing', activePlanId: plan.id })
+      expect(reopened.events.some(event => event.type === 'tasks.materialized')).toBe(true)
+      expect(reopened.events.some(event => event.type === 'task.started')).toBe(true)
+      expect(secondPlans.planList(run.id)).toHaveLength(1)
+    } finally {
+      secondPlans.stop()
+      secondTasks.stop()
+      await second.stop()
+    }
+
+    // The medium carries the tasks table with both validated records.
+    const entries = await readdir(root, { recursive: true })
+    const mediumFile = entries.find(entry => String(entry).includes('dsh_projects') && String(entry).endsWith('.json'))
+    expect(mediumFile).toBeDefined()
+    const medium = JSON.parse(await readFile(join(root, String(mediumFile)), 'utf8')) as {
+      unit: { name: string; version: number }
+      tables: Record<string, Record<string, unknown>>
+    }
+    expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
+    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
+    expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(1)
+    expect(Object.keys(medium.tables.tasks ?? {})).toHaveLength(2)
+    const persistedTask = Object.values(medium.tables.tasks ?? {})[0] as Record<string, unknown>
+    expect(persistedTask).toMatchObject({ runId: run.id, planId: plan.id, maxAttempts: 3, version: expect.any(Number) })
 
     dispose()
   })

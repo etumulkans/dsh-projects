@@ -162,6 +162,7 @@ export const fixtureSnapshot: DashboardSnapshot = {
   runs: {
     projectId: '08b8e62d-5a7c-4a3a-a582-b63278347db0',
     total: 3,
+    worker: 'local',
     runs: [
       {
         id: '9f1c2a50-4d3e-4b8a-9c21-7e5b0a6d1c22',
@@ -176,6 +177,7 @@ export const fixtureSnapshot: DashboardSnapshot = {
         phaseChangedAt: '2026-08-14T02:12:00.000Z',
         version: 3,
         activePlanId: '5e0d1c88-9a47-4f2e-b3c6-7d8a1f0e9b24',
+        taskCounts: { total: 5, pending: 1, ready: 1, running: 1, blocked: 1, failed: 1, succeeded: 0 },
       },
       {
         id: '2b8d4e71-6f0a-4c1b-8d35-1a9c4f7e0b53',

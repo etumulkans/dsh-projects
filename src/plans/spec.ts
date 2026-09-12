@@ -24,6 +24,7 @@ export const plannedTaskSchema = z.object({
   id: z.string().regex(/^t[1-9][0-9]*$/),
   title: nonBlank,
   description: nonBlank,
+  role: nonBlank.optional(),
   dependencies: z.array(z.string().regex(/^t[1-9][0-9]*$/)).default([]),
   acceptanceCriteria: z.array(nonBlank).default([]),
 }).strict() as z.ZodType<PlannedTask>

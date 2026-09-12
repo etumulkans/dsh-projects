@@ -1,484 +1,630 @@
-# Spec — Phase 3: Coordinator
+# Spec — Phase 4: Task DAG + team execution
 
-**Gate:** Design · **Intent:** `intent.md` §6 (Phase 3) · **Master spec:** `DSH_PROJECTS_SPEC.md` §7–§9, §49–§51, §64, §73 (Phase 3)
-**End state:** *a manual goal can be planned by the Coordinator.*
+**Gate:** Design · **Intent:** `intent.md` §7 · **Master spec:** `DSH_PROJECTS_SPEC.md` §73 Phase 4, §11–§15, §28–§29, §31 · **Architecture:** `docs/dsh-projects-architecture.md` §3.3–§3.6, §4
 
 ## 1. Goal and success
 
-One action in the Run inspector hands a run to a **Coordinator Lead session** — a native
-Harness agent that inspects the real project state, decides *direct vs orchestrated*,
-and creates an **explicit, validated, versioned Run Plan** through the existing
-`RunPlanService`. The run's lifecycle phase follows the plan's approval state
-(coupling handed over from the Phase 2 spec non-goals). The session's outcome and a
-concise planning summary are persisted on the run and visible in the inspector.
+An **active** plan's `PlannedTask` list becomes a live **ProjectTask** DAG on the
+`dsh_projects` domain: dependency-gated scheduling, execution by real Harness
+agents behind a fakeable worker seam (a local `ctx.agents` worker by default,
+Agent Teams when configured and mounted), with task/agent state, retries, and
+lifecycle visible in the existing Dashboard (zh/en).
 
-Success = a `created`/`planning` run can be coordinated end-to-end; the plan and all
-coupling state survive a process restart against the real JSON storage backend.
-
-**No execution in this phase.** `PlannedTask` stays a plan object; task execution,
-Agent Teams, and worktrees are Phase 4/5.
+**Success (master spec §73):** *Coordinator can execute several
+dependent/parallel tasks* — end-to-end, persisted, restart-surviving, with an
+explicit "execution unavailable" state instead of fake agents when the
+composition mounts no agent runtime.
 
 ## 2. Invariants (from `intent.md` §3)
 
-All seven invariants apply. Notes specific to this phase:
-
-- Only native primitives: `ctx.agents.create`, `ctx.agentDefaultModel`,
-  `ctx.permissionPresets`, `ctx.sessions.flush`, `ctx.on`/`ctx.emit`, `defineTool`
-  (all already used by `HarnessAgentRunner` or the Phase 2 plan service). No
-  `ctx.agentTeams`, no `ctx.subagents`.
-- The coordinator uses the **existing `agentProfile` plugin config**
-  (`permissionPreset` required, optional `agentPreset`, `workerHost`) — no new
-  configuration surface.
-- Additive storage only: one optional run-record field (architecture doc §5.2
-  reserved `coordinatorSessionId`, owned by Phase 3). Domain version stays 0.
-
-## 3. Storage
-
-### 3.1 Run record (additive)
-
-`ProjectRunRecord` gains:
-
-```ts
-/** Phase 3: session id of the most recent Coordinator Lead session for this run. */
-readonly coordinatorSessionId?: string
-```
-
-- `coordinatorSessionId: z.string().trim().min(1).optional()` in
-  `projectRunRecordSchema` (`.strict()` unchanged). It is a **plain non-blank string,
-  not a uuid** — session ids are prefixed (`dsh-coordinator-<uuid>`, mirroring the
-  existing `dsh-dashboard-<uuid>` convention).
-- Flows into `ProjectRunView` via the existing `toView` record spread (no view
-  changes needed).
-- The pure run state machine (`src/runs/state-machine.ts`) carries
-  `coordinatorSessionId` through every transition, exactly like `activePlanId`
-  (conditional spread, absent stays absent).
-
-No new tables. `dsh_projects` stays at format version 0 (additive field on a strict
-schema validates against old records).
-
-### 3.2 Run event stream (enum extension)
-
-`RUN_EVENT_TYPES` (10 → 13), all additive:
-
-| type | title | detail |
-| --- | --- | --- |
-| `run.coordinator.started` | `Coordinator started` | session id (≤ 200, trimmed) |
-| `run.coordinator.completed` | `Coordinator planning complete` | the planning summary, **full length ≤ 1000 chars** (no 200-char truncation — user-facing content) |
-| `run.coordinator.failed` | `Coordinator failed` | error, ≤ 200 (trimmed) |
-
-## 4. Coordinator policy (pure module — `src/coordinator/policy.ts`)
-
-Versioned, testable, no `Context` access.
-
-```ts
-export const COORDINATOR_POLICY_VERSION = 1
-export function coordinatorGuidance(): string
-export interface CoordinatorPromptInput {
-  readonly goal: string
-  readonly projectName: string
-  readonly projectRoot: string
-  readonly runPhase: ProjectRunPhase
-  readonly existingPlans: readonly {
-    readonly version: number
-    readonly status: RunPlanStatus
-    readonly pattern: RunPlanPattern
-    readonly rationale: string
-    readonly replanReason?: string
-  }[]
-}
-export function coordinatorPrompt(input: CoordinatorPromptInput): string
-```
-
-- `coordinatorGuidance()` assembles modular sections (role; pre-decision checklist
-  from master spec §8; direct-vs-orchestrated decision rules from §9; the **plan
-  contract** naming the exact tool `dsh_projects_submit_plan` and its field
-  semantics — pattern enum, `t1..tN` ids, earlier-only dependencies, limits,
-  `replanReason` required when versions exist, exactly one submission; the
-  untrusted-content warning). Sections are individual constants; the function
-  concatenates them. Behavior: stable output for a given policy version.
-- `coordinatorPrompt()` renders the first-turn prompt: goal, project name/root,
-  run phase, existing plan versions (so a replan sees v1…), and the instruction to
-  inspect the repository as needed and then call the submission tool exactly once.
-- Both are pure string functions; the test plan asserts on their content, not on a
-  model.
-
-## 5. `CoordinatorService` (host — `src/coordinator/coordinator-service.ts`)
-
-### 5.1 Construction and lifecycle
-
-```ts
-new CoordinatorService(
-  ctx: Context,
-  catalog: ProjectCatalog,
-  runService: ProjectRunService,
-  planService: RunPlanService,
-  agentProfile: AgentProfileConfig,
-  clock?: () => string,
-  driver?: CoordinatorDriver,          // seam; default = native Harness driver
-)
-start()   // sync: borrow the shared domain (runService.domain()) for run/event
-          // writes; register nothing else (the coupling hook is wired in §6)
-stop()    // sync, idempotent: abort in-flight sessions (per-run AbortController)
-          // and clear the in-flight map
-```
-
-- Borrows the `dsh_projects` domain exactly like `RunPlanService` (one open per
-  domain name; never closes it).
-- `inFlight: Map<RunId, { controller: AbortController; promise: Promise<void> }>` —
-  host-side concurrency guard only; authoritative state is always in storage.
-  A process restart drops the map: a stale `planning` run is re-coordinatable
-  (the coordinator sees the existing plans and replans).
-
-### 5.2 `coordinate(runId: RunId): Promise<ProjectRunRecord>`
-
-Steps (all awaited; errors are `DashboardDomainError`s, §7.3):
-
-1. `coordinator.notStarted` if not started.
-2. Load the run via `runService.runDetail(runId)` → `run.unknown` if absent.
-3. Phase guard: phase must be `created` or `planning` → otherwise
-   `coordinator.runPhaseInvalid { runId, phase }`. (A run that already has an
-   active plan is `executing` — re-planning an executing run is a Phase 4+
-   concern, §12.)
-4. In-flight guard: `inFlight.has(runId)` → `coordinator.inProgress { runId }`.
-5. Resolve the project: `catalog.project(run.projectId)` → `undefined` →
-   `coordinator.projectUnknown { runId, projectId }`.
-6. If phase is `created` → `await runService.transitionRun(runId, 'planning')`.
-7. `sessionId = SessionId(`dsh-coordinator-${randomUUID()}`)`; persist it on the
-   run via the shared domain (`runs.update`: field + `updatedAt` + version + 1 —
-   same direct-table pattern as the Phase 2 `activePlanId` write).
-8. Append `run.coordinator.started` (per-run max-seq scan on the shared
-   `run_events` table, same pattern as `RunPlanService.appendRunEvent`); emit
-   `dsh-projects/run/coordinator-started`.
-9. Assemble the prompt (§4) from real state: run goal, project name/root, run
-   phase, existing plans from `planService.planList(runId)` (newest first).
-10. Launch the driver (§5.3) with `cwd = project.root`, the configured
-    `permissionPreset`/`agentPreset`, the prompt, a fresh `AbortSignal`, and the
-    `onPlanSubmit` closure (§5.4). Track the run in `inFlight`; `coordinate()`
-    returns the run record **immediately after step 8's writes settle** — the
-    session continues in the background (the UI observes progress via the event
-    stream + the existing refresh control; no polling mechanism is added).
-11. When the driver settles (the tracked promise, not `coordinate()`):
-    - `kind === 'completed'` **and** a plan was submitted:
-      - pattern `direct` → `await planService.transitionPlan(planId, 'active')`.
-      - otherwise → `await planService.transitionPlan(planId, 'awaiting-approval')`.
-      - The run-phase move happens through the §6 coupling hook (awaited inside
-        `transitionPlan`); the service performs **no** run transitions of its own.
-      - Append `run.coordinator.completed` (detail = submitted summary); emit
-        `dsh-projects/run/coordinator-completed { runId, projectId, planId, version, at }`.
-    - `kind === 'completed'` **and** no plan submitted, or `kind` is
-      `failed`/`blocked` → the run is left retryable:
-      `await runService.transitionRun(runId, 'blocked')` (errors swallowed +
-      logged — the run may have been paused/canceled meanwhile); append
-      `run.coordinator.failed` (detail = error or `session completed without
-      submitting a plan`); emit `dsh-projects/run/coordinator-failed`.
-    - Remove the run from `inFlight`.
-
-### 5.3 Session driver (seam + native default)
-
-```ts
-export interface CoordinatorPlanSubmission {
-  readonly pattern: RunPlanPattern
-  readonly rationale: string
-  readonly assumptions?: readonly string[]
-  readonly successCriteria?: readonly string[]
-  readonly tasks?: readonly PlannedTaskInput[]
-  readonly replanReason?: string
-  readonly summary: string            // concise human-facing planning summary
-}
-export interface CoordinatorDriverInput {
-  readonly sessionId: string
-  readonly cwd: string
-  readonly permissionPreset: string
-  readonly agentPreset?: string
-  readonly prompt: string
-  readonly signal: AbortSignal
-  readonly onPlanSubmit: (input: CoordinatorPlanSubmission) => Promise<{
-    readonly planId: string
-    readonly version: number
-    readonly pattern: RunPlanPattern
-  }>
-}
-export interface CoordinatorDriverResult {
-  readonly kind: 'completed' | 'failed' | 'blocked'
-  readonly error?: string
-}
-export interface CoordinatorDriver {
-  start(input: CoordinatorDriverInput): Promise<CoordinatorDriverResult>
-}
-```
-
-The default driver (`HarnessCoordinatorDriver`, `src/coordinator/session-driver.ts`)
-mirrors `HarnessAgentRunner` mechanics:
-
-- `ctx.agents.create({ sessionId, meta: { cwd }, agentOptions: { provider, model } }
-  from `ctx.agentDefaultModel.currentSelection()``, signal, setup })` — in `setup`,
-  register the submission tool via `agentCtx.get('tools')` + `defineTool` (the
-  seam the task-source tools already use).
-- `ctx.permissionPresets.set(session, permissionPreset)`; optional `agentPreset`
-  resolution exactly as the runner does.
-- One user message (`createUserMessage` from `@deepseek-ai/dsh-llm`) with
-  `coordinatorGuidance() + coordinatorPrompt(...)` — the prompt passed by the
-  service already contains both; `await handle.agent.whenIdle()`;
-  `ctx.sessions.flush(session)`; read the turn end via the
-  `lastTurnEnd`-style scan of `session.events`:
-  `completed` → `{kind:'completed'}`; `blocked` → `{kind:'blocked', error}`;
-  `error` → `{kind:'failed', error: '<code>: <message>'}`.
-- `finally`: remove the session listener, flush, `handle.dispose()`; an aborted
-  signal surfaces as `{kind:'failed', error:'coordinator session aborted'}`.
-- **Single turn**: the model uses native inspection tools (read/grep/shell per the
-  preset) and the submission tool within one turn; no `max_turns` loop.
-
-### 5.4 The submission tool (`dsh_projects_submit_plan`)
-
-Registered in the session scope with `defineTool`:
-
-- Parameters: `pattern` (enum, the six `RUN_PLAN_PATTERNS`), `rationale`
-  (string), `assumptions?` (string[]), `successCriteria?` (string[]), `tasks?`
-  (array of `{ title, description, dependencies?: string[], acceptanceCriteria?:
-  string[] }`), `replanReason?` (string), `summary` (string, required).
-- `execute`:
-  1. Validate `summary`: non-blank, ≤ 1000 chars → otherwise throw a plain
-     `Error` (tool error back to the agent; no dashboard error code — it never
-     reaches the client).
-  2. **Once per session**: if a plan was already submitted, throw
-     `a plan has already been submitted for this run; do not submit again`.
-  3. Map to `CreatePlanInput` (dropping `summary`) and `await
-     planService.createPlan(input)` — the full Phase 2 validation applies
-     (run unknown/terminal, rationale, pattern tasks, per-task limits,
-     dependency order, replan reason for v2+). A `DashboardDomainError` is
-     rethrown as a tool error carrying the message, so the agent can correct and
-     re-submit.
-  4. Store `submittedPlan` (id, version, pattern) on the service for the
-     post-session flow; return the plan reference to the agent.
-- Output rendered as JSON text (same `render` style as the task-source tools).
-
-## 6. Run–plan phase coupling (Phase 2 handover)
-
-**Mechanism:** `RunPlanService` gains one **optional** constructor argument
-(additive; existing construction sites and all Phase 2 tests keep their behavior):
-
-```ts
-new RunPlanService(ctx, runService, clock?, hooks?: {
-  readonly onPlanStatus?: (event: PlanStatusChangedEvent) => Promise<void>
-})
-```
-
-`transitionPlan` awaits `hooks.onPlanStatus?.(event)` **after** the plan update,
-the existing run coupling, and the Cordis emit succeed. No hook → no coupling
-(Phase 2 behavior, preserved).
-
-**Coupler** (`PlanRunCoupler` in `src/coordinator/coupling.ts`, constructed with the
-run service) implements the guarded transitions — the run state machine remains
-the single authority; a guard miss is a no-op (logged, never an error):
-
-| plan event (`to`) | run phase required | run transition |
-| --- | --- | --- |
-| `awaiting-approval` | `planning` | → `awaiting_approval` |
-| `active` | `planning` or `awaiting_approval` | → `executing` |
-| `draft` (rejected) | `awaiting_approval` | → `planning` |
-
-Every other run phase is untouched (a plan approved on an `executing`/`created`
-run does not move the run — Phase 2 manual flows stay intact). Wired in
-`src/index.ts`:
-
-```ts
-const coupler = new PlanRunCoupler(runService)
-const planService = new RunPlanService(ctx, runService, undefined, {
-  onPlanStatus: event => coupler.handle(event),
-})
-```
-
-`coupler.handle` catches and logs (`ctx.logger.warn`) every transition failure
-(stale guard, concurrent move, terminal run).
-
-## 7. Events and errors
-
-### 7.1 Cordis events (module augmentation in `coordinator-service.ts`)
-
-| event | payload |
-| --- | --- |
-| `dsh-projects/run/coordinator-started` | `{ runId, projectId, sessionId, at }` |
-| `dsh-projects/run/coordinator-completed` | `{ runId, projectId, planId, version, at }` |
-| `dsh-projects/run/coordinator-failed` | `{ runId, projectId, error, at }` |
-
-Persist-first convention as everywhere: the `run_events` row is written before the
-emit.
-
-### 7.2 Run event rows
-
-§3.2. The three types interleave on the shared per-run `seq` and render in the
-existing inspector timeline. `runEventTone`: `run.coordinator.started` → gray,
-`run.coordinator.completed` → green, `run.coordinator.failed` → red.
-
-### 7.3 Error codes (extend `DashboardErrorCode` + client mapping + zh/en locales)
-
-1. `coordinator.notStarted` — service not started.
-2. `coordinator.runPhaseInvalid` — run phase is not `created`/`planning` (params
-   `{ runId, phase }`).
-3. `coordinator.inProgress` — a coordination for this run is already running
-   (params `{ runId }`).
-4. `coordinator.projectUnknown` — the run's project is no longer registered
-   (params `{ runId, projectId }`).
-
-Client: `ERROR_TRANSLATION_KEYS += { 'coordinator.notStarted': 'error.coordinatorNotStarted', … }`
-(`as satisfies` parity), locales zh/en for all four.
-
-## 8. RPC (additive, trusted-host)
-
-`src/runtime/types.ts` `DashboardRpcMap` gains:
-
-| endpoint | payload | result |
-| --- | --- | --- |
-| `runCoordinate` | `{ runId: uuid }` | the `ProjectRunRecord` after the `planning` move + `coordinatorSessionId` write |
-
-`src/rpc/handler.ts` gains a 9th optional parameter `coordinator?:
-CoordinatorService`. Validation mirrors the Phase 1/2 pattern: non-uuid `runId`
-→ `bad-request` (reuse `readUuidField`); absent service → `bad-request`
-(`runCoordinate is unavailable: the Coordinator service is not mounted`); service
-`DashboardDomainError`s (the four `coordinator.*` codes + `run.unknown`) →
-structured bad-requests via the existing error-encoding path. The handler awaits
-`coordinator.coordinate(runId)` and returns the record.
-
-## 9. UI (existing Dashboard surface, zh/en parity)
-
-- **Controller** (`src/client/controller.ts`): port +=
-  `coordinateRun(runId: string): Promise<void>`; implementation calls
-  `rpc.call('/dsh-dashboard', 'runCoordinate', { runId })` with the existing
-  active-request accounting + `normalizeDashboardError` error handling (result is
-  a run record; only success/failure matters to the UI).
-- **Surface prop**: `onCoordinateRun?: (runId: string) => Promise<void>` (optional,
-  wired from `data.coordinateRun` in `Dashboard.tsx`); `dev.tsx` stays minimal
-  (tests supply the callback), consistent with the Phase 1/2 pattern.
-- **Run inspector footer** — a `协调` / `Coordinate` button rendered when the run
-  phase is `created` or `planning`, the run is not suspended, and
-  `onCoordinateRun` is provided. Click: pending state (button disabled, label
-  `协调中…` / `Coordinating…`); success → refresh (existing `onRefresh`); error →
-  inline notice via `dashboardErrorMessage` (button re-enabled).
-- **Coordinator section** (`InspectorSection`, between details and Plans) — shown
-  when the run has `coordinatorSessionId` **or** the loaded detail contains
-  coordinator events:
-  - status line derived from the newest coordinator event: no `started` → nothing;
-    `started` without a later `completed`/`failed` → `进行中` / `in progress`;
-    `completed` → `已完成` / `complete`; `failed` → `失败` / `failed`;
-  - session: last 8 chars of `coordinatorSessionId`;
-  - summary: the `completed` event's detail (when present);
-  - failure: the `failed` event's detail (when present).
-- **Locales** (zh + en, compile-enforced parity): `runs.coordinate`,
-  `runs.coordinatePending`, `runs.coordinator`, `runs.coordinator.progress`,
-  `runs.coordinator.complete`, `runs.coordinator.failed`,
-  `runs.coordinator.session`, `runs.coordinator.summary`, plus the four
-  `error.coordinator*` keys.
-
-## 10. Module layout & wiring
-
-```text
-src/coordinator/policy.ts            NEW  pure guidance + prompt assembly
-src/coordinator/coupling.ts          NEW  PlanRunCoupler (guarded run transitions)
-src/coordinator/coordinator-service.ts NEW CoordinatorService + Events augmentation
-src/coordinator/session-driver.ts    NEW  CoordinatorDriver seam types + HarnessCoordinatorDriver
-src/plans/plan-service.ts            MOD  optional hooks.onPlanStatus (awaited in transitionPlan)
-src/runs/state-machine.ts            MOD  coordinatorSessionId carry-over
-src/runs/spec.ts                     MOD  coordinatorSessionId field + 3 event types
-src/runs/types.ts                    MOD  ProjectRunRecord/View field, event type union
-src/runtime/errors.ts                MOD  4 coordinator.* codes
-src/runtime/types.ts                 MOD  runCoordinate RPC map entry
-src/rpc/handler.ts                   MOD  9th param + runCoordinate case
-src/index.ts                         MOD  coupler + planService hook + CoordinatorService
-                                       construction, start chain (after planService.start(),
-                                       before runtime.start()), disposer (coordinator.stop()
-                                       before planService.stop()), RPC wiring
-src/client/{controller,errors,locales,Dashboard,styles,fixture}.ts(x)  MOD  §9
-tests/coordinator-policy.test.ts     NEW
-tests/coordinator-service.test.ts    NEW
-tests/rpc-handler.test.ts            MOD  runCoordinate block
-tests/dashboard-coordinator-interactions.test.tsx  NEW (jsdom, zh)
-tests/run-storage-integration.test.ts  MOD  coordinator leg
-```
-
-Start chain: `await runService.start()` → `planService.start()` →
-`coordinator.start()` → `await runtime.start()`. Disposer: `await runtime.stop()`
-→ `coordinator.stop()` (aborts sessions; the failure handlers still reach the run
-service) → `planService.stop()` → `await runService.stop()` → `await catalog.stop()`.
-
-## 11. Test plan
-
-- **`coordinator-policy.test.ts`** — guidance contains the role, decision rules,
-  the `dsh_projects_submit_plan` contract (tool name, pattern enum, one
-  submission, replan-reason rule), and the untrusted-content warning; prompt
-  contains goal/project/phase and each existing plan version;
-  `COORDINATOR_POLICY_VERSION` is a stable constant; outputs are pure (same input
-  → same string).
-- **`coordinator-service.test.ts`** (fake `CoordinatorDriver`; real run + plan
-  services on the shared memory domain, Phase 2 harness pattern):
-  notStarted before start; terminal-run and `inProgress` guards; `created` →
-  `planning` move + `started` event + `coordinatorSessionId` persisted; direct
-  flow (tool input mapped, plan created draft → active, run → `executing` via the
-  hook coupling); orchestrated flow (plan → `awaiting-approval`, run →
-  `awaiting_approval`, then manual approve → run `executing`, reject → run
-  `planning`); completed-without-plan and driver-failed → run `blocked` +
-  `failed` event + Cordis emit; replan (v1 exists: first submission without
-  `replanReason` rejected as a tool error, second with reason creates v2);
-  double-submission rejected; `stop()` aborts the in-flight driver (signal
-  observed); coupling guards (approve a plan while the run is `executing` → run
-  unchanged); summary length validation (1001 chars rejected as a tool error).
-- **`rpc-handler.test.ts`** — `runCoordinate` dispatch returns the record;
-  non-uuid `runId` → bad-request; absent service → bad-request;
-  `coordinator.runPhaseInvalid` mapped via `decodeDashboardError` with
-  `{ runId, phase }` params.
-- **`dashboard-coordinator-interactions.test.tsx`** (jsdom, zh labels) — button
-  visible for `created`/`planning`, hidden for `executing`/terminal runs; click
-  calls `onCoordinateRun(runId)` and shows the pending state; error → notice +
-  button re-enabled; Coordinator section renders status (`进行中`/`已完成`),
-  session tail, and the completed summary from the detail events.
-- **`run-storage-integration.test.ts`** — boot 1: coordinate a run with a fake
-  driver that submits an orchestrated plan; run ends `awaiting_approval` with
-  `coordinatorSessionId` set. Reopen: `coordinatorSessionId`, plan, run phase, and
-  the coordinator events all survive; the medium table set is still
-  `['plans', 'run_events', 'runs']`; a subsequent manual approval completes the
-  flow on the second boot.
-- **Regression:** every existing suite (incl. all Phase 2 plan suites, which use
-  the hook-less `RunPlanService` construction) stays green.
-
-## 12. Acceptance criteria (maps to `intent.md` §6.4)
-
-1. Coordinate (zh `协调`) on a `created`/`planning` run starts a real Lead session
-   (native `ctx.agents.create` path); `coordinatorSessionId` is persisted on the
-   run and survives restart.
-2. The session's structured output yields a validated plan via
-   `RunPlanService` — pattern persisted, ids assigned, replan reason required
-   when versions exist; invalid/missing output never persists a plan (tool errors
-   go back to the agent; a plan-less or failed session leaves no plan).
-3. The §6 coupling works end-to-end through the existing plan UI: approval
-   requested → run `awaiting_approval`; approve → plan active + run `executing`;
-   reject → plan draft + run `planning`; direct plan → run `executing`; guard
-   misses are no-ops.
-4. The planning summary is visible in the inspector's Coordinator section and
-   persisted as the `run.coordinator.completed` event detail; `resultSummary`
-   keeps its Phase 1 terminal-only meaning (refined from the intent wording).
-5. Failed/blocked sessions leave the run retryable (`blocked` → resume →
-   `planning` → Coordinate again).
-6. Storage integration: `coordinatorSessionId` + plans + run phase + coordinator
-   events survive a real JSON domain reopen; medium table set unchanged.
+1. No invented APIs — the worker adapters bind to the **installed** runtime
+   surfaces (architecture doc §3.5/§3.6) resolved through the Cordis context;
+   `ctx.agentTeams` (experimental) is touched by **exactly one file**; no new
+   package dependency.
+2. No placeholder APIs, no fake UI data — every control is backed by a real
+   service on persistent storage; absence of a runtime is an explicit state.
+3. Additive only — the `dsh_projects` domain stays at **format version 0**
+   (storage-domain initializes absent declared tables as empty); existing
+   record shapes only gain optional fields; `DashboardSnapshot.version` stays 2.
+4. The run state machine stays the single authority for run phases; no new run
+   phases. Task state has its own pure machine.
+5. UI extends the existing `DashboardSurface` inspector; zh/en parity
+   compile-enforced.
+6. State survives a process restart (real-JSON storage integration test).
 7. Repo green: `pnpm run typecheck`, `pnpm run build`, `pnpm vitest run`
    (modulo the documented pre-existing environment failures).
 
-## 13. Explicit non-goals (Phase 4+)
+## 3. Storage
 
-- No task execution, no `ProjectTask`, no task status — `PlannedTask` stays a plan
-  object (Phase 4). No Agent Teams, no background subagents, no worker spawning
-  (Phase 4, behind adapters). No per-task worktrees (Phase 5).
-- No Project Memory retrieval/injection — context assembly is
-  project/run/plans/repo only (Phase 6).
-- No `ApprovalRequest` objects, no budgets (Phase 7). No report *artifacts* — the
-  §64 report is Phase 8; Phase 3 ships only the concise planning summary.
-- No interactive coordinator chat / user-correction loop (master spec §49);
-  coordination is one-shot per trigger. Re-planning = coordinate again on a run
-  with plans (next version + reason). No event-driven re-planning from task
-  failures (needs execution — Phase 4).
-- No re-coordination of `executing` runs (an active plan means the run left
-  `planning`); supersede-then-coordinate is the Phase 3 path.
-- No polling/refresh mechanism — progress is observed through the event stream
-  and the existing refresh control; in-flight reconciliation after a crash is
-  Phase 10.
-- No new plugin configuration (the `agentProfile` surface is reused); no new
-  storage tables; no `resultSummary` reuse.
+### 3.1 New table `tasks` (additive, domain stays v0)
+
+`src/runs/spec.ts` gains (the domain spec is the single declaration site, as
+with `plans`):
+
+```ts
+tasks: domainTable<TaskId, ProjectTaskRecord>(projectTaskRecordSchema),
+```
+
+New medium table set: `['plans', 'run_events', 'runs', 'tasks']`.
+
+### 3.2 `ProjectTaskRecord` (zod, `src/tasks/spec.ts`)
+
+```ts
+export const TASK_STATUSES = [
+  'pending', 'ready', 'running', 'blocked', 'awaiting-review',
+  'succeeded', 'failed', 'canceled',
+] as const satisfies readonly ProjectTaskStatus[]
+
+export const projectTaskRecordSchema = z.object({
+  id,                                  // uuid
+  runId: id,
+  planId: id,                          // plan version that materialized this task
+  planTaskId: z.string().regex(/^t[1-9][0-9]*$/),  // position id in the plan
+  title: nonBlank,                     // ≤300 (validated at plan creation)
+  description: nonBlank,               // ≤4000
+  role: nonBlank.optional(),           // role label from the plan (spec §15)
+  dependencies: z.array(id).default([]),  // task UUIDs, resolved at materialization
+  status: z.enum(TASK_STATUSES),
+  assignedAgentId: nonBlank.optional(),    // native agent identity (session id / member name)
+  workspaceId: nonBlank.optional(),        // RESERVED — filled by Phase 5, never by Phase 4
+  acceptanceCriteria: z.array(nonBlank).default([]),
+  attempt: z.number().int().min(0),       // executions already STARTED (initial 0)
+  maxAttempts: z.number().int().min(1).optional(),
+  outputSummary: nonBlank.optional(),     // ≤1000, from the worker result
+  error: nonBlank.optional(),
+  tokenUsage: tokenUsageSchema.optional(),// only when the runtime provides usage
+  startedAt: timestamp.optional(),        // last execution start
+  completedAt: timestamp.optional(),      // terminal transition time
+  createdAt: timestamp,
+  updatedAt: timestamp,
+  version: z.number().int().min(1),       // CAS, bumps on every accepted transition
+}).strict() as z.ZodType<ProjectTaskRecord>
+```
+
+`awaiting-review` is declared for schema completeness (master spec §11) but is
+**unreachable in Phase 4** — no edge enters or leaves it (Phase 7 approval
+modes own it). Phase 4 never writes `workspaceId`.
+
+### 3.3 Additive optional fields on existing records
+
+- `ProjectRunRecord` / `ProjectRunView`: `maxConcurrentAgents?: number`
+  (`int ≥ 1`, ≤ 50) — per-run task concurrency override; default
+  `DEFAULT_TASK_CONCURRENCY = 1` (intent §7.2, shared-tree safety pre-Phase 5).
+- `ProjectRunView`: `taskCounts?: TaskCountsView` —
+  `{ total, pending, ready, running, blocked, failed, succeeded }` (counts of
+  the run's tasks by status; absent when the Host has no task service).
+- `RunDetailView`: `tasks?: readonly ProjectTaskView[]` — the run's tasks in
+  plan (topological) order; absent when the Host has no task service.
+- `ProjectRunSummary` (snapshot `runs` section): `worker?: 'local' | 'agent-team' | 'unavailable'` —
+  the worker kind the Host can currently execute tasks with (host-level,
+  additive optional).
+
+### 3.4 Run event stream (additive types)
+
+`RUN_EVENT_TYPES` grows by 5 (13 → 18). Master spec §28 names per-task
+`task.created`; materialization of up to 50 tasks would flood the per-run audit
+stream, so the stream carries **one aggregate + per-task state changes**
+(spec-level decision, documented here):
+
+| Type | When | Detail (≤200, truncated) |
+| --- | --- | --- |
+| `tasks.materialized` | a plan's tasks materialize | `plan v{N}: {M} tasks` |
+| `task.ready` | task becomes ready | task title |
+| `task.started` | an execution starts | `agent {assignedAgentId tail}, attempt {k}/{max}` |
+| `task.completed` | task succeeds | output summary |
+| `task.failed` | a task reaches terminal `failed` | `{error}; attempt {k}/{max}` (or `retries exhausted`) |
+
+Cordis events (payloads persist-first, same pattern as Phase 2/3):
+`dsh-projects/tasks/materialized`, `dsh-projects/task/ready`,
+`dsh-projects/task/started`, `dsh-projects/task/completed`,
+`dsh-projects/task/failed` — `{ runId, projectId, taskId?, planId, at }`
+(`taskId` omitted on `tasks.materialized`).
+
+## 4. Task state machine (pure — `src/tasks/state-machine.ts`)
+
+Single authority for task status invariants; the same shape as
+`runs/state-machine.ts` + `plans/state-machine.ts` (pure table + `transitionTask`
+producing the next record; persistence/coupling/events are the service's job).
+
+```
+pending         → ready | blocked | canceled
+ready           → running | canceled
+running         → succeeded | failed | ready | canceled
+blocked         → ready | canceled
+awaiting-review → (none — unreachable in Phase 4)
+succeeded / failed / canceled → (terminal)
+failed          → ready        // operator retry (taskRetry RPC), the one edge into a "live" state from terminal
+```
+
+Rules:
+
+- Transition to the current status is a **rejected no-op** (idempotency comes
+  from CAS on `version`, not silent re-entry) — `TaskTransitionError`.
+- `running → ready` is the internal retry edge: the service may only take it
+  while `attempt < maxAttempts` (the service enforces the budget; the machine
+  enforces the edge).
+- `failed → ready` (operator retry) is allowed only from `failed`; it does not
+  change `attempt` (the next `ready → running` bumps it).
+- `blocked → ready` re-readies a task whose failed dependency was retried and
+  later succeeded (dependency recovery, computed by the scheduler).
+- Terminal entry sets `completedAt`; `failed` carries `error`; `succeeded`
+  carries `outputSummary`.
+- Every accepted transition bumps `version` and refreshes `updatedAt`.
+- `transitionTask(task, to, context)` validates the edge and returns the next
+  record; `context` carries `error?`/`outputSummary?` (required by target,
+  enforced) — explicit-optional discipline applies (no `undefined` props).
+
+## 5. DAG scheduler (pure — `src/tasks/scheduler.ts`)
+
+Pure functions over the run's task list; **generalizes the existing
+`src/orchestrator/scheduling.ts` helpers** (intent §7.1.3, master spec §12:
+do not build a parallel mechanism):
+
+- `failureRetryDelay(attempt, maximumMs)` — **reused as-is** from
+  `orchestrator/scheduling.ts` (10 s, doubling, capped). Constant
+  `MAX_RETRY_DELAY_MS = 300_000` (5 min) in `src/tasks/constants.ts`.
+- `compareTasks(left, right)` — new sibling of `compareCandidates`: earliest
+  `createdAt`, then `id` (`localeCompare`) — deterministic pick order.
+- `stateLimit`-style counting — the concurrency check counts `running` tasks
+  against the effective limit (`run.maxConcurrentAgents ?? 1`); the helper
+  itself is a 3-line local count (the orchestrator's `stateLimit` reads a
+  config map keyed by state, which has no task analogue — documented
+  deviation: reuse where the shape fits, generalize where it doesn't).
+
+```ts
+/** Throws TaskGraphError (code task.dagInvalid) on unknown dep, self-dep, or cycle. */
+export function validateTaskGraph(tasks: readonly ProjectTaskRecord[]): void
+
+/**
+ * The minimal transition set that brings the statuses in line with the
+ * dependency facts (pure, idempotent — returns [] when nothing changes):
+ * - pending, all deps succeeded        → ready
+ * - pending, any dep terminal failed   → blocked
+ * - blocked, all deps succeeded again  → ready   (dependency recovery)
+ */
+export function computeDependencyTransitions(
+  tasks: readonly ProjectTaskRecord[],
+): readonly { readonly taskId: string; readonly to: 'ready' | 'blocked' }[]
+
+/**
+ * The ready tasks eligible for an execution slot NOW: status ready,
+ * concurrency slot free (running < limit), and retry backoff elapsed
+ * (no backoff for first attempts; `updatedAt + failureRetryDelay(attempt,
+ * MAX_RETRY_DELAY_MS) ≤ now` for re-ready retries). Deterministic order via
+ * compareTasks; returns at most `freeSlots` ids.
+ */
+export function pickReadyTasks(
+  tasks: readonly ProjectTaskRecord[],
+  limit: number,
+  now: number,
+): readonly string[]
+```
+
+Cycle detection is Kahn's algorithm over the task `dependencies` map. Because
+plan creation already constrains dependencies to earlier tasks (Phase 2,
+`plan.taskDependencyInvalid`), cycles and unknown refs are impossible by
+construction — `validateTaskGraph` is the defensive second line at
+materialization (intent §7.1.2: invalid DAGs are rejected, never persisted).
+
+## 6. Worker seam and adapters (master spec §13/§14/§31)
+
+### 6.1 The seam (fakeable — `src/tasks/worker.ts`)
+
+The same pattern as the Phase 3 `CoordinatorDriver`: the service talks to a
+narrow interface; tests inject a fake; production adapters bind to the
+installed runtime.
+
+```ts
+export interface TaskWorkerInput {
+  readonly taskId: string
+  readonly runId: string
+  readonly projectId: string
+  /** Plugin-generated session id (`dsh-task-<uuid>`), as in Phase 3. */
+  readonly sessionId: string
+  readonly cwd: string            // the project root (Phase 4: shared tree, Phase 5 isolates)
+  readonly title: string
+  readonly description: string
+  readonly role?: string
+  readonly acceptanceCriteria: readonly string[]
+  readonly attempt: number
+  readonly signal: AbortSignal
+}
+
+export interface TaskWorkerResult {
+  readonly kind: 'succeeded' | 'failed'
+  /** Concise human-readable summary; required on success (≤1000). */
+  readonly summary?: string
+  /** Required on failure. */
+  readonly error?: string
+  /** The native agent identity actually used (session id / member name). */
+  readonly agentId?: string
+  readonly tokenUsage?: TokenTotals   // only when the runtime reports usage
+  readonly turnCount?: number
+}
+
+export type TaskWorkerKind = 'local' | 'agent-team' | 'unavailable'
+
+export interface TaskWorker {
+  readonly kind: TaskWorkerKind
+  start(input: TaskWorkerInput): Promise<TaskWorkerResult>
+  /** Best-effort stop of one live agent; resolves even when unknown. */
+  stop(agentId: string): Promise<void>
+}
+```
+
+Semantics: `start` resolves exactly once (success, failure, or — when
+`signal` aborts — a failure with `error: 'task execution aborted'`). The
+service never interprets worker internals; summaries/errors are truncated and
+persisted by the service. A success result without a usable summary (blank /
+>1000) is treated by the service as a failure (`error: 'worker returned no
+usable summary'`) — a task without a summary cannot be `succeeded`.
+
+**Design correction (grounded in the installed Harness source, supersedes the
+intent's "BackgroundAgentAdapter over `ctx.subagents`"):** the `ctx.subagents`
+surface (`packages/subagent` in the Harness checkout) is an **agent-to-agent
+delegation API** — `startContinuable`'s request requires
+`parent: Agent` ("The spawning agent. In-process providers derive workspace,
+lineage, and delegation depth from its durable session state"), and
+`sendMessage`/`interrupt` require a live sender/authority Agent. A
+service-initiated task worker has no parent Agent, so that surface is **not
+usable for Phase 4 service-initiated tasks** and is not implemented (invariant
+1 + 2: no invented APIs, no placeholder adapters). It remains the foundation
+for coordinator *delegation* (master spec §49 territory, later phase). The
+MVP worker is the **local Harness worker** per master spec §31 — the
+`ctx.agents.create` mechanism that architecture doc §3.3 designates as the
+"Phase 4+ worker foundation" and that `HarnessAgentRunner` /
+`HarnessCoordinatorDriver` already use.
+
+### 6.2 `LocalTaskWorker` (default, always available — `src/tasks/local-adapter.ts`)
+
+`ctx.agents` is a hard dependency of this plugin (it is in the `inject`
+list), so the local worker is available in every composition of the plugin.
+It mirrors the `HarnessAgentRunner`/`HarnessCoordinatorDriver` mechanism:
+
+- `ctx.agents.create({ sessionId, meta: { cwd }, agentOptions: { provider, model },
+  signal, setup })` — model via `ctx.agentDefaultModel.currentSelection()` +
+  `installModelSelection`; permission preset via
+  `ctx.permissionPresets.set(session, …)`.
+- `setup` registers the result-reporting tool **`dsh_projects_report_task_result`**
+  (the `defineTool` seam, same schema-subset discipline as Phase 3's
+  `dsh_projects_submit_plan`): input `{ kind: 'succeeded' | 'failed',
+  summary?: string, error?: string }`, **reportable exactly once** per session
+  (a second call is a tool error).
+- One `followup(createUserMessage(…))` carrying the task prompt (title,
+  description, role guidance, acceptance criteria, cwd note, the report
+  contract); `whenIdle()`; `ctx.sessions.flush(session)`;
+  `lastTurnEnd` scan (the `harness-runner.ts` helper shape:
+  `completed` / `error` / `blocked`).
+- Result: the tool report when it was made (summary/error pass through; the
+  service enforces the summary rule); when the session ends **without** a
+  report → `{ kind: 'failed', error: 'session ended without reporting a task
+  result' }` (an `error`/`blocked` turn-end carries the native reason).
+- `tokenUsage`/`turnCount`: accumulated from the session's
+  `session/event` stream (`assistant/message` usage, `addUsage` pattern from
+  `harness-runner.ts`); omitted when the stream reports none.
+- `stop(agentId)`: resolves the tracked session's AbortController (the
+  service tracks `agentId → AbortController`); the adapter's `finally`
+  flushes + disposes the handle.
+
+### 6.3 `TeamTaskWorker` (opt-in — `src/tasks/team-adapter.ts`)
+
+**The only file in the codebase that may reference the experimental
+`ctx.agentTeams` surface** (architecture doc §4; invariant 1). The installed
+`TeamService` is caller-scoped — every method takes `caller: Agent` — so the
+adapter establishes **one Lead session per run** (`ctx.agents.create`, the
+every-live-root-is-an-implicit-Lead rule, architecture doc §3.5) and, per
+task, `spawnTeammate(leadAgent, …)`; task work is posted through the native
+task board (`createTask`/`assignTask`), results arrive via the team task
+board / mailbox (`updateTask` completion carrying the summary), interruption
+via `interrupt(leadAgent, targetName)` on cancellation/retirement. Teammates
+are disposed when their work settles. Because the surface is explicitly
+experimental, this adapter is expected to be the only file that needs
+significant modification if the API changes (master spec §13).
+
+### 6.4 Availability and selection (honest degradation)
+
+- The experimental surface is **resolved through the Cordis context at
+  startup** (structural typing in the adapter files; no package imports — the
+  plugin's dependency list is unchanged; the experimental package is
+  host-mounted, architecture doc §3.5). `ctx.subagents` is not referenced by
+  any file (enforced by the source-scan test, §12).
+- Additive optional plugin config (`src/config.ts`):
+  `projects?: { taskWorker?: 'local' | 'agent-teams' }`, default `'local'`.
+- Resolution at `ProjectTaskService.start()`:
+  - `'local'` (default) → `LocalTaskWorker` (always constructible —
+    `ctx.agents` is injected).
+  - `'agent-teams'`: `ctx.agentTeams` present → `TeamTaskWorker`; absent →
+    `UnavailableWorker` — **no silent fallback** to the local worker (the
+    operator asked for teams; silently getting local execution is a lie).
+    The structured error surfaces instead (intent §7.1.4, invariant 2).
+- `UnavailableWorker.start` rejects with `DashboardDomainError('task.workerUnavailable', …)`.
+  The service never starts a task with it: scheduling simply finds no eligible
+  worker, the run-level state and UI show *execution unavailable* (a
+  `task.workerUnavailable` error on any explicit action), and no task leaves
+  `pending`/`ready` with a fake identity.
+
+## 7. `ProjectTaskService` (host — `src/tasks/task-service.ts`)
+
+Owns task state inside the shared `dsh_projects` domain (borrowed from
+`ProjectRunService.domain()`, one open per domain). Mirrors
+`CoordinatorService`'s structure (tables on start, `stop()` aborts in-flight
+worker signals and drops references, background work tracked per task).
+
+```ts
+constructor(
+  ctx, catalog, runService,
+  clock: () => string = () => new Date().toISOString(),
+  worker: TaskWorker,                 // resolved in src/index.ts (§6.4)
+  retryClock?: () => number,          // injectable now() for backoff (tests)
+)
+start(): void                          // borrow tables { tasks, runs, run_events, plans }; subscribe run-phase events; start tick interval
+stop(): void                           // abort in-flight signals, clear interval, unsubscribe, drop refs — idempotent
+workerKind(): TaskWorkerKind           // for the snapshot projection
+```
+
+### 7.1 Materialization (from the plan hook)
+
+`handlePlanStatus(event: PlanStatusChangedEvent)` — the Phase 4 half of the
+`RunPlanService.onPlanStatus` hook (wired next to `PlanRunCoupler` in
+`src/index.ts`, awaited sequentially; a hook failure never undoes the plan
+transition):
+
+| plan `to` | action |
+| --- | --- |
+| `active` | retire the run's live tasks, then materialize the plan's tasks (below) |
+| `superseded` / `completed` | if the event's plan is the run's `activePlanId`: retire the run's live tasks (the new active plan materializes on its own `active` event) |
+| `draft` (rejected) / `awaiting-approval` | no-op (tasks only exist once a plan is active) |
+
+**Retire:** every non-terminal task of the run → `canceled` (CAS; running
+tasks also `worker.stop(assignedAgentId)`), so a superseded plan's work never
+keeps running.
+
+**Materialize** (plan with `tasks.length === 0` → no-op with a log line — a
+taskless `direct` plan means the run has nothing to execute):
+
+1. `validateTaskGraph` over the plan tasks (mapped to would-be records) —
+   `task.dagInvalid` aborts with zero rows written.
+2. Persist all rows: `status: 'pending'`, `attempt: 0`,
+   `dependencies` resolved from plan positions (`tN` → that task's new uuid),
+   `role`/`acceptanceCriteria` copied, `maxAttempts: DEFAULT_MAX_ATTEMPTS (3)`.
+3. One `tasks.materialized` run event + Cordis emit.
+4. `tick()` — the first ready wave is computed and started immediately.
+
+### 7.2 The tick (scheduler application)
+
+`tick()` is the single application point for scheduling decisions; guarded by
+an in-tick flag (re-entrant calls coalesce into one trailing run). Triggered
+by: materialization, every worker result, `taskRetry`, run-phase events, and a
+5-second interval (retry backoff elapsing; belt-and-braces after crashes of
+the event flow — Phase 10 owns full reconciliation).
+
+Per tick (each step through the CAS path, events per §3.4):
+
+1. `computeDependencyTransitions` → apply `pending→ready`, `pending→blocked`,
+   `blocked→ready` (idempotent: nothing to do when statuses already agree).
+2. Dead-DAG check (intent §7.1.9): if the run is `executing`, the task set is
+   non-empty, and **no** task is `pending`/`ready`/`running`/`blocked-recoverable`
+   (i.e. every remaining non-terminal task is `blocked` on a terminal `failed`
+   dependency) with at least one `failed` → `runService.transitionRun(runId,
+   'blocked')` guarded to `from executing` (guard miss = logged no-op, the
+   `PlanRunCoupler` pattern). The run stays `blocked` (retryable: resume →
+   `executing` → `tick()`; a retried dependency can unblock dependents via
+   `blocked → ready`).
+3. `pickReadyTasks` (limit = `run.maxConcurrentAgents ?? 1`,
+   `now = retryClock()`) → for each id, `startExecution(task)`.
+4. All-succeeded check: nothing to do to the run (intent §7.1.9 decision —
+   the run stays `executing` until Phase 5 integration); the tick simply
+   stops finding work.
+
+### 7.3 Execution lifecycle
+
+`startExecution(task)`:
+
+1. CAS `ready → running` (sets `attempt + 1`, `startedAt`,
+   `assignedAgentId` = the generated `dsh-task-<uuid>` sessionId — a
+   placeholder until the runtime confirms its own identity), `task.started`
+   event.
+2. `worker.start(input)` as a tracked background promise (per-task map, like
+   the coordinator's `inFlight`); on the result, if `agentId` is present it
+   overwrites the placeholder inside the same CAS as the status move.
+   - **succeeded** → CAS `running → succeeded` (summary, `tokenUsage`,
+     `completedAt`), `task.completed` event, `tick()`.
+   - **failed**, `attempt < maxAttempts` → CAS `running → ready`
+     (retry; backoff computed from `updatedAt`/`attempt` on the next tick),
+     `tick()`.
+   - **failed**, `attempt >= maxAttempts` → CAS `running → failed` (error,
+     `completedAt`), `task.failed` event, `tick()` (dead-DAG check may block
+     the run).
+   - **abort** (stop/cancel/retirement) → the CAS is skipped when the task is
+     already `canceled` (stale-result no-op, logged).
+   - every path `worker`-side cleanup happens inside the adapter; the service
+     only persists.
+
+`taskRetry(taskId)` (operator RPC, §9): CAS `failed → ready` (only from
+`failed`; otherwise `task.retryNotAllowed` / `task.unknown` /
+`task.notStarted`), `tick()`.
+
+**Run cancellation propagation:** the service subscribes
+`ctx.on('dsh-projects/run/phase-changed', …)` in `start()` (unsubscribed in
+`stop()`): on `to === 'canceled'` for a run with live tasks → retire (§7.1) —
+no RPC-side wiring needed.
+
+## 8. Events and errors
+
+- Run event types: +5 (`§3.4`); `RUN_EVENT_TYPES` is 18 entries.
+- New `DashboardErrorCode`s (5, `task.*` namespace) — every code has a real
+  generation path; internal CAS conflicts on expected concurrent moves are
+  logged no-ops (the stale-result discipline), not client errors:
+
+| Code | When |
+| --- | --- |
+| `task.notStarted` | service not started |
+| `task.unknown` | unknown task id (operator retry on a missing task) |
+| `task.retryNotAllowed` | `taskRetry` on a non-`failed` task |
+| `task.workerUnavailable` | selected worker runtime absent from the composition |
+| `task.dagInvalid` | materialization graph validation failure (defensive) |
+
+Client `ERROR_TRANSLATION_KEYS` + zh/en `locales.ts` entries for all 7 (the
+`satisfies Record<DashboardErrorCode, DashboardLocaleKey>` map keeps parity
+compile-enforced).
+
+## 9. RPC (additive, trusted-host)
+
+| Endpoint | Input | Output | Notes |
+| --- | --- | --- | --- |
+| `runDetail` (existing) | `{ runId }` | `RunDetailView` **+ additive optional `tasks`** | tasks in plan order; absent when the Host has no task service (older hosts unaffected) |
+| `state` / `refresh` (existing) | — | `DashboardSnapshot` | `runs` section gains `worker` + per-view `taskCounts` (both additive optional) |
+| `taskRetry` (new) | `{ taskId: string }` | `ProjectTaskRecord` | uuid validation; structured errors per §8; absent task service → bad-request |
+
+`handleDashboardRpc` gains a 9th optional parameter `taskService?`
+(`ProjectTaskService | undefined`) — the same additive-parameter pattern as
+`coordinator` (8th) in Phase 3.
+
+## 10. UI (existing Dashboard surface, zh/en parity)
+
+New **Tasks** inspector section (`inspector.tasks` — zh `任务`, en `Tasks`) in
+`RunInspector`, ordered after the Coordinator section:
+
+- **Worker banner** (from `ProjectRunSummary.worker`):
+  - `unavailable` → notice `执行不可用：当前组合未挂载代理运行时` /
+    “Execution unavailable: no agent runtime is mounted in this composition”
+    (no task rows are fake; real pending/ready tasks still render).
+  - `local` / `agent-team` → small kind label (zh `本地代理` / `代理团队`).
+- **Per-task row** (DAG/plan order): status pill (8 statuses, zh labels:
+  待调度/就绪/运行中/受阻/待审/已完成/失败/已取消), title, role, dependency
+  titles (or `tN`), `attempt/maxAttempts` (e.g. `2/3`), agent tail (last 8 of
+  `assignedAgentId`, when set) + started-relative time, tokens when present,
+  output-summary or error row (truncated like the Coordinator section).
+  Blocked rows name the failed dependency.
+- **Retry action** on `failed` rows only: calls the new `onTaskRetry(taskId)`
+  port (controller: `taskRetry` → RPC `taskRetry`), pending state
+  `重试中…` / `Retrying…`, success feedback `任务已重新排队` /
+  “Task re-queued”, error notice via `dashboardErrorMessage` + re-enable.
+- `RunInspector`/surface gain `onTaskRetry?` + `tasks` from `runDetail`;
+  `fixture.ts` gains a deterministic tasks section on the executing fixture
+  run (mixed statuses incl. one blocked-on-failed-dep, one failed with
+  `attempt: 3`, `worker: 'local'`) — fixture-labeled local-mode data only,
+  as in the existing runs fixture.
+- `styles.ts`: `.dshd-tasks*` classes following the Coordinator section's
+  visual language.
+
+No new tab, no second shell (invariant 5). The run list's row keeps its
+current shape; `taskCounts` is surfaced in the inspector header line
+(`任务 3/7 完成` style, zh/en).
+
+## 11. Module layout & wiring
+
+```
+src/tasks/
+  types.ts          TaskId, ProjectTaskStatus, ProjectTaskRecord, ProjectTaskView,
+                    TaskCountsView, TaskGraphError payload types
+  spec.ts           TASK_STATUSES, projectTaskRecordSchema (zod, §3.2)
+  constants.ts      DEFAULT_TASK_CONCURRENCY, DEFAULT_MAX_ATTEMPTS, MAX_RETRY_DELAY_MS,
+                    MAX_SUMMARY_LENGTH (1000), EVENT_DETAIL_LIMIT (200), TICK_INTERVAL_MS (5000)
+  state-machine.ts  ALLOWED_TASK_TRANSITIONS, transitionTask, TaskTransitionError (pure)
+  scheduler.ts      validateTaskGraph, computeDependencyTransitions, pickReadyTasks,
+                    compareTasks (pure; reuses orchestrator/scheduling.ts failureRetryDelay)
+  worker.ts         TaskWorker seam, TaskWorkerInput/Result/Kind, UnavailableWorker
+  local-adapter.ts   LocalTaskWorker (ctx.agents mechanism, §6.2; report tool `dsh_projects_report_task_result`)
+  team-adapter.ts     TeamTaskWorker (only file touching ctx.agentTeams — experimental)
+  task-service.ts   ProjectTaskService (§7), task.* Cordis event declarations
+src/runs/spec.ts    + tasks table, RUN_EVENT_TYPES +5, run schema +maxConcurrentAgents
+src/runs/types.ts   +5 event types, ProjectTaskView, TaskCountsView,
+                    ProjectRunView +taskCounts?, RunDetailView +tasks?
+src/config.ts       + optional projects.taskWorker ('local' | 'agent-teams')
+src/rpc/handler.ts  9th param taskService?; taskRetry case; runDetail + tasks;
+                    snapshot runs + worker/taskCounts
+src/index.ts        worker resolution (§6.4) → ProjectTaskService; hook chain
+                    onPlanStatus: coupler → taskService; start/stop chain;
+                    snapshot projection wiring
+src/client/         controller.ts +taskRetry port; errors.ts +5 keys;
+                    locales.ts + zh/en; Dashboard.tsx Tasks section;
+                    fixture.ts tasks; styles.ts .dshd-tasks*
+```
+
+Wiring (`src/index.ts`, following the Phase 3 chain):
+
+```ts
+const worker = resolveTaskWorker(ctx, config.projects?.taskWorker ?? 'local')
+const taskService = new ProjectTaskService(ctx, catalog, runService, undefined, worker)
+const planService = new RunPlanService(ctx, runService, undefined, {
+  onPlanStatus: async event => {
+    await coupler.handle(event)
+    await taskService.handlePlanStatus(event)
+  },
+})
+// startup:  runService.start() → planService.start() → coordinator.start() → taskService.start() → runtime.start()
+// disposal: runtime.stop() → taskService.stop() → coordinator.stop() → planService.stop() → runService.stop()
+```
+
+`taskService.start()` throws `task.workerUnavailable`-free: it always starts
+(the worker kind may be `unavailable` — that is a state, not a startup
+failure), so the Dashboard boots in every composition.
+
+## 12. Test plan
+
+| File | Cases (spec-level) |
+| --- | --- |
+| `tests/task-state-machine.test.ts` (new) | full allowed-edge table + representative forbidden edges; idempotent re-entry rejection; terminal invariants; `running→ready` budget edge; `failed→ready` only from failed; version bumps; `completedAt`/`error`/`outputSummary` carry-over; `awaiting-review` unreachable |
+| `tests/task-scheduler.test.ts` (new) | `validateTaskGraph`: ok / cycle / unknown dep / self-dep; `computeDependencyTransitions`: all-deps-succeeded → ready, any-failed → blocked, recovery → ready, idempotent no-op; `pickReadyTasks`: concurrency cap, retry backoff (injected `now`), deterministic order, empty when saturated |
+| `tests/task-service.test.ts` (new) | in-memory domain + fake worker + injected clocks: materialization 1:1 (deps resolved, role/criteria copied, `maxAttempts` default) + `tasks.materialized` event; taskless plan no-op; zero rows on `task.dagInvalid`; retirement on `superseded` (running task stopped) and on re-activation; first ready wave respects default concurrency 1 + `run.maxConcurrentAgents` override; success path (summary/tokens persisted, `task.completed`); failure with retries (attempt bump, backoff elapses via injected `retryClock`, re-ready, second attempt succeeds); exhausted → `failed` + dead-DAG → run `blocked` (guard: run must be `executing`); dependency recovery unblocks (`blocked → ready`); `taskRetry` happy + `task.retryNotAllowed` + `task.unknown`; run-canceled event → all live tasks `canceled` + worker stopped; stale worker result after cancel is a logged no-op; unavailable worker → tasks never leave pending/ready, `task.workerUnavailable` on action, no fake identities; restart persistence (stop, new service on same medium, state intact); `stop()` aborts in-flight worker signal |
+| `tests/task-adapters.test.ts` (new) | `LocalTaskWorker` against a fake `ctx.agents` (create/followup/whenIdle/flush/dispose mapping, report-tool result, session-ended-without-report → failed result, usage accumulation, abort → failed result); `TeamTaskWorker` against a fake `TeamService` + fake agents (Lead spawn, per-task teammate spawn, assign/interrupt/dispose mapping); `UnavailableWorker` rejects with `task.workerUnavailable`; **import isolation**: a source-scan test asserting `agentTeams` appears only in `src/tasks/team-adapter.ts` and `ctx.subagents`/`subagents` appears in no file — the invariant-1 check |
+| `tests/rpc-handler.test.ts` (extended) | `taskRetry` dispatch returns the record; non-uuid → bad-request; absent service → bad-request; `task.retryNotAllowed`/`task.unknown` mapped via `decodeDashboardError` with `{ taskId }`; `runDetail` includes `tasks` when the service is present and omits them (absent property) when not |
+| `tests/dashboard-tasks-interactions.test.tsx` (new, jsdom zh) | Tasks section renders mixed statuses from `runDetail` (pills, deps, attempt `2/3`, agent tail, summary/error rows, blocked names the failed dep); retry button appears only on `failed`, calls `onTaskRetry(taskId)`, pending `重试中…`, then refresh; worker-unavailable banner renders the zh notice; `worker: 'local'` label; no fake data — empty task list renders the section's empty state |
+| `tests/run-storage-integration.test.ts` (extended) | coordinator leg extended: activated plan materializes tasks on the real JSON backend; a fake worker completes one task; after a domain reopen the task statuses, events, and run phase survive; medium table set `['plans', 'run_events', 'runs', 'tasks']`; a second boot's `taskRetry` re-runs a failed task |
+| regression | every existing suite green, unchanged files untouched except the additive edits listed in §11 |
+
+Settlement in the service tests follows the Phase 3 `settle` pattern (poll the
+persisted outcome on the shared medium; generous slow-yield budget — the
+real-JSON lesson from Phase 3 applies to the integration leg).
+
+## 13. Acceptance criteria (maps to `intent.md` §7.4)
+
+1. Tasks materialize 1:1 from the active plan version with dependencies
+   resolved (plan positions → task uuids); a taskless plan is a no-op; an
+   invalid DAG is rejected at materialization with zero rows persisted;
+   superseding the active plan retires its live tasks (running ones stopped).
+2. DAG semantics hold end-to-end: a task is ready only when all dependencies
+   succeeded; a permanently failed dependency blocks dependents; a retried
+   dependency that later succeeds re-readies them; `validateTaskGraph` rejects
+   cycles/unknown refs; transitions are idempotent rejections.
+3. Ready tasks execute on real agents behind the seam (fake in tests):
+   `status`/`assignedAgentId`/`attempt` persist on the `tasks` table; retries
+   respect `maxAttempts` with the generalized `failureRetryDelay` backoff;
+   exhausted attempts → terminal `failed`; a dead DAG blocks the run (retryable
+   via the existing resume path); run cancellation cancels live tasks and
+   stops their workers.
+4. The agent lifecycle is inspectable in the inspector: per-task status/role/
+   attempt/summary/error, agent identity tail, start time, tokens when the
+   runtime provides them; the snapshot carries `worker` kind + `taskCounts`;
+   zh/en parity compile-enforced; no fabricated activity.
+5. Honest degradation: a composition without the selected runtime exposes
+   `worker: 'unavailable'`, the zh/en banner, `task.workerUnavailable` on
+   actions, and tasks never carry fake identities or leave scheduling states.
+6. Storage integration: task records + task events survive a real JSON domain
+   reopen; medium table set `['plans', 'run_events', 'runs', 'tasks']`;
+   `dsh_projects` stays format v0.
+7. Repo green: `pnpm run typecheck`, `pnpm run build`, `pnpm vitest run`
+   (modulo the documented pre-existing environment failures).
+
+## 14. Explicit non-goals (Phase 5+)
+
+- No per-task worktrees/branches, one-writer-per-worktree invariant,
+  integration worktree/strategy, Git metadata in the UI (Phase 5). Phase 4
+  tasks run in the project's existing working tree; default concurrency 1
+  (intent §7.2) bounds the risk.
+- No run completion pipeline: all tasks succeeded → the run stays `executing`
+  (intent §7.1.9); `integrating → validating → finalizing → succeeded`
+  arrives with Phase 5.
+- No Project Memory (6). No `ApprovalRequest` objects, no budgets —
+  `maxAttempts` is the only Phase 4 limit (7). No report artifacts (8). No
+  triggers (9).
+- No startup reconciliation of orphaned tasks/agents (Phase 10) — `stop()`
+  aborts and drops references without mutating state; a restart finds
+  `running` tasks persisted and the tick leaves them (recovery is Phase 10's
+  design).
+- No interactive re-planning loop from task failures (master spec §49) —
+  blocked runs are retried/replanned through the existing Phase 3 paths.
+- No monetary cost (master spec §29: unknown unless a reliable source exists);
+  tokens only from native session usage.
+- `awaiting-review` remains unreachable; `workspaceId` remains unset.

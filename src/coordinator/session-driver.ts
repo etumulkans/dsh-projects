@@ -29,6 +29,7 @@ export interface CoordinatorPlanSubmission {
   readonly tasks?: readonly {
     readonly title: string
     readonly description: string
+    readonly role?: string
     readonly dependencies?: readonly string[]
     readonly acceptanceCriteria?: readonly string[]
   }[]
@@ -162,6 +163,7 @@ export class HarnessCoordinatorDriver {
             properties: {
               title: { type: 'string', required: true },
               description: { type: 'string', required: true },
+              role: { type: 'string', description: 'Optional role label for the executing agent (guidance, e.g. repository-researcher, backend-engineer).' },
               dependencies: { type: 'array', items: { type: 'string' }, description: 'Ids of EARLIER tasks only.' },
               acceptanceCriteria: { type: 'array', items: { type: 'string' } },
             },
@@ -187,6 +189,7 @@ export class HarnessCoordinatorDriver {
             tasks: args.tasks.map(task => ({
               title: task.title,
               description: task.description,
+              ...(task.role === undefined || task.role === '' ? {} : { role: task.role }),
               ...(task.dependencies === undefined ? {} : { dependencies: task.dependencies }),
               ...(task.acceptanceCriteria === undefined ? {} : { acceptanceCriteria: task.acceptanceCriteria }),
             })),

@@ -671,6 +671,33 @@ export const DASHBOARD_STYLES = String.raw`
 .dshd-plan-actions .dshd-primary:hover { background: #164ec3; border-color: #164ec3; }
 .dshd-plan-actions .dshd-danger { color: #c52b3a; border-color: #e5b6bc; }
 .dshd-plan-actions .dshd-danger:hover { background: #fff2f4; border-color: #d68f99; }
+.dshd-tasks-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border: 1px solid #ccd5e3; border-radius: 999px; background: #f4f7fc; color: #4a5a75; font-size: 10px; white-space: nowrap; }
+.dshd-tasks-worker { margin-bottom: 10px; }
+.dshd-tasks-worker[data-kind="local"], .dshd-tasks-worker[data-kind="agent-team"] { display: inline-flex; align-items: center; padding: 3px 9px; border: 1px solid #ccd5e3; border-radius: 999px; background: #f4f7fc; color: #4a5a75; font-size: 10px; white-space: nowrap; }
+.dshd-tasks-worker[data-kind="unavailable"] { padding: 8px 11px; border: 1px solid #e5b6bc; border-radius: 6px; background: #fff2f4; color: #c52b3a; font-size: 11px; }
+.dshd-tasks-empty { color: #79869a; font-size: 11px; }
+.dshd-tasks-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.dshd-task-row { display: flex; align-items: flex-start; gap: 10px; border: 1px solid #dde4ee; border-radius: 8px; padding: 10px 12px; background: #fff; }
+.dshd-task-row-running { border-color: #bcd7f2; background: #f7fbff; }
+.dshd-task-status { flex-shrink: 0; display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 560; white-space: nowrap; margin-top: 1px; }
+.dshd-task-status-pending { background: #eef1f6; color: #52617a; }
+.dshd-task-status-ready { background: #eef5fe; color: #164ec3; }
+.dshd-task-status-running { background: #fff6e6; color: #9a6b00; }
+.dshd-task-status-blocked { background: #f1f3f7; color: #8b95a7; }
+.dshd-task-status-awaiting-review { background: #f3efff; color: #5b3fc4; }
+.dshd-task-status-succeeded { background: #eefaf1; color: #1d7a3c; }
+.dshd-task-status-failed { background: #fff2f4; color: #c52b3a; }
+.dshd-task-status-canceled { background: #f1f3f7; color: #8b95a7; text-decoration: line-through; }
+.dshd-task-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.dshd-task-main strong { font-size: 11px; font-weight: 600; color: #1d2b43; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshd-task-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 10px; color: #65738b; }
+.dshd-task-role { padding: 1px 7px; border: 1px solid #ccd5e3; border-radius: 999px; background: #f4f7fc; color: #4a5a75; font-size: 10px; }
+.dshd-task-deps, .dshd-task-attempt, .dshd-task-agent, .dshd-task-tokens { white-space: nowrap; }
+.dshd-task-meta small { color: #79869a; }
+.dshd-task-blocked { font-size: 10px; color: #9a6b00; }
+.dshd-task-summary { margin: 0; font-size: 11px; color: #42506a; line-height: 1.5; overflow-wrap: anywhere; }
+.dshd-task-error { margin: 0; font-size: 11px; color: #c52b3a; line-height: 1.5; overflow-wrap: anywhere; }
+.dshd-task-row .dshd-plain-control { flex-shrink: 0; }
 .dshd-plan-dialog { width: min(640px, 100%); }
 .dshd-plan-dialog select { width: 100%; height: 38px; padding: 0 10px; border: 1px solid #cfd7e4; border-radius: 6px; background: #fff; font: inherit; font-size: 12px; }
 .dshd-plan-task-editor { border: 1px solid #d7deea; border-radius: 8px; padding: 10px 11px; display: flex; flex-direction: column; gap: 8px; background: #fff; }

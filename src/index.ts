@@ -29,6 +29,10 @@ import { CoordinatorService } from './coordinator/coordinator-service.ts'
 import { PlanRunCoupler } from './coordinator/coupling.ts'
 import { RunPlanService } from './plans/plan-service.ts'
 import { ProjectRunService } from './runs/run-service.ts'
+import { LocalTaskWorker } from './tasks/local-adapter.ts'
+import { resolveTeamTaskWorker } from './tasks/team-adapter.ts'
+import { ProjectTaskService } from './tasks/task-service.ts'
+import { UnavailableWorker, type TaskWorker } from './tasks/worker.ts'
 import { ScopedTaskSourceRegistry, TaskSourceRegistry } from './task-source/index.ts'
 import { DashboardRuntimeCoordinator } from './runtime/coordinator.ts'
 import { WorkflowStore } from './workflow/store.ts'
@@ -84,9 +88,16 @@ export function apply(ctx: Context, config: PluginConfig): void {
   // Phase 2: Run Plans borrow the shared dsh_projects domain from the Run
   // service (one open per domain name); it starts/stops just inside it.
   // Phase 3: the guarded run-phase coupling observes every plan status change.
+  // Phase 4: tasks execute through the resolved worker seam (spec §6.4) and
+  // materialize from the active plan version via the same onPlanStatus hook.
+  const taskWorker = resolveTaskWorker(ctx, config, agentProfile)
+  const taskService = new ProjectTaskService(ctx, catalog, runService, taskWorker)
   const coupler = new PlanRunCoupler(ctx, runService)
   const planService = new RunPlanService(ctx, runService, undefined, {
-    onPlanStatus: event => coupler.handle(event),
+    onPlanStatus: async event => {
+      await coupler.handle(event)
+      await taskService.handlePlanStatus(event)
+    },
   })
   const coordinator = new CoordinatorService(ctx, catalog, runService, planService, agentProfile)
   const sourceRegistry = new TaskSourceRegistry(ctx)
@@ -144,12 +155,13 @@ export function apply(ctx: Context, config: PluginConfig): void {
     await runService.start()
     planService.start()
     coordinator.start()
+    taskService.start()
     await runtime.start()
   })
 
   ctx.connection.rpc.handle(
     '/dsh-dashboard',
-    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup, runService, planService, coordinator),
+    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup, runService, planService, coordinator, taskService),
     { authority: 'trusted-host' },
   )
 
@@ -161,12 +173,27 @@ export function apply(ctx: Context, config: PluginConfig): void {
       disposed = true
       await startup.catch(() => undefined)
       await runtime.stop()
+      taskService.stop()
       coordinator.stop()
       planService.stop()
       await runService.stop()
       await catalog.stop()
     }
   }, 'dsh-dashboard runtime')
+}
+
+/**
+ * Resolve the Phase 4 task worker (spec §6.4): the local Harness worker by
+ * default (always available — `ctx.agents` is a hard plugin dependency), or
+ * the experimental Agent Teams worker when configured AND mounted, else the
+ * explicit unavailable state (no silent fallback).
+ */
+function resolveTaskWorker(ctx: Context, config: PluginConfig, agentProfile: PluginConfig['agentProfile']): TaskWorker {
+  const kind = config.projects?.taskWorker ?? 'local'
+  if (kind === 'agent-teams') {
+    return resolveTeamTaskWorker(ctx, agentProfile) ?? new UnavailableWorker()
+  }
+  return new LocalTaskWorker(ctx, agentProfile)
 }
 
 interface ProviderConfigs {

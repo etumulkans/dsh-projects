@@ -223,6 +223,7 @@ export class CoordinatorService {
         tasks: input.tasks.map(task => ({
           title: task.title,
           description: task.description,
+          ...(task.role === undefined ? {} : { role: task.role }),
           ...(task.dependencies === undefined ? {} : { dependencies: [...task.dependencies] }),
           ...(task.acceptanceCriteria === undefined ? {} : { acceptanceCriteria: [...task.acceptanceCriteria] }),
         })),

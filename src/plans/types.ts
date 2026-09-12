@@ -31,6 +31,11 @@ export interface PlannedTask {
   readonly id: string
   readonly title: string
   readonly description: string
+  /**
+   * Coordinator/plan-selected role label (master spec §15): guidance for the
+   * executing agent, not a hard-coded limitation.
+   */
+  readonly role?: string
   readonly dependencies: readonly string[]
   readonly acceptanceCriteria: readonly string[]
 }
@@ -78,6 +83,8 @@ export interface CreatePlanInput {
 export interface PlannedTaskInput {
   readonly title: string
   readonly description: string
+  /** Role label for the executing agent (master spec §15). */
+  readonly role?: string
   /** Ids of EARLIER tasks in the same list (`t1`..`t{position-1}`). */
   readonly dependencies?: readonly string[]
   readonly acceptanceCriteria?: readonly string[]
