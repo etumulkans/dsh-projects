@@ -6,8 +6,8 @@
 
 An **active** plan's `PlannedTask` list becomes a live **ProjectTask** DAG on the
 `dsh_projects` domain: dependency-gated scheduling, execution by real Harness
-agents behind a fakeable worker seam (background subagents by default, Agent
-Teams when configured and mounted), with task/agent state, retries, and
+agents behind a fakeable worker seam (a local `ctx.agents` worker by default,
+Agent Teams when configured and mounted), with task/agent state, retries, and
 lifecycle visible in the existing Dashboard (zh/en).
 
 **Success (master spec §73):** *Coordinator can execute several
@@ -95,7 +95,7 @@ modes own it). Phase 4 never writes `workspaceId`.
   the run's tasks by status; absent when the Host has no task service).
 - `RunDetailView`: `tasks?: readonly ProjectTaskView[]` — the run's tasks in
   plan (topological) order; absent when the Host has no task service.
-- `ProjectRunSummary` (snapshot `runs` section): `worker?: 'subagent' | 'agent-team' | 'unavailable'` —
+- `ProjectRunSummary` (snapshot `runs` section): `worker?: 'local' | 'agent-team' | 'unavailable'` —
   the worker kind the Host can currently execute tasks with (host-level,
   additive optional).
 
@@ -242,7 +242,7 @@ export interface TaskWorkerResult {
   readonly turnCount?: number
 }
 
-export type TaskWorkerKind = 'subagent' | 'agent-team' | 'unavailable'
+export type TaskWorkerKind = 'local' | 'agent-team' | 'unavailable'
 
 export interface TaskWorker {
   readonly kind: TaskWorkerKind
@@ -259,44 +259,84 @@ persisted by the service. A success result without a usable summary (blank /
 >1000) is treated by the service as a failure (`error: 'worker returned no
 usable summary'`) — a task without a summary cannot be `succeeded`.
 
-### 6.2 `SubagentTaskWorker` (default — `src/tasks/subagent-adapter.ts`)
+**Design correction (grounded in the installed Harness source, supersedes the
+intent's "BackgroundAgentAdapter over `ctx.subagents`"):** the `ctx.subagents`
+surface (`packages/subagent` in the Harness checkout) is an **agent-to-agent
+delegation API** — `startContinuable`'s request requires
+`parent: Agent` ("The spawning agent. In-process providers derive workspace,
+lineage, and delegation depth from its durable session state"), and
+`sendMessage`/`interrupt` require a live sender/authority Agent. A
+service-initiated task worker has no parent Agent, so that surface is **not
+usable for Phase 4 service-initiated tasks** and is not implemented (invariant
+1 + 2: no invented APIs, no placeholder adapters). It remains the foundation
+for coordinator *delegation* (master spec §49 territory, later phase). The
+MVP worker is the **local Harness worker** per master spec §31 — the
+`ctx.agents.create` mechanism that architecture doc §3.3 designates as the
+"Phase 4+ worker foundation" and that `HarnessAgentRunner` /
+`HarnessCoordinatorDriver` already use.
 
-Binds to the **stable** `ctx.subagents` surface (architecture doc §3.6):
-one-shot owned run per task (`start`), result collection, `stop` on
-cancellation/retirement, completion observed by the returned promise. The
-native identity reported by the runtime becomes `agentId` (falling back to
-`input.sessionId` when the runtime accepts a caller-supplied session id — the
-build verifies the installed signature; whichever is true, the service stores
-`agentId ?? input.sessionId` in `assignedAgentId`). No reimplemented process
-management (master spec §14).
+### 6.2 `LocalTaskWorker` (default, always available — `src/tasks/local-adapter.ts`)
+
+`ctx.agents` is a hard dependency of this plugin (it is in the `inject`
+list), so the local worker is available in every composition of the plugin.
+It mirrors the `HarnessAgentRunner`/`HarnessCoordinatorDriver` mechanism:
+
+- `ctx.agents.create({ sessionId, meta: { cwd }, agentOptions: { provider, model },
+  signal, setup })` — model via `ctx.agentDefaultModel.currentSelection()` +
+  `installModelSelection`; permission preset via
+  `ctx.permissionPresets.set(session, …)`.
+- `setup` registers the result-reporting tool **`dsh_projects_report_task_result`**
+  (the `defineTool` seam, same schema-subset discipline as Phase 3's
+  `dsh_projects_submit_plan`): input `{ kind: 'succeeded' | 'failed',
+  summary?: string, error?: string }`, **reportable exactly once** per session
+  (a second call is a tool error).
+- One `followup(createUserMessage(…))` carrying the task prompt (title,
+  description, role guidance, acceptance criteria, cwd note, the report
+  contract); `whenIdle()`; `ctx.sessions.flush(session)`;
+  `lastTurnEnd` scan (the `harness-runner.ts` helper shape:
+  `completed` / `error` / `blocked`).
+- Result: the tool report when it was made (summary/error pass through; the
+  service enforces the summary rule); when the session ends **without** a
+  report → `{ kind: 'failed', error: 'session ended without reporting a task
+  result' }` (an `error`/`blocked` turn-end carries the native reason).
+- `tokenUsage`/`turnCount`: accumulated from the session's
+  `session/event` stream (`assistant/message` usage, `addUsage` pattern from
+  `harness-runner.ts`); omitted when the stream reports none.
+- `stop(agentId)`: resolves the tracked session's AbortController (the
+  service tracks `agentId → AbortController`); the adapter's `finally`
+  flushes + disposes the handle.
 
 ### 6.3 `TeamTaskWorker` (opt-in — `src/tasks/team-adapter.ts`)
 
 **The only file in the codebase that may reference the experimental
-`ctx.agentTeams` surface** (architecture doc §4; invariant 1). One teammate per
-task (spawn per execution, dispose on result), task work posted via the
-native task board (`createTask`/`assignTask`), interruption via `interrupt` on
-cancellation. Bound only when (a) the host composition mounted the plugin and
-(b) the plugin config selects it (below). Because the surface is explicitly
+`ctx.agentTeams` surface** (architecture doc §4; invariant 1). The installed
+`TeamService` is caller-scoped — every method takes `caller: Agent` — so the
+adapter establishes **one Lead session per run** (`ctx.agents.create`, the
+every-live-root-is-an-implicit-Lead rule, architecture doc §3.5) and, per
+task, `spawnTeammate(leadAgent, …)`; task work is posted through the native
+task board (`createTask`/`assignTask`), results arrive via the team task
+board / mailbox (`updateTask` completion carrying the summary), interruption
+via `interrupt(leadAgent, targetName)` on cancellation/retirement. Teammates
+are disposed when their work settles. Because the surface is explicitly
 experimental, this adapter is expected to be the only file that needs
 significant modification if the API changes (master spec §13).
 
 ### 6.4 Availability and selection (honest degradation)
 
-- Both surfaces are **resolved through the Cordis context at startup**
-  (structural typing in the adapter files; no package imports — the plugin's
-  dependency list is unchanged; the experimental package is host-mounted,
-  architecture doc §3.5).
+- The experimental surface is **resolved through the Cordis context at
+  startup** (structural typing in the adapter files; no package imports — the
+  plugin's dependency list is unchanged; the experimental package is
+  host-mounted, architecture doc §3.5). `ctx.subagents` is not referenced by
+  any file (enforced by the source-scan test, §12).
 - Additive optional plugin config (`src/config.ts`):
-  `projects?: { taskWorker?: 'subagent' | 'agent-teams' }`, default
-  `'subagent'`.
+  `projects?: { taskWorker?: 'local' | 'agent-teams' }`, default `'local'`.
 - Resolution at `ProjectTaskService.start()`:
-  - `'subagent'` (default): `ctx.subagents` present → `SubagentTaskWorker`;
-    absent → `UnavailableWorker` (`kind: 'unavailable'`).
+  - `'local'` (default) → `LocalTaskWorker` (always constructible —
+    `ctx.agents` is injected).
   - `'agent-teams'`: `ctx.agentTeams` present → `TeamTaskWorker`; absent →
-    `UnavailableWorker` — **no silent fallback** to subagents (the operator
-    asked for teams; silently getting subagents is a lie). The structured
-    error surfaces instead (intent §7.1.4, invariant 2).
+    `UnavailableWorker` — **no silent fallback** to the local worker (the
+    operator asked for teams; silently getting local execution is a lie).
+    The structured error surfaces instead (intent §7.1.4, invariant 2).
 - `UnavailableWorker.start` rejects with `DashboardDomainError('task.workerUnavailable', …)`.
   The service never starts a task with it: scheduling simply finds no eligible
   worker, the run-level state and UI show *execution unavailable* (a
@@ -449,7 +489,7 @@ New **Tasks** inspector section (`inspector.tasks` — zh `任务`, en `Tasks`) 
   - `unavailable` → notice `执行不可用：当前组合未挂载代理运行时` /
     “Execution unavailable: no agent runtime is mounted in this composition”
     (no task rows are fake; real pending/ready tasks still render).
-  - `subagent` / `agent-team` → small kind label (zh `后台代理` / `代理团队`).
+  - `local` / `agent-team` → small kind label (zh `本地代理` / `代理团队`).
 - **Per-task row** (DAG/plan order): status pill (8 statuses, zh labels:
   待调度/就绪/运行中/受阻/待审/已完成/失败/已取消), title, role, dependency
   titles (or `tN`), `attempt/maxAttempts` (e.g. `2/3`), agent tail (last 8 of
@@ -463,7 +503,7 @@ New **Tasks** inspector section (`inspector.tasks` — zh `任务`, en `Tasks`) 
 - `RunInspector`/surface gain `onTaskRetry?` + `tasks` from `runDetail`;
   `fixture.ts` gains a deterministic tasks section on the executing fixture
   run (mixed statuses incl. one blocked-on-failed-dep, one failed with
-  `attempt: 3`, `worker: 'subagent'`) — fixture-labeled local-mode data only,
+  `attempt: 3`, `worker: 'local'`) — fixture-labeled local-mode data only,
   as in the existing runs fixture.
 - `styles.ts`: `.dshd-tasks*` classes following the Coordinator section's
   visual language.
@@ -485,13 +525,13 @@ src/tasks/
   scheduler.ts      validateTaskGraph, computeDependencyTransitions, pickReadyTasks,
                     compareTasks (pure; reuses orchestrator/scheduling.ts failureRetryDelay)
   worker.ts         TaskWorker seam, TaskWorkerInput/Result/Kind, UnavailableWorker
-  subagent-adapter.ts  SubagentTaskWorker (only file touching ctx.subagents)
+  local-adapter.ts   LocalTaskWorker (ctx.agents mechanism, §6.2; report tool `dsh_projects_report_task_result`)
   team-adapter.ts     TeamTaskWorker (only file touching ctx.agentTeams — experimental)
   task-service.ts   ProjectTaskService (§7), task.* Cordis event declarations
 src/runs/spec.ts    + tasks table, RUN_EVENT_TYPES +5, run schema +maxConcurrentAgents
 src/runs/types.ts   +5 event types, ProjectTaskView, TaskCountsView,
                     ProjectRunView +taskCounts?, RunDetailView +tasks?
-src/config.ts       + optional projects.taskWorker ('subagent' | 'agent-teams')
+src/config.ts       + optional projects.taskWorker ('local' | 'agent-teams')
 src/rpc/handler.ts  9th param taskService?; taskRetry case; runDetail + tasks;
                     snapshot runs + worker/taskCounts
 src/index.ts        worker resolution (§6.4) → ProjectTaskService; hook chain
@@ -505,7 +545,7 @@ src/client/         controller.ts +taskRetry port; errors.ts +7 keys;
 Wiring (`src/index.ts`, following the Phase 3 chain):
 
 ```ts
-const worker = resolveTaskWorker(ctx, config.projects?.taskWorker ?? 'subagent')
+const worker = resolveTaskWorker(ctx, config.projects?.taskWorker ?? 'local')
 const taskService = new ProjectTaskService(ctx, catalog, runService, undefined, worker)
 const planService = new RunPlanService(ctx, runService, undefined, {
   onPlanStatus: async event => {
@@ -528,9 +568,9 @@ failure), so the Dashboard boots in every composition.
 | `tests/task-state-machine.test.ts` (new) | full allowed-edge table + representative forbidden edges; idempotent re-entry rejection; terminal invariants; `running→ready` budget edge; `failed→ready` only from failed; version bumps; `completedAt`/`error`/`outputSummary` carry-over; `awaiting-review` unreachable |
 | `tests/task-scheduler.test.ts` (new) | `validateTaskGraph`: ok / cycle / unknown dep / self-dep; `computeDependencyTransitions`: all-deps-succeeded → ready, any-failed → blocked, recovery → ready, idempotent no-op; `pickReadyTasks`: concurrency cap, retry backoff (injected `now`), deterministic order, empty when saturated |
 | `tests/task-service.test.ts` (new) | in-memory domain + fake worker + injected clocks: materialization 1:1 (deps resolved, role/criteria copied, `maxAttempts` default) + `tasks.materialized` event; taskless plan no-op; zero rows on `task.dagInvalid`; retirement on `superseded` (running task stopped) and on re-activation; first ready wave respects default concurrency 1 + `run.maxConcurrentAgents` override; success path (summary/tokens persisted, `task.completed`); failure with retries (attempt bump, backoff elapses via injected `retryClock`, re-ready, second attempt succeeds); exhausted → `failed` + dead-DAG → run `blocked` (guard: run must be `executing`); dependency recovery unblocks (`blocked → ready`); `taskRetry` happy + `task.retryNotAllowed` + `task.unknown`; run-canceled event → all live tasks `canceled` + worker stopped; stale worker result after cancel is a logged no-op; unavailable worker → tasks never leave pending/ready, `task.workerUnavailable` on action, no fake identities; restart persistence (stop, new service on same medium, state intact); `stop()` aborts in-flight worker signal |
-| `tests/task-adapters.test.ts` (new) | `SubagentTaskWorker` against a fake `SubagentRuntime` (start/stop/result mapping, abort → failed result, identity fallback to `sessionId`); `TeamTaskWorker` against a fake `TeamService` (spawn/assign/interrupt/dispose mapping); `UnavailableWorker` rejects with `task.workerUnavailable`; **import isolation**: a source-scan test asserting `agentTeams` appears only in `src/tasks/team-adapter.ts` (and `src/index.ts`'s config type) — the invariant-1 check |
+| `tests/task-adapters.test.ts` (new) | `LocalTaskWorker` against a fake `ctx.agents` (create/followup/whenIdle/flush/dispose mapping, report-tool result, session-ended-without-report → failed result, usage accumulation, abort → failed result); `TeamTaskWorker` against a fake `TeamService` + fake agents (Lead spawn, per-task teammate spawn, assign/interrupt/dispose mapping); `UnavailableWorker` rejects with `task.workerUnavailable`; **import isolation**: a source-scan test asserting `agentTeams` appears only in `src/tasks/team-adapter.ts` and `ctx.subagents`/`subagents` appears in no file — the invariant-1 check |
 | `tests/rpc-handler.test.ts` (extended) | `taskRetry` dispatch returns the record; non-uuid → bad-request; absent service → bad-request; `task.retryNotAllowed`/`task.unknown` mapped via `decodeDashboardError` with `{ taskId }`; `runDetail` includes `tasks` when the service is present and omits them (absent property) when not |
-| `tests/dashboard-tasks-interactions.test.tsx` (new, jsdom zh) | Tasks section renders mixed statuses from `runDetail` (pills, deps, attempt `2/3`, agent tail, summary/error rows, blocked names the failed dep); retry button appears only on `failed`, calls `onTaskRetry(taskId)`, pending `重试中…`, then refresh; worker-unavailable banner renders the zh notice; `worker: 'subagent'` label; no fake data — empty task list renders the section's empty state |
+| `tests/dashboard-tasks-interactions.test.tsx` (new, jsdom zh) | Tasks section renders mixed statuses from `runDetail` (pills, deps, attempt `2/3`, agent tail, summary/error rows, blocked names the failed dep); retry button appears only on `failed`, calls `onTaskRetry(taskId)`, pending `重试中…`, then refresh; worker-unavailable banner renders the zh notice; `worker: 'local'` label; no fake data — empty task list renders the section's empty state |
 | `tests/run-storage-integration.test.ts` (extended) | coordinator leg extended: activated plan materializes tasks on the real JSON backend; a fake worker completes one task; after a domain reopen the task statuses, events, and run phase survive; medium table set `['plans', 'run_events', 'runs', 'tasks']`; a second boot's `taskRetry` re-runs a failed task |
 | regression | every existing suite green, unchanged files untouched except the additive edits listed in §11 |
 
