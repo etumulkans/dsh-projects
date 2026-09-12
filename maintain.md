@@ -1,5 +1,52 @@
 # Maintenance Log — DSH Projects
 
+## Cycle 2 (post v0.9.0 deploy) — 2026-09-12
+
+**Status: no incidents.** Phase 3 (Coordinator Lead) released as v0.9.0
+(commit `0e98e5e`); the deploy gate was advanced with the review branch pushed
+and the PR prepared but not opened (`gh` auth still broken — see Follow-ups).
+
+### Post-deploy verification
+
+- `pnpm run typecheck` — clean
+- `pnpm run build` — clean (dual tsdown, host + client)
+- `pnpm vitest run` (sequential, load-flakiness removed) — 225 passed / 4
+  failed (229 total); the 4 failures are the pre-existing, documented macOS
+  tmpdir environment failures in `tests/project-catalog.test.ts`
+  (`/var/folders` vs `/private/var/folders` realpath mismatch), present before
+  Phase 3 and unrelated to it. Every suite this phase touches is green
+  (101/101 across the 9 affected files; see `test-report.md`).
+- Working tree clean; `dsh_projects` storage domain remains at format version 0
+  (Phase 3 is additive — `coordinatorSessionId` + 3 run event types, no new
+  tables, no migration needed for installed instances).
+
+### Known issues (tracked, non-blocking)
+
+1. **`project-catalog.test.ts` × 4** — macOS sandbox realpath mismatch
+   (`/var/folders` vs `/private/var/folders`). Fails identically before and
+   after every Phase 3 commit; not a regression. (Count varies 3–4 by run.)
+2. **Review branches without PRs** — `dsh-projects-phase-3` (Phase 3 + v0.9.0)
+   is now pushed to origin, and `dsh-projects-phase-0-2` (Phase 0/1/2 + v0.8.0)
+   remains from Cycle 1, but neither PR is open: `gh` auth is broken (stale
+   keyring token, HTTP 401). Both titles and bodies are prepared — Phase 3's in
+   the `Release v0.9.0` commit message, Phase 0/1/2's in the Cycle 1 notes.
+3. **Running GUI lags the repo** — the dashboard at http://127.0.0.1:3080 still
+   serves a pre-Phase-1 build; the Phase 1/2/3 UI (Runs tab, Run Plans,
+   Coordinator 协调 action + section) is only visible after the plugin is
+   reinstalled/restarted against this checkout's v0.9.0 build output.
+
+### Follow-ups (next intent cycle)
+
+- Re-authenticate `gh` (`gh auth login -h github.com`) and open the PRs from
+  `dsh-projects-phase-0-2` and `dsh-projects-phase-3` so the work lands via
+  review; then consider deleting the pushed branches.
+- Decide whether to fix the `project-catalog.test.ts` tmpdir expectations
+  (normalize `realpath` in the assertions) or keep them documented.
+- Phase 4 scope (per `spec.md` §13 explicit non-goals): task *execution*
+  (PlannedTask → ProjectTask), Agent Teams / background subagents behind
+  adapters, per-task worktrees — to be drafted as the next `intent.md` when
+  this maintain loop hands back to intent.
+
 ## Cycle 1 (post v0.8.0 deploy) — 2026-09-11
 
 **Status: no incidents.** Loop closed on the v0.8.0 release (commit `2a38466`);
