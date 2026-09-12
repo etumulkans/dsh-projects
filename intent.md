@@ -1,6 +1,6 @@
 # Intent — DSH Projects
 
-**Gate:** Intent · **Status:** Phases 0–3 delivered (v0.9.0 released, `Uddoo/dsh-dashboard` PR #1 open) · **Spec:** `DSH_PROJECTS_SPEC.md` · **Architecture:** `docs/dsh-projects-architecture.md`
+**Gate:** Intent · **Status:** Phases 0–3 delivered (v0.9.0 released, `etumulkans/dsh-projects` PR #1 open) · **Spec:** `DSH_PROJECTS_SPEC.md` · **Architecture:** `docs/dsh-projects-architecture.md`
 
 ## 1. What we are doing
 
