@@ -1,6 +1,6 @@
 # Intent — DSH Projects
 
-**Gate:** Intent · **Status:** Phases 0–3 delivered (v0.9.0 released, `etumulkans/dsh-projects` PR #1 open) · **Spec:** `DSH_PROJECTS_SPEC.md` · **Architecture:** `docs/dsh-projects-architecture.md`
+**Gate:** Intent · **Status:** Phases 0–4 delivered (v0.10.0 released; `etumulkans/dsh-projects` PR #2 merged) · **Spec:** `DSH_PROJECTS_SPEC.md` · **Architecture:** `docs/dsh-projects-architecture.md`
 
 ## 1. What we are doing
 
@@ -30,8 +30,8 @@ The dashboard today observes and schedules *tasks* (task sources, local store, G
 | 1 | Project Run foundation — persistent runs, lifecycle, Runs tab | **done** |
 | 2 | Versioned RunPlans — `plans` table, `RunPlanService`, plan UI on RunInspector | **done (v0.8.0)** |
 | 3 | Coordinator — Lead session driving plan creation via structured output | **done (v0.9.0)** |
-| 4 | Task DAG + team execution — `ProjectTaskService`, adapters over `ctx.agentTeams`/`ctx.subagents` | **next** |
-| 5 | Git isolation + integration — per-task worktrees, `dsh/run-<id>/<task>` branches | planned |
+| 4 | Task DAG + team execution — `ProjectTaskService`, adapters over `ctx.agentTeams`/`ctx.subagents` | **done (v0.10.0)** |
+| 5 | Git isolation + integration — per-task worktrees, `dsh/run-<id>/<task>` branches, run completion pipeline | **next** |
 | 6 | Project Memory — `project_memory`, retrieval, distillation | planned |
 | 7 | Approvals + budgets — `project_approvals`, budget enforcement | planned |
 | 8 | Artifacts + final report — `project_artifacts`, report generation | planned |
@@ -108,3 +108,169 @@ Pure scheduler/DAG module (validation, cycles, ready calculation, blocking, idem
 ## 8. Next gate
 
 **Design (Phase 4 — Task DAG + team execution):** formalize `spec.md` — the `tasks` table schema, the task state machine, materialization/retirement rules, the scheduler module (reuse/generalize `orchestrator/scheduling.ts`), the worker seam + `TeamRuntimeAdapter`/`BackgroundAgentAdapter` contracts and runtime availability detection, the role configuration, the additive RPC surface, the inspector Tasks section, the run-coupling decision (§7.1 item 9), and the full test plan, per the sequencing table above.
+
+## 9. Phase 5 intent — Git isolation + integration
+
+**End state (master spec §73):** *parallel coding Agents safely produce an
+integrated branch.*
+
+Phase 4 executes tasks in the project's existing working tree (default
+concurrency 1, §7.1 item 9). Phase 5 gives every live task its own Git
+worktree + branch (one writer per worktree), commits the task's work onto
+its branch, integrates the task branches in a dedicated integration
+worktree, and drives the run through the already-declared
+`integrating → validating → finalizing → succeeded` phases (Phase 1 state
+machine — no new run phases). Git metadata becomes inspectable in the
+Dashboard. Master spec anchors: §16 (Git workspace model), §17 (integration
+strategy), §73 Phase 5.
+
+### 9.1 Capability slices (master spec §73 Phase 5)
+
+1. **Worktree provisioning** — when a task enters `running`, a worktree is
+   provisioned from the project repository: directory
+   `<projectRoot>/worktree/run-<shortRunId>/<taskLeaf>`, branch
+   `dsh/run-<shortRunId>/<taskLeaf>` (spec §16 naming), created from the
+   run's base commit (Design: recorded at materialization). `taskLeaf` is
+   derived from the plan position (`t1…tn`) through the existing
+   `path-safety` leaf normalization — never from task text (spec §16:
+   "Never trust task text directly as a filesystem path"). The existing
+   `WorkspaceManager` + `path-safety` (containment, symlink protection) is
+   reused, not reinvented (invariant 4). The reserved `workspaceId` field
+   is filled with the real worktree identity (path + branch).
+2. **One writer per worktree** — a worktree is allocated exclusively to one
+   live task; the allocation is persisted (part of the task record) and the
+   scheduler enforces exclusivity: a task is never scheduled onto an
+   already-allocated worktree, and reallocation happens only after the
+   previous task is terminal and cleaned up. Enforced by construction +
+   tested, not by convention (spec §16 default rule).
+3. **Task commits** — a task's work is committed onto its branch before the
+   task may reach `succeeded`: the worker adapter commits on completion —
+   agent-made commits stay as-is; a dirty tree at task end is committed by
+   the adapter with a deterministic message (`dsh task <shortTaskId>:
+   <title>`) so no work is silently discarded; an empty tree (no changes)
+   is a legitimate success with no commit. The task record gains additive
+   optional Git metadata: `branch`, `baseCommit`, `headCommit?` — real
+   `git` results only, never fabricated (invariant 2).
+4. **Non-Git projects degrade honestly** — a project root that is not a Git
+   repository cannot be isolated: its tasks run in the shared working tree
+   (Phase 4 behavior), the UI states "no Git isolation" explicitly, and no
+   worktree/branch metadata is shown. No fake Git data (invariant 2).
+5. **Integration** — when all coding tasks of the active plan succeed, the
+   run moves `executing → integrating` (existing edge) and a dedicated
+   integration step (not a user-planned task; Design decides its
+   representation) runs in a dedicated worktree
+   `<projectRoot>/worktree/run-<shortRunId>/integration` (branch
+   `dsh/run-<shortRunId>/integration`, spec §16/§17): task branches are
+   applied in plan order (the MVP strategy is deterministic
+   merge-in-order; spec §17's "configurable strategy" is honored by
+   keeping the strategy behind a seam, but only the deterministic path is
+   shipped), conflicts are a structured failure with the conflicting paths
+   persisted in the event detail — never force-resolved — then validation
+   runs (spec §17). **The repository's default/protected branch is never
+   touched** (spec §17); the only output is the integrated branch.
+6. **Run completion pipeline** — the existing Phase 1 phases are wired
+   end-to-end: all tasks succeeded → `integrating`; integration succeeded →
+   `validating`; validation passed → `finalizing` (cleanup + final state
+   persisted) → `succeeded`. Integration/validation failure → run
+   `blocked` (retryable via the existing resume path — resume re-runs the
+   integration from the immutable task branches; Design sets the
+   blocked-vs-failed boundary). A dead task DAG keeps Phase 4's `blocked`.
+7. **Cleanup** — a terminal run removes its task worktrees + branches and
+   keeps the integrated branch (spec §17 output); a failed run keeps
+   worktrees + branches for inspection (retention is persisted, not
+   guessed). `stop()` removes what the process owns; cross-restart
+   reconciliation of orphaned worktrees is Phase 10 (provisioning is
+   idempotent — a same-identity worktree/branch is verified and reused —
+   so a restart can resume without corruption).
+8. **Git metadata in the UI** — task rows show branch + head-commit short
+   (only when real); the run inspector shows the integration state
+   (running/succeeded/failed + conflicting paths on failure), the
+   integrated branch name, and the cleanup state. zh/en parity
+   compile-enforced. No fabricated Git data (invariant 2).
+9. **RPC (additive)** — `runDetail` tasks carry the Git metadata (additive
+   optional fields); integration progress comes from additive run event
+   types (`run.integration.started/completed/failed` + Cordis events, the
+   Phase 3 coordinator-event pattern); no new endpoint beyond what Design
+   requires (integration re-run rides the existing run resume path).
+
+### 9.2 Concurrency (real parallelism, now safe)
+
+Worktrees are what make per-task parallelism safe (spec §16 premise): the
+per-run concurrency limit (Phase 4; default 1, `run.maxConcurrentAgents`)
+now governs true parallel coding agents. The default stays 1 (conservative
+on shared machines); the tests prove parallel execution at limit > 1
+(disjoint + conflicting file sets). One writer per worktree is enforced by
+allocation, not by convention.
+
+### 9.3 Non-goals (Phase 6+)
+
+- No automatic push/PR of the integrated branch — spec §17's "optional
+  push → optional pull request → human review" stays optional: the branch
+  is produced and shown; a human pushes/reviews from it. (Carried to a
+  later phase; no `gh`/remote coupling in this slice.)
+- No interactive conflict-resolution UI — a conflict is a structured
+  failure with persisted conflicting paths; resolution happens via the
+  resume path or a human's manual Git work on the branch.
+- No Project Memory (6). No `ApprovalRequest` objects, no budgets (7). No
+  report artifacts (8). No triggers (9).
+- No startup reconciliation of orphaned worktrees/branches (10) — `stop()`
+  removes what it owns; provisioning idempotency makes a restart safe.
+- No monetary cost figures; token accounting only from native session
+  usage (unchanged from Phase 4).
+
+### 9.4 Acceptance (intent level; each gate verifies its part)
+
+1. Every live task in a Git project runs in its own worktree + branch
+   (spec §16 naming); the one-writer-per-worktree invariant holds
+   (allocation exclusivity, tested); non-Git projects run in the shared
+   tree with an explicit UI notice and no Git metadata.
+2. Task work is committed onto the task branch before `succeeded` (no
+   silently discarded work; empty tree = no-commit success); Git metadata
+   (branch, base/head commits) is real or absent, never fabricated.
+3. All tasks succeeded → run `integrating` → the integrated branch is
+   produced by the deterministic merge-in-order strategy in the
+   integration worktree; a conflict is a structured failure (conflicting
+   paths persisted), never force-resolved; the default/protected branch is
+   never touched.
+4. The completion pipeline is wired end-to-end on the existing state
+   machine (no new phases): `integrating → validating → finalizing →
+   succeeded`; a failed integration leaves the run `blocked` and a resume
+   re-runs the integration from the immutable task branches.
+5. Cleanup: a terminal run removes task worktrees + branches and keeps the
+   integrated branch; a failed run keeps them for inspection; `stop()`
+   removes what it owns.
+6. UI: per-task branch + head-commit, integration state + conflicting
+   paths, integrated branch name — zh/en parity compile-enforced, no
+   fabricated Git data.
+7. Storage: Git metadata + integration events survive a real JSON domain
+   reopen; `dsh_projects` stays format version 0.
+8. Repo green: typecheck, build, `pnpm vitest run` (modulo the documented
+   pre-existing environment failures); parallel execution at concurrency
+   > 1 proven by tests.
+
+### 9.5 Test plan (intent level; Design formalizes seams)
+
+A pure Git-workspace module (branch/worktree naming normalization, leaf
+safety, allocation exclusivity) against fixture Git repositories (real
+`git` CLI in a temp repo — the existing `workspace-manager` test pattern);
+`task-service` tests extended for the worktree lifecycle (provision on
+`running`, commit on success, empty-tree success, cleanup on terminal,
+non-Git degradation); an integration-strategy module (merge-in-order over
+disjoint + overlapping changes, the conflict case with persisted paths);
+the run pipeline coupling (all-succeeded → `integrating` →
+`succeeded`; conflict → `blocked` → resume → re-integration from the
+unchanged task branches); additive RPC (validation + absent-service); jsdom
+UI interactions (zh labels for branch/integration rows, the non-Git
+notice); extended storage integration (Git metadata + integration events
+survive a real JSON reopen; medium table set unchanged).
+
+## 10. Next gate
+
+**Design (Phase 5 — Git isolation + integration):** formalize `spec.md` —
+the worktree provisioning module (naming, base commit, idempotent
+reuse), the one-writer allocation registry, the task-commit contract, the
+integration strategy module (merge-in-order, conflict detection), the
+run-completion pipeline coupling, cleanup/retention rules, the additive
+storage fields + run event types, the RPC surface, the inspector Git
+metadata section, the non-Git degradation path, and the full test plan,
+per the sequencing table above.
