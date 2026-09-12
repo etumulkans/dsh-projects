@@ -25,6 +25,10 @@ import { LinearTaskSource } from './linear/source.ts'
 import { LocalTaskSource } from './local/source.ts'
 import { DashboardOrchestrator } from './orchestrator/orchestrator.ts'
 import { handleDashboardRpc } from './rpc/handler.ts'
+import { CoordinatorService } from './coordinator/coordinator-service.ts'
+import { PlanRunCoupler } from './coordinator/coupling.ts'
+import { RunPlanService } from './plans/plan-service.ts'
+import { ProjectRunService } from './runs/run-service.ts'
 import { ScopedTaskSourceRegistry, TaskSourceRegistry } from './task-source/index.ts'
 import { DashboardRuntimeCoordinator } from './runtime/coordinator.ts'
 import { WorkflowStore } from './workflow/store.ts'
@@ -76,6 +80,15 @@ export function apply(ctx: Context, config: PluginConfig): void {
     currentProject: config.currentProject,
     discoveryRoots: config.discovery.roots,
   })
+  const runService = new ProjectRunService(ctx, catalog)
+  // Phase 2: Run Plans borrow the shared dsh_projects domain from the Run
+  // service (one open per domain name); it starts/stops just inside it.
+  // Phase 3: the guarded run-phase coupling observes every plan status change.
+  const coupler = new PlanRunCoupler(ctx, runService)
+  const planService = new RunPlanService(ctx, runService, undefined, {
+    onPlanStatus: event => coupler.handle(event),
+  })
+  const coordinator = new CoordinatorService(ctx, catalog, runService, planService, agentProfile)
   const sourceRegistry = new TaskSourceRegistry(ctx)
   const runner = new HarnessAgentRunner(ctx, {
     permissionPreset: agentProfile.permissionPreset,
@@ -128,12 +141,15 @@ export function apply(ctx: Context, config: PluginConfig): void {
   let disposed = false
   const startup = catalog.start().then(async () => {
     if (disposed) return
+    await runService.start()
+    planService.start()
+    coordinator.start()
     await runtime.start()
   })
 
   ctx.connection.rpc.handle(
     '/dsh-dashboard',
-    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup),
+    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup, runService, planService, coordinator),
     { authority: 'trusted-host' },
   )
 
@@ -145,6 +161,9 @@ export function apply(ctx: Context, config: PluginConfig): void {
       disposed = true
       await startup.catch(() => undefined)
       await runtime.stop()
+      coordinator.stop()
+      planService.stop()
+      await runService.stop()
       await catalog.stop()
     }
   }, 'dsh-dashboard runtime')

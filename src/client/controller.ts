@@ -3,6 +3,8 @@
 import type { ClientConnectionRpc, RpcResult } from '@deepseek-ai/dsh-client-connection/client'
 import type { DashboardSnapshot, TaskTimelinePage } from '../runtime/types.ts'
 import type { AddDiscoveryRootInput, ProjectScanResult, RegisterProjectInput } from '../catalog/types.ts'
+import type { CreateRunInput, ProjectRunPhase, RunDetailView } from '../runs/types.ts'
+import type { CreatePlanInput, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
 import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
 import {
   DashboardRequestError,
@@ -35,6 +37,25 @@ export interface DashboardDataPort {
   scanProjects(rootId: string): Promise<ProjectScanResult>
   registerProjectCandidate(token: string): Promise<void>
   registerProject(input: RegisterProjectInput): Promise<void>
+  createRun(input: CreateRunInput): Promise<void>
+  runTransition(input: {
+    runId: string
+    to: ProjectRunPhase
+    expectedVersion?: number
+    error?: string
+    resultSummary?: string
+  }): Promise<void>
+  loadRunDetail(runId: string): Promise<RunDetailView>
+  /** Phase 3: start one Coordinator Lead session for a created/planning run. */
+  coordinateRun(runId: string): Promise<void>
+  createPlan(input: CreatePlanInput): Promise<RunPlanRecord>
+  loadPlans(runId: string): Promise<readonly RunPlanRecord[]>
+  planTransition(input: {
+    planId: string
+    status: RunPlanStatus
+    expectedRevision?: number
+    replanReason?: string
+  }): Promise<RunPlanRecord>
 }
 
 /** Root overlay visibility shared by the sidebar trigger and shell-overlay entry. */
@@ -154,6 +175,89 @@ export class DashboardDataController implements DashboardDataPort {
     await this.call('registerProject', input, false, true)
   }
 
+  async createRun(input: CreateRunInput): Promise<void> {
+    await this.call('runCreate', input, false, true)
+  }
+
+  async runTransition(input: {
+    runId: string
+    to: ProjectRunPhase
+    expectedVersion?: number
+    error?: string
+    resultSummary?: string
+  }): Promise<void> {
+    await this.call('runTransition', input, false, true)
+  }
+
+  async loadRunDetail(runId: string): Promise<RunDetailView> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'runDetail', { runId }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseRunDetail(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async coordinateRun(runId: string): Promise<void> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'runCoordinate', { runId }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async createPlan(input: CreatePlanInput): Promise<RunPlanRecord> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'planCreate', input) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseRunPlan(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async loadPlans(runId: string): Promise<readonly RunPlanRecord[]> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'planList', { runId }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseRunPlanList(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async planTransition(input: {
+    planId: string
+    status: RunPlanStatus
+    expectedRevision?: number
+    replanReason?: string
+  }): Promise<RunPlanRecord> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'planTransition', input) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseRunPlan(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
   private async readState(): Promise<void> {
     await this.call('state', {}, false)
   }
@@ -237,6 +341,76 @@ function parseTimelinePage(value: unknown): TaskTimelinePage {
     throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported task timeline data')
   }
   return value as TaskTimelinePage
+}
+
+function parseRunDetail(value: unknown): RunDetailView {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run detail data')
+  }
+  const detail = value as { run?: unknown; events?: unknown; truncated?: unknown }
+  if (!isRunView(detail.run)
+    || !Array.isArray(detail.events)
+    || !detail.events.every(isRunEventView)
+    || typeof detail.truncated !== 'boolean') {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run detail data')
+  }
+  return value as RunDetailView
+}
+
+function parseRunPlan(value: unknown): RunPlanRecord {
+  if (!isRunPlanRecord(value)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run Plan data')
+  }
+  return value as RunPlanRecord
+}
+
+function parseRunPlanList(value: unknown): readonly RunPlanRecord[] {
+  if (!Array.isArray(value) || !value.every(isRunPlanRecord)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run Plan list data')
+  }
+  return value as readonly RunPlanRecord[]
+}
+
+function isRunPlanRecord(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const plan = value as Record<string, unknown>
+  return typeof plan.id === 'string'
+    && typeof plan.runId === 'string'
+    && typeof plan.projectId === 'string'
+    && typeof plan.version === 'number'
+    && typeof plan.pattern === 'string'
+    && typeof plan.rationale === 'string'
+    && Array.isArray(plan.assumptions)
+    && Array.isArray(plan.successCriteria)
+    && Array.isArray(plan.tasks)
+    && typeof plan.status === 'string'
+    && (plan.replanReason === undefined || typeof plan.replanReason === 'string')
+    && (plan.supersedesPlanId === undefined || typeof plan.supersedesPlanId === 'string')
+    && typeof plan.createdAt === 'string'
+    && typeof plan.revision === 'number'
+}
+
+function isRunView(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const run = value as Record<string, unknown>
+  return typeof run.id === 'string'
+    && typeof run.projectId === 'string'
+    && typeof run.goal === 'string'
+    && typeof run.phase === 'string'
+    && typeof run.createdAt === 'string'
+    && typeof run.updatedAt === 'string'
+    && typeof run.version === 'number'
+}
+
+function isRunEventView(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const event = value as Record<string, unknown>
+  return typeof event.id === 'string'
+    && typeof event.type === 'string'
+    && typeof event.title === 'string'
+    && (event.detail === undefined || typeof event.detail === 'string')
+    && typeof event.seq === 'number'
+    && typeof event.at === 'string'
 }
 
 function isTimelineEvent(value: unknown): boolean {

@@ -1,0 +1,333 @@
+/**
+ * Integration check against the real storage stack: a genuine Cordis Context,
+ * the real JSON file backend, and the real DomainFacility (zod validation and
+ * medium versioning included). Proves Run state survives a process-style
+ * restart: close everything, re-open the domain on the same medium, and the
+ * records come back validated.
+ */
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import Storage from '@deepseek-ai/dsh-storage'
+import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
+import { JsonStorageBackend } from '@deepseek-ai/dsh-storage-json'
+import { afterEach, describe, expect, it } from 'vitest'
+import type { ProjectCatalog } from '../src/catalog/catalog.ts'
+import { CoordinatorService } from '../src/coordinator/coordinator-service.ts'
+import { PlanRunCoupler } from '../src/coordinator/coupling.ts'
+import type {
+  CoordinatorDriver,
+  CoordinatorDriverInput,
+  CoordinatorDriverResult,
+} from '../src/coordinator/session-driver.ts'
+import { RunPlanService } from '../src/plans/plan-service.ts'
+import { dshProjectsDomainSpec } from '../src/runs/spec.ts'
+import { ProjectRunService } from '../src/runs/run-service.ts'
+
+const temporaryRoots: string[] = []
+const contexts: Context[] = []
+
+afterEach(async () => {
+  for (const ctx of contexts.splice(0)) {
+    await ctx.fiber.dispose().catch(() => undefined)
+  }
+  for (const root of temporaryRoots.splice(0)) {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+interface BootedStorage {
+  readonly ctx: Context
+  readonly backend: JsonStorageBackend
+  readonly facility: DomainFacility
+  readonly dispose: () => void
+}
+
+/** Boot a context with the storage hub, one JSON backend, and a facility over it. */
+async function boot(root: string): Promise<BootedStorage> {
+  const ctx = new Context()
+  contexts.push(ctx)
+  await ctx.plugin(Storage)
+  const backend = new JsonStorageBackend(join(root, 'storages'))
+  ctx.storage.backend.register('json', backend)
+  const facility = new DomainFacility(ctx, { backend: 'json', routes: {} })
+  ctx.storage.mount('domain', facility)
+  const dispose = ctx.provide('storageDomain', facility)
+  return { ctx, backend, facility, dispose: () => { dispose(); backend.close().catch(() => undefined) } }
+}
+
+const PROJECT_ID = '123e4567-e89b-42d3-a456-426614174000'
+
+/**
+ * Yield to the task queue until the coordinator settlement events are
+ * persisted. Each real-JSON write is a whole-file rewrite with fsync, so the
+ * settlement chain needs a generous budget of slow yields.
+ */
+async function settleCoordinator(runService: ProjectRunService, runId: string): Promise<void> {
+  for (let i = 0; i < 400; i += 1) {
+    const detail = await runService.runDetail(runId)
+    if (detail.events.some(event =>
+      event.type === 'run.coordinator.completed' || event.type === 'run.coordinator.failed')) return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  throw new Error('coordination did not settle in time')
+}
+
+function catalogFixture(): ProjectCatalog {
+  return {
+    project: (id: string) => id === PROJECT_ID ? { id, name: 'Project A' } : undefined,
+  } as unknown as ProjectCatalog
+}
+
+describe('ProjectRunService against real JSON storage', () => {
+  it('persists runs and events across a domain reopen on the same medium', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projects-run-it-'))
+    temporaryRoots.push(root)
+    const { ctx, facility, dispose } = await boot(root)
+    const clock = () => new Date(Date.UTC(2026, 7, 14, 2, 0, 0)).toISOString()
+
+    // --- boot 1: create a run, plan + activate v1, replan v2, suspend ---
+    const first = new ProjectRunService(ctx, catalogFixture(), clock)
+    await first.start()
+    const firstPlans = new RunPlanService(ctx, first, clock)
+    firstPlans.start()
+    const run = await first.createRun(
+      { goal: 'Integration: survive a real storage restart', sourceRef: 'IT-1' },
+      { mode: 'project', projectId: PROJECT_ID },
+    )
+    expect(run).toMatchObject({ phase: 'created', version: 1 })
+    await first.transitionRun(run.id, 'planning')
+    await first.transitionRun(run.id, 'executing')
+    const planV1 = await firstPlans.createPlan({
+      runId: run.id,
+      pattern: 'supervisor',
+      rationale: 'coordinate the integration work',
+      tasks: [{ title: 'first task', description: 'do the first thing' }],
+    })
+    await firstPlans.transitionPlan(planV1.id, 'active')
+    const planV2 = await firstPlans.createPlan({
+      runId: run.id,
+      pattern: 'direct',
+      rationale: 'narrowed scope',
+      replanReason: 'scope changed mid-run',
+    })
+    await firstPlans.transitionPlan(planV2.id, 'active')
+    const paused = await first.transitionRun(run.id, 'paused')
+    expect(paused).toMatchObject({ phase: 'paused', suspendedFrom: 'executing', version: 6 })
+    firstPlans.stop()
+    await first.stop()
+    await facility.closeAll()
+
+    // --- boot 2: fresh service instance over the same medium ---
+    const second = new ProjectRunService(ctx, catalogFixture(), clock)
+    await second.start()
+    const secondPlans = new RunPlanService(ctx, second, clock)
+    secondPlans.start()
+    try {
+      const summary = await second.listForSnapshot({ mode: 'project', projectId: PROJECT_ID })
+      expect(summary.total).toBe(1)
+      expect(summary.runs[0]).toMatchObject({
+        id: run.id,
+        goal: 'Integration: survive a real storage restart',
+        sourceRef: 'IT-1',
+        phase: 'paused',
+        suspendedFrom: 'executing',
+        version: 6,
+        activePlanId: planV2.id,
+      })
+
+      const detail = await second.runDetail(run.id)
+      expect(detail.truncated).toBe(false)
+      expect(detail.events.map(event => event.type)).toEqual([
+        'run.phase.changed',
+        'run.replanned',
+        'plan.approved',
+        'plan.superseded',
+        'plan.created',
+        'plan.approved',
+        'plan.created',
+        'run.phase.changed',
+        'run.phase.changed',
+        'run.created',
+      ])
+      expect(detail.events.map(event => event.seq)).toEqual([10, 9, 8, 7, 6, 5, 4, 3, 2, 1])
+      expect(detail.events[0]!).toMatchObject({ type: 'run.phase.changed', detail: 'executing → paused' })
+      expect(detail.events[1]!).toMatchObject({ type: 'run.replanned', detail: 'Plan v1 → v2' })
+
+      const plans = secondPlans.planList(run.id)
+      expect(plans.map(plan => plan.version)).toEqual([2, 1])
+      expect(plans[0]).toMatchObject({ id: planV2.id, status: 'active', version: 2, revision: 1 })
+      expect(plans[1]).toMatchObject({ id: planV1.id, status: 'superseded', version: 1, revision: 2, replanReason: 'scope changed mid-run' })
+      expect(secondPlans.planDetail(planV2.id)).toMatchObject({ supersedesPlanId: planV1.id, replanReason: 'scope changed mid-run' })
+
+      const resumed = await second.transitionRun(run.id, 'executing')
+      expect(resumed).toMatchObject({ phase: 'executing', version: 7 })
+      expect(resumed.suspendedFrom).toBeUndefined()
+
+      await second.transitionRun(run.id, 'finalizing')
+      const done = await second.transitionRun(run.id, 'succeeded', { resultSummary: 'integration complete' })
+      expect(done.completedAt).toBe(clock())
+      expect(done.resultSummary).toBe('integration complete')
+      expect(done.version).toBe(9)
+
+      await expect(second.transitionRun(run.id, 'planning')).rejects.toMatchObject({
+        dashboardCode: 'run.transitionInvalid',
+        params: { from: 'succeeded', to: 'planning' },
+      })
+    } finally {
+      secondPlans.stop()
+      await second.stop()
+    }
+
+    // --- the medium really exists on disk with the declared version ---
+    const entries = await readdir(root, { recursive: true })
+    const mediumEntries = entries.filter(entry => String(entry).includes('dsh_projects'))
+    expect(mediumEntries.length).toBeGreaterThan(0)
+    const mediumFile = mediumEntries.find(entry => String(entry).endsWith('.json'))
+    expect(mediumFile).toBeDefined()
+    const medium = JSON.parse(await readFile(join(root, String(mediumFile)), 'utf8')) as {
+      unit: { name: string; version: number }
+      tables: Record<string, Record<string, unknown>>
+    }
+    expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
+    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs'])
+    expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
+    expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(2)
+    // 10 boot-1 events + 3 boot-2 events (resume, finalize, completed)
+    expect(Object.keys(medium.tables.run_events ?? {})).toHaveLength(13)
+
+    dispose()
+  })
+
+  it('persists coordinator state (session id, plan, phase, events) across a domain reopen', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projects-run-it-'))
+    temporaryRoots.push(root)
+    const { ctx, facility, dispose } = await boot(root)
+    const clock = () => new Date(Date.UTC(2026, 7, 14, 3, 0, 0)).toISOString()
+    const agentProfile = { id: 'it', permissionPreset: 'it-preset', workerHost: 'local' }
+    // The Lead session "submits" one orchestrated plan, then completes.
+    const driver: CoordinatorDriver = {
+      async start(input: CoordinatorDriverInput): Promise<CoordinatorDriverResult> {
+        await input.onPlanSubmit({
+          pattern: 'supervisor',
+          rationale: 'coordinate the integration work',
+          tasks: [{ title: 'implement', description: 'build it' }],
+          summary: 'Supervisor plan: implement then verify.',
+        })
+        return { kind: 'completed' }
+      },
+    }
+
+    // --- boot 1: coordinate a run; the orchestrated plan requests approval ---
+    const first = new ProjectRunService(ctx, catalogFixture(), clock)
+    await first.start()
+    const firstCoupler = new PlanRunCoupler(ctx, first)
+    const firstPlans = new RunPlanService(ctx, first, clock, { onPlanStatus: event => firstCoupler.handle(event) })
+    firstPlans.start()
+    const firstCoordinator = new CoordinatorService(ctx, catalogFixture(), first, firstPlans, agentProfile, clock, driver)
+    firstCoordinator.start()
+    const run = await first.createRun({ goal: 'Integration: coordinator survives a restart', sourceRef: 'IT-C' }, { mode: 'project', projectId: PROJECT_ID })
+    const started = await firstCoordinator.coordinate(run.id)
+    expect(started).toMatchObject({ phase: 'planning' })
+    expect(started.coordinatorSessionId).toMatch(/^dsh-coordinator-/u)
+    await settleCoordinator(first, run.id)
+    const settled = await first.runDetail(run.id)
+    expect(settled.run).toMatchObject({ phase: 'awaiting_approval' })
+    expect(settled.run.coordinatorSessionId).toBe(started.coordinatorSessionId)
+    const planV1 = firstPlans.planList(run.id)[0]!
+    expect(planV1).toMatchObject({ version: 1, status: 'awaiting-approval', pattern: 'supervisor' })
+    expect(settled.events.some(event => event.type === 'run.coordinator.started')).toBe(true)
+    expect(settled.events.some(event => event.type === 'run.coordinator.completed')).toBe(true)
+    firstCoordinator.stop()
+    firstPlans.stop()
+    await first.stop()
+    await facility.closeAll()
+
+    // --- boot 2: reopen the same medium; all coordinator state comes back ---
+    const second = new ProjectRunService(ctx, catalogFixture(), clock)
+    await second.start()
+    const secondCoupler = new PlanRunCoupler(ctx, second)
+    const secondPlans = new RunPlanService(ctx, second, clock, { onPlanStatus: event => secondCoupler.handle(event) })
+    secondPlans.start()
+    try {
+      const detail = await second.runDetail(run.id)
+      expect(detail.run).toMatchObject({
+        id: run.id,
+        phase: 'awaiting_approval',
+        coordinatorSessionId: started.coordinatorSessionId,
+      })
+      expect(detail.events.map(event => event.type)).toEqual([
+        'run.coordinator.completed',
+        'run.phase.changed',
+        'plan.approval.requested',
+        'plan.created',
+        'run.coordinator.started',
+        'run.phase.changed',
+        'run.created',
+      ])
+      expect(detail.events.some(event => event.type === 'run.coordinator.completed' && event.detail === 'Supervisor plan: implement then verify.')).toBe(true)
+
+      // A manual approval on the second boot completes the coupled flow.
+      await secondPlans.transitionPlan(planV1.id, 'active')
+      const afterApproval = await second.runDetail(run.id)
+      expect(afterApproval.run).toMatchObject({ phase: 'executing', activePlanId: planV1.id })
+      expect(afterApproval.run.coordinatorSessionId).toBe(started.coordinatorSessionId)
+    } finally {
+      secondPlans.stop()
+      await second.stop()
+    }
+
+    // The medium table set is unchanged by Phase 3 (no new tables).
+    const entries = await readdir(root, { recursive: true })
+    const mediumFile = entries.find(entry => String(entry).includes('dsh_projects') && String(entry).endsWith('.json'))
+    expect(mediumFile).toBeDefined()
+    const medium = JSON.parse(await readFile(join(root, String(mediumFile)), 'utf8')) as {
+      unit: { name: string; version: number }
+      tables: Record<string, Record<string, unknown>>
+    }
+    expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
+    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs'])
+    expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
+    expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(1)
+    // 7 boot-1 events + 2 boot-2 events (approve, phase change to executing)
+    expect(Object.keys(medium.tables.run_events ?? {})).toHaveLength(9)
+
+    dispose()
+  })
+
+  it('rejects a domain version mismatch instead of silently migrating', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projects-run-it-'))
+    temporaryRoots.push(root)
+    const { ctx, facility, dispose } = await boot(root)
+
+    const first = new ProjectRunService(ctx, catalogFixture())
+    await first.start()
+    const run = await first.createRun({ goal: 'seed' }, { mode: 'project', projectId: PROJECT_ID })
+    await first.stop()
+    await facility.closeAll()
+
+    const second = new ProjectRunService(ctx, catalogFixture())
+    await second.start()
+    try {
+      const detail = await second.runDetail(run.id)
+      expect(detail.run.goal).toBe('seed')
+    } finally {
+      await second.stop()
+    }
+
+    // Tamper the medium version: the next open must fail loud, not migrate.
+    const entries = await readdir(root, { recursive: true })
+    const mediumFile = entries.find(entry => String(entry).includes('dsh_projects') && String(entry).endsWith('.json'))
+    expect(mediumFile).toBeDefined()
+    const mediumPath = join(root, String(mediumFile))
+    const medium = JSON.parse(await readFile(mediumPath, 'utf8')) as { unit: { name: string; version: number } }
+    medium.unit.version = 99
+    await writeFile(mediumPath, JSON.stringify(medium))
+
+    const third = new ProjectRunService(ctx, catalogFixture())
+    await expect(third.start()).rejects.toThrow(/version/i)
+
+    dispose()
+  })
+})

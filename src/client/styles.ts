@@ -581,6 +581,106 @@ export const DASHBOARD_STYLES = String.raw`
   .dshd-pulsing { animation: none; }
   .dshd-context > svg { transition: none; }
 }
+.dshd-table-note { padding: 10px 12px; color: var(--dshd-muted); font-size: 11px; }
+.dshd-run-table .dshd-table-head,
+.dshd-run-table > button { grid-template-columns: minmax(180px, 1.6fr) minmax(120px, .8fr) minmax(110px, .7fr) minmax(70px, .45fr) 100px; }
+.dshd-run-table[data-global="true"] .dshd-table-head,
+.dshd-run-table[data-global="true"] > button { grid-template-columns: minmax(160px, 1.4fr) minmax(120px, .8fr) minmax(120px, .7fr) minmax(110px, .65fr) minmax(70px, .45fr) 100px; }
+.dshd-run-table > button[data-selected] { background: #eef4fc; box-shadow: inset 2px 0 0 var(--dshd-blue); }
+.dshd-run-table > button > span { display: flex; align-items: center; gap: 8px; }
+.dshd-run-view header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.dshd-run-view header .dshd-primary { height: 38px; padding: 0 15px; border: 1px solid var(--dshd-blue); border-radius: 6px; background: #fff; color: var(--dshd-blue); display: inline-flex; align-items: center; gap: 8px; font-size: 13px; white-space: nowrap; }
+.dshd-run-view header .dshd-primary:hover { background: var(--dshd-blue); color: #fff; }
+.dshd-run-view header .dshd-primary:disabled { opacity: .55; cursor: default; }
+.dshd-inspector-footer { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--dshd-border); background: #fff; }
+.dshd-inspector-footer > button { min-height: 36px; padding: 0 12px; border: 1px solid #ccd5e3; border-radius: 6px; background: #fff; display: inline-flex; align-items: center; gap: 7px; color: #273750; font-size: 11px; white-space: nowrap; }
+.dshd-inspector-footer > button:hover { background: #f9fbfe; border-color: #aab6c9; }
+.dshd-inspector-footer > button:disabled { opacity: .55; cursor: default; }
+.dshd-inspector-footer .dshd-primary { color: #fff; border-color: var(--dshd-blue); background: var(--dshd-blue); }
+.dshd-inspector-footer .dshd-primary:hover { background: #164ec3; border-color: #164ec3; }
+.dshd-inspector-footer .dshd-danger { color: #c52b3a; border-color: #e5b6bc; }
+.dshd-inspector-footer .dshd-danger:hover { background: #fff2f4; border-color: #d68f99; }
+.dshd-inspector-footer > .dshd-plain-control { min-height: 36px; padding: 0 10px; font-size: 11px; margin-left: auto; }
+.dshd-run-events { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 14px; }
+.dshd-run-event { display: grid; grid-template-columns: 13px minmax(0, 1fr) auto; gap: 9px; align-items: start; font-size: 11px; }
+.dshd-run-event > div { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.dshd-run-event strong { color: #1d2b43; font-weight: 570; }
+.dshd-run-event > div span { color: #65738b; line-height: 1.45; overflow-wrap: anywhere; }
+.dshd-run-event small { color: #79869a; white-space: nowrap; font-size: 10px; }
+.dshd-modal .dshd-modal-card { width: min(520px, 100%); max-height: calc(100% - 24px); overflow: auto; border: 1px solid #d7deea; border-radius: 10px; background: #fff; box-shadow: 0 24px 72px rgba(15, 27, 49, .22); padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.dshd-modal .dshd-modal-card > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.dshd-modal .dshd-modal-card > header h3 { margin: 0; font-size: 16px; font-weight: 620; letter-spacing: -.02em; }
+.dshd-modal .dshd-modal-card > header button { width: 28px; height: 28px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 5px; background: transparent; }
+.dshd-modal .dshd-modal-card > header button:hover { background: #f0f3f8; }
+.dshd-modal .dshd-modal-card > label { display: flex; flex-direction: column; gap: 7px; color: #52617a; font-size: 11px; font-weight: 560; }
+.dshd-modal .dshd-modal-card input,
+.dshd-modal .dshd-modal-card textarea { width: 100%; border: 1px solid #cfd7e4; border-radius: 6px; background: #fff; font: inherit; font-size: 12px; }
+.dshd-modal .dshd-modal-card input { height: 38px; padding: 0 10px; }
+.dshd-modal .dshd-modal-card textarea { resize: vertical; min-height: 108px; padding: 10px; line-height: 1.5; }
+.dshd-modal .dshd-modal-card input:hover,
+.dshd-modal .dshd-modal-card textarea:hover { border-color: #aeb9ca; }
+.dshd-modal .dshd-modal-card > footer { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }
+.dshd-modal .dshd-modal-card > footer button { min-width: 94px; height: 37px; padding: 0 15px; border: 1px solid #cbd4e2; border-radius: 6px; background: #fff; font-size: 12px; }
+.dshd-modal .dshd-modal-card > footer button:hover { border-color: #aeb9ca; background: #f8fafe; }
+.dshd-modal .dshd-modal-card > footer .dshd-primary { color: #fff; border-color: var(--dshd-blue); background: var(--dshd-blue); }
+.dshd-modal .dshd-modal-card > footer .dshd-primary:hover { border-color: #0856dc; background: #0856dc; }
+.dshd-modal .dshd-modal-card > footer .dshd-primary:disabled { opacity: .55; cursor: default; }
+.dshd-inspector-section .dshd-inspector-section-action { display: flex; justify-content: flex-end; margin: -10px 0 14px; }
+.dshd-inspector-section .dshd-inspector-section-action button { min-height: 30px; padding: 0 10px; border: 1px solid #ccd5e3; border-radius: 6px; background: #fff; display: inline-flex; align-items: center; gap: 6px; color: #273750; font-size: 11px; white-space: nowrap; }
+.dshd-inspector-section .dshd-inspector-section-action button:hover { background: #f9fbfe; border-color: #aab6c9; }
+.dshd-inspector-section .dshd-inspector-section-action button:disabled { opacity: .55; cursor: default; }
+.dshd-plan-chip { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border: 1px solid #bcd7f2; border-radius: 999px; background: #eef5fe; color: #164ec3; font-size: 10px; white-space: nowrap; }
+.dshd-plan-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #2f7df6; }
+.dshd-plan-empty { color: #79869a; font-size: 11px; }
+.dshd-plan-notice { padding: 8px 11px; border-radius: 6px; font-size: 11px; margin-bottom: 10px; }
+.dshd-plan-notice[data-tone="success"] { border: 1px solid #bfe3c8; background: #eefaf1; color: #1d7a3c; }
+.dshd-plan-notice[data-tone="error"] { border: 1px solid #e5b6bc; background: #fff2f4; color: #c52b3a; overflow-wrap: anywhere; }
+.dshd-coordinator { display: inline-flex; margin-bottom: 10px; }
+.dshd-coordinator-status { padding: 3px 9px; border-radius: 999px; font-size: 10px; white-space: nowrap; border: 1px solid #ccd5e3; background: #f4f7fc; color: #4a5a75; }
+.dshd-coordinator[data-state="progress"] .dshd-coordinator-status { border-color: #bcd7f2; background: #eef5fe; color: #164ec3; }
+.dshd-coordinator[data-state="complete"] .dshd-coordinator-status { border-color: #bfe3c8; background: #eefaf1; color: #1d7a3c; }
+.dshd-coordinator[data-state="failed"] .dshd-coordinator-status { border-color: #e5b6bc; background: #fff2f4; color: #c52b3a; }
+.dshd-plan-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.dshd-plan-item { border: 1px solid #dde4ee; border-radius: 8px; overflow: hidden; }
+.dshd-plan-row { width: 100%; display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 10px 12px; border: 0; background: #fff; text-align: left; cursor: pointer; }
+.dshd-plan-row:hover { background: #f8fafd; }
+.dshd-plan-version { font-weight: 640; font-size: 12px; color: #1d2b43; }
+.dshd-plan-status { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 560; white-space: nowrap; }
+.dshd-plan-status-draft { background: #eef1f6; color: #52617a; }
+.dshd-plan-status-awaiting-approval { background: #fff6e6; color: #9a6b00; }
+.dshd-plan-status-active { background: #eef5fe; color: #164ec3; }
+.dshd-plan-status-superseded { background: #f1f3f7; color: #8b95a7; text-decoration: line-through; }
+.dshd-plan-status-completed { background: #eefaf1; color: #1d7a3c; }
+.dshd-plan-pattern { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: #52617a; }
+.dshd-plan-task-count { font-size: 10px; color: #79869a; white-space: nowrap; }
+.dshd-plan-row small { color: #79869a; font-size: 10px; white-space: nowrap; }
+.dshd-plan-detail { border-top: 1px solid #e6ebf3; background: #fbfcfe; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.dshd-plan-bullets { margin: 0; padding-left: 16px; font-size: 11px; color: #42506a; line-height: 1.5; display: flex; flex-direction: column; gap: 3px; }
+.dshd-plan-tasks { display: flex; flex-direction: column; gap: 8px; }
+.dshd-plan-subtitle { font-size: 11px; font-weight: 580; color: #52617a; }
+.dshd-plan-tasks-empty { font-size: 11px; color: #79869a; }
+.dshd-plan-task { border: 1px solid #e2e8f2; border-radius: 7px; background: #fff; padding: 10px 11px; display: flex; flex-direction: column; gap: 5px; }
+.dshd-plan-task strong { font-size: 11px; font-weight: 600; color: #1d2b43; }
+.dshd-plan-task p { margin: 0; font-size: 11px; color: #42506a; line-height: 1.5; }
+.dshd-plan-deps { font-size: 10px; color: #65738b; }
+.dshd-plan-actions { display: flex; gap: 8px; padding-top: 4px; }
+.dshd-plan-actions button { min-height: 32px; padding: 0 12px; border: 1px solid #ccd5e3; border-radius: 6px; background: #fff; color: #273750; font-size: 11px; white-space: nowrap; }
+.dshd-plan-actions button:hover { background: #f9fbfe; border-color: #aab6c9; }
+.dshd-plan-actions button:disabled { opacity: .55; cursor: default; }
+.dshd-plan-actions .dshd-primary { color: #fff; border-color: var(--dshd-blue); background: var(--dshd-blue); }
+.dshd-plan-actions .dshd-primary:hover { background: #164ec3; border-color: #164ec3; }
+.dshd-plan-actions .dshd-danger { color: #c52b3a; border-color: #e5b6bc; }
+.dshd-plan-actions .dshd-danger:hover { background: #fff2f4; border-color: #d68f99; }
+.dshd-plan-dialog { width: min(640px, 100%); }
+.dshd-plan-dialog select { width: 100%; height: 38px; padding: 0 10px; border: 1px solid #cfd7e4; border-radius: 6px; background: #fff; font: inherit; font-size: 12px; }
+.dshd-plan-task-editor { border: 1px solid #d7deea; border-radius: 8px; padding: 10px 11px; display: flex; flex-direction: column; gap: 8px; background: #fff; }
+.dshd-plan-task-editor > header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dshd-plan-task-editor > header strong { font-size: 11px; color: #1d2b43; }
+.dshd-plan-dep-picker, .dshd-plan-dep-option { font-size: 10px; color: #52617a; display: inline-flex; align-items: center; gap: 4px; }
+.dshd-plan-task-editor .dshd-plain-control { margin-left: auto; min-height: 26px; padding: 0 8px; font-size: 10px; }
+.dshd-plan-task-editor input, .dshd-plan-task-editor textarea { width: 100%; border: 1px solid #cfd7e4; border-radius: 6px; background: #fff; font: inherit; font-size: 12px; }
+.dshd-plan-task-editor input { height: 34px; padding: 0 10px; }
+.dshd-plan-task-editor textarea { resize: vertical; min-height: 54px; padding: 8px 10px; line-height: 1.45; }
 `
 
 /** Install once per browser plugin lifetime. */

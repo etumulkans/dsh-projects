@@ -8,6 +8,8 @@ import type {
   RegisterProjectInput,
 } from '../catalog/types.ts'
 import type { CreateTaskInput, TaskSourceCredentialStatus, UpdateTaskInput } from '../task-source/index.ts'
+import type { CreateRunInput, ProjectRunPhase, ProjectRunRecord, ProjectRunSummary, RunDetailView } from '../runs/types.ts'
+import type { CreatePlanInput, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
 
 export interface TokenTotals {
   readonly input: number
@@ -128,6 +130,8 @@ export interface DashboardSnapshot {
   }
   readonly configuration: DashboardConfigurationView
   readonly catalog: ProjectCatalogView
+  /** Additive DSH Projects section; absent from Hosts without the Run service. */
+  readonly runs?: ProjectRunSummary
 }
 
 export interface IssueDetailView {
@@ -177,6 +181,22 @@ export interface DashboardRpcMap {
   readonly scanProjects: { input: { rootId: string }; output: ProjectScanResult }
   readonly registerProjectCandidate: { input: { token: string }; output: DashboardSnapshot }
   readonly registerProject: { input: RegisterProjectInput; output: DashboardSnapshot }
+  readonly runCreate: { input: CreateRunInput; output: DashboardSnapshot }
+  readonly runDetail: { input: { runId: string }; output: RunDetailView }
+  readonly runTransition: {
+    input: { runId: string; to: ProjectRunPhase; expectedVersion?: number; error?: string; resultSummary?: string }
+    output: DashboardSnapshot
+  }
+  /** Phase 2: versioned Run Plans. Mutations return the affected record (the plan list is not part of the snapshot). */
+  readonly planCreate: { input: CreatePlanInput; output: RunPlanRecord }
+  readonly planList: { input: { runId: string }; output: readonly RunPlanRecord[] }
+  readonly planDetail: { input: { planId: string }; output: RunPlanRecord }
+  readonly planTransition: {
+    input: { planId: string; status: RunPlanStatus; expectedRevision?: number; replanReason?: string }
+    output: RunPlanRecord
+  }
+  /** Phase 3: start one Coordinator Lead session for a created/planning run. */
+  readonly runCoordinate: { input: { runId: string }; output: ProjectRunRecord }
 }
 
 export function emptyTokens(): TokenTotals {
