@@ -8,6 +8,8 @@ import type { PlanId } from '../plans/types.ts'
 import { projectTaskRecordSchema, tokenUsageSchema } from '../tasks/spec.ts'
 import type { ProjectTaskRecord } from '../tasks/types.ts'
 import type { TaskId } from '../tasks/types.ts'
+import { projectMemoryRecordSchema } from '../memory/spec.ts'
+import type { MemoryId, ProjectMemoryRecord } from '../memory/types.ts'
 import type { ProjectRunEventRecord, ProjectRunRecord, RunEventId, RunId } from './types.ts'
 
 // Re-exported for existing importers (the schema lives in `tasks/spec.ts` so
@@ -72,6 +74,8 @@ export const RUN_EVENT_TYPES = [
   'tasks.materialized', 'task.ready', 'task.started', 'task.completed', 'task.failed',
   // Additive (Phase 5): the run's integration step (spec §3.3).
   'run.integration.started', 'run.integration.completed', 'run.integration.failed',
+  // Additive (Phase 6): memory distillation of a finished run (spec §3.3).
+  'run.memory.distilled', 'run.memory.distillation.failed',
 ] as const satisfies readonly ProjectRunEventRecord['type'][]
 
 export const projectRunEventRecordSchema = z.object({
@@ -98,5 +102,7 @@ export const dshProjectsDomainSpec = defineDomain({
     plans: domainTable<PlanId, RunPlanRecord>(runPlanRecordSchema),
     // Additive (Phase 4): durable Project Task DAG rows.
     tasks: domainTable<TaskId, ProjectTaskRecord>(projectTaskRecordSchema),
+    // Additive (Phase 6): durable per-project knowledge (spec §3.1).
+    memory: domainTable<MemoryId, ProjectMemoryRecord>(projectMemoryRecordSchema),
   },
 })

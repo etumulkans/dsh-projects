@@ -15,6 +15,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { KvTable } from '@deepseek-ai/dsh-storage-domain'
 import type { ProjectCatalog } from '../catalog/catalog.ts'
 import type { ProjectId, ProjectWorkspaceSource } from '../catalog/types.ts'
+import type { ProjectMemoryService } from '../memory/memory-service.ts'
+import { TASK_MEMORY_BUDGET } from '../memory/retrieval.ts'
 import type { PlanStatusChangedEvent } from '../plans/plan-service.ts'
 import type { PlanId, RunPlanRecord } from '../plans/types.ts'
 import { DashboardDomainError } from '../runtime/errors.ts'
@@ -53,6 +55,15 @@ declare module '@deepseek-ai/cordis' {
     /** A task reached terminal failure (persisted first). */
     'dsh-projects/task/failed'(event: TaskStatusEvent): void
   }
+}
+
+/**
+ * Phase 6 (spec §6.3): lifecycle hooks. `onRunSucceeded` fires
+ * fire-and-forget after a run reaches `succeeded` (the distillation
+ * trigger) and must never throw into the pipeline.
+ */
+export interface ProjectTaskServiceHooks {
+  onRunSucceeded?: (run: ProjectRunRecord) => void
 }
 
 interface TaskTables {
@@ -124,6 +135,10 @@ export class ProjectTaskService {
     integrationStrategy?: IntegrationStrategy,
     private readonly clock: () => string = () => new Date().toISOString(),
     private readonly retryClock: () => number = () => Date.now(),
+    /** Phase 6 (spec §7.2): memory service for worker prompt injection. */
+    private readonly memory?: ProjectMemoryService,
+    /** Phase 6 (spec §6.3/§7.3): lifecycle hooks (onRunSucceeded → fire-and-forget distillation). */
+    private readonly hooks?: ProjectTaskServiceHooks,
   ) {
     this.configuredIntegrationStrategy = integrationStrategy
   }
@@ -651,7 +666,14 @@ export class ProjectTaskService {
     const resultSummary = source === undefined
       ? 'all tasks succeeded (no Git isolation)'
       : `integrated branch ${run.integrationBranch ?? integrationBranchName(run.id)}${run.integrationHead !== undefined ? ` @ ${run.integrationHead.slice(0, 8)}` : ''}`
-    await this.safeTransitionRun(run.id, 'succeeded', { resultSummary })
+    const applied = await this.safeTransitionRun(run.id, 'succeeded', { resultSummary })
+    // Phase 6 (spec §6.3): fire-and-forget distillation trigger. The hook
+    // receives the fresh (post-transition) run record — `distillRun` only
+    // acts on `succeeded` runs — and is never awaited.
+    if (applied && this.hooks?.onRunSucceeded !== undefined) {
+      const current = this.tables?.runs.get(run.id)
+      if (current !== undefined) this.hooks.onRunSucceeded(current)
+    }
   }
 
   /**
@@ -869,6 +891,15 @@ export class ProjectTaskService {
       return
     }
     try {
+      // Phase 6 (spec §7.2): the project memory packet (query = task title +
+      // description, task budget); absent packet → field stays absent.
+      const memoryContext = this.memory === undefined
+        ? undefined
+        : this.memory.packetFor({
+            projectId: run.projectId,
+            query: `${started.title} ${started.description}`,
+            budgets: TASK_MEMORY_BUDGET,
+          })
       const result = await this.worker.start({
         taskId: started.id,
         runId: started.runId,
@@ -877,6 +908,7 @@ export class ProjectTaskService {
         // Phase 5: the per-task worktree when isolated; the shared tree otherwise.
         cwd: started.workspaceId ?? project.root,
         ...(started.branch === undefined ? {} : { branch: started.branch }),
+        ...(memoryContext === undefined ? {} : { memoryContext }),
         title: started.title,
         description: started.description,
         ...(started.role === undefined ? {} : { role: started.role }),

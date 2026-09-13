@@ -83,6 +83,9 @@ export type ProjectRunEventType =
   | 'run.integration.started'
   | 'run.integration.completed'
   | 'run.integration.failed'
+  // Additive (Phase 6): memory distillation of a finished run (spec §3.3).
+  | 'run.memory.distilled'
+  | 'run.memory.distillation.failed'
 
 /** High-level Run event; detailed agent activity stays in Harness session logs. */
 export interface ProjectRunEventRecord {

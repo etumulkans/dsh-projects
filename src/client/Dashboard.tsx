@@ -30,9 +30,20 @@ import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
 import type { CreateRunInput, ProjectRunEventView, ProjectRunPhase, ProjectRunView, RunDetailView } from '../runs/types.ts'
 import type { CreatePlanInput, PlannedTaskInput, RunPlanPattern, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
 import type { ProjectTaskView, TaskWorkerKindView } from '../tasks/types.ts'
-import type { DashboardDataPort } from './controller.ts'
+import { CLIENT_MEMORY_KINDS } from './controller.ts'
+import type {
+  ClientMemoryKind,
+  DashboardDataPort,
+  MemoryCreateInput,
+  MemoryCreatePayload,
+  MemoryEntryView,
+  MemoryListInput,
+  MemoryListPayload,
+  MemorySetStatusInput,
+  MemoryUpdateInput,
+} from './controller.ts'
 import { DashboardUiController } from './controller.ts'
-import { dashboardErrorMessage } from './errors.ts'
+import { dashboardErrorMessage, DashboardRequestError } from './errors.ts'
 import { DashboardI18nProvider, useDashboardTranslation } from './i18n.tsx'
 import { buildAttentionSummary } from './attention.ts'
 import type { AttentionAlert, AttentionSummary } from './attention.ts'
@@ -57,6 +68,7 @@ import {
   GitBranchIcon,
   MonitorIcon,
   PauseIcon,
+  PinIcon,
   PlayIcon,
   PlusIcon,
   RefreshIcon,
@@ -146,6 +158,10 @@ export function DashboardOverlay({ ui, data, openSession, t }: DashboardOverlayP
           onLoadPlans={runId => data.loadPlans(runId)}
           onPlanTransition={input => data.planTransition(input)}
           onTaskRetry={taskId => data.taskRetry(taskId)}
+          onLoadMemory={input => data.loadMemory(input)}
+          onCreateMemory={input => data.createMemory(input)}
+          onUpdateMemory={input => data.updateMemory(input)}
+          onSetMemoryStatus={input => data.setMemoryStatus(input)}
           onOpenSession={(sessionId) => { ui.close(); openSession(sessionId) }}
         />
       </DashboardI18nProvider>
@@ -193,10 +209,15 @@ export interface DashboardSurfaceProps {
   }) => Promise<RunPlanRecord>) | undefined
   /** Phase 4: re-queue one failed task from the Run inspector. */
   readonly onTaskRetry?: ((taskId: string) => Promise<void>) | undefined
+  /** Phase 6: on-demand Project Memory (the runDetail pattern; no snapshot projection). */
+  readonly onLoadMemory?: ((input: MemoryListInput) => Promise<MemoryListPayload>) | undefined
+  readonly onCreateMemory?: ((input: MemoryCreateInput) => Promise<MemoryCreatePayload>) | undefined
+  readonly onUpdateMemory?: ((input: MemoryUpdateInput) => Promise<MemoryEntryView>) | undefined
+  readonly onSetMemoryStatus?: ((input: MemorySetStatusInput) => Promise<MemoryEntryView>) | undefined
   readonly onOpenSession: (sessionId: string) => void
 }
 
-type Tab = 'board' | 'runtime' | 'runs' | 'projects' | 'configuration'
+type Tab = 'board' | 'runtime' | 'runs' | 'projects' | 'memory' | 'configuration'
 type RuntimePhaseFilter = Extract<IssueRuntimeView['phase'], 'running' | 'retrying' | 'blocked'>
 type RuntimeFilter = RuntimePhaseFilter | 'attention'
 type ActionToastState = { readonly tone: 'success' | 'error'; readonly message: string }
@@ -237,6 +258,10 @@ export function DashboardSurface({
   onLoadPlans,
   onPlanTransition,
   onTaskRetry,
+  onLoadMemory,
+  onCreateMemory,
+  onUpdateMemory,
+  onSetMemoryStatus,
   onOpenSession,
 }: DashboardSurfaceProps) {
   const t = useDashboardTranslation()
@@ -460,6 +485,7 @@ export function DashboardSurface({
             <TabButton active={tab === 'runtime'} onClick={() => setTab('runtime')}>{t('tab.runtime')}</TabButton>
             <TabButton active={tab === 'runs'} onClick={() => setTab('runs')}>{t('tab.runs')}</TabButton>
             <TabButton active={tab === 'projects'} onClick={() => setTab('projects')}>{t('tab.projects')}</TabButton>
+            <TabButton active={tab === 'memory'} onClick={() => setTab('memory')}>{t('tab.memory')}</TabButton>
             <TabButton active={tab === 'configuration'} onClick={() => setTab('configuration')}>{t('tab.configuration')}</TabButton>
           </nav>
         </header>
@@ -534,6 +560,17 @@ export function DashboardSurface({
               onScanRoots={startDiscoveryScan}
               onScan={startProjectScan}
               onRegister={() => setCatalogDialog({ kind: 'register-project' })}
+            />
+          ) : null}
+          {tab === 'memory' ? (
+            <MemoryView
+              projects={snapshot?.catalog.projects ?? []}
+              busy={loading}
+              onLoadMemory={onLoadMemory}
+              onCreateMemory={onCreateMemory}
+              onUpdateMemory={onUpdateMemory}
+              onSetMemoryStatus={onSetMemoryStatus}
+              onOpenRun={runId => setSelectedRunId(runId)}
             />
           ) : null}
           {tab === 'configuration' ? <ConfigurationView snapshot={snapshot} /> : null}
@@ -3388,4 +3425,452 @@ function ActionToast({ toast, onClose }: { readonly toast: ActionToastState; rea
 
 export function displayInputTokens(tokens: TokenTotals): number {
   return tokens.input + tokens.cacheRead + tokens.cacheWrite
+}
+
+/**
+ * Phase 6 (spec §10): the Project Memory tab. Entries are fetched on demand
+ * through `memoryList` (the runDetail pattern) — no snapshot projection.
+ */
+function MemoryView({ projects, busy, onLoadMemory, onCreateMemory, onUpdateMemory, onSetMemoryStatus, onOpenRun }: {
+  readonly projects: readonly ProjectView[]
+  readonly busy: boolean
+  readonly onLoadMemory?: ((input: MemoryListInput) => Promise<MemoryListPayload>) | undefined
+  readonly onCreateMemory?: ((input: MemoryCreateInput) => Promise<MemoryCreatePayload>) | undefined
+  readonly onUpdateMemory?: ((input: MemoryUpdateInput) => Promise<MemoryEntryView>) | undefined
+  readonly onSetMemoryStatus?: ((input: MemorySetStatusInput) => Promise<MemoryEntryView>) | undefined
+  readonly onOpenRun: (runId: string) => void
+}) {
+  const t = useDashboardTranslation()
+  const [projectId, setProjectId] = useState<string | undefined>(projects[0]?.id)
+  const [query, setQuery] = useState('')
+  const deferredQuery = useDeferredValue(query)
+  const [kinds, setKinds] = useState<ReadonlySet<ClientMemoryKind>>(() => new Set())
+  const [showArchived, setShowArchived] = useState(false)
+  const [result, setResult] = useState<MemoryListPayload | undefined>()
+  const [fetching, setFetching] = useState(false)
+  const [loadError, setLoadError] = useState<unknown>()
+  const [actionError, setActionError] = useState<unknown>()
+  const [pendingKey, setPendingKey] = useState<string | undefined>()
+  const [supersededNotice, setSupersededNotice] = useState<string | undefined>()
+  const [dialog, setDialog] = useState<
+    | { readonly kind: 'create' }
+    | { readonly kind: 'edit'; readonly entry: MemoryEntryView }
+    | undefined
+  >()
+  const [reloadKey, setReloadKey] = useState(0)
+  const reload = (): void => setReloadKey(current => current + 1)
+
+  // The catalog can load or change after mount; the default selection is the first project.
+  useEffect(() => {
+    if (projects.length === 0) {
+      if (projectId !== undefined) setProjectId(undefined)
+      return
+    }
+    if (projectId === undefined || !projects.some(project => project.id === projectId)) setProjectId(projects[0]!.id)
+  }, [projects, projectId])
+
+  // The load callback gets a fresh identity on every surface render; keep it in a ref so
+  // only real input changes re-trigger the on-demand fetch.
+  const loadRef = useRef(onLoadMemory)
+  loadRef.current = onLoadMemory
+
+  useEffect(() => {
+    if (projectId === undefined) {
+      setResult(undefined)
+      setLoadError(undefined)
+      return
+    }
+    const load = loadRef.current
+    if (load === undefined) return
+    let cancelled = false
+    setFetching(true)
+    setLoadError(undefined)
+    const effectiveQuery = deferredQuery.trim()
+    load({
+      projectId,
+      ...(effectiveQuery === '' ? {} : { query: effectiveQuery }),
+      ...(kinds.size === 0 ? {} : { kinds: [...kinds] }),
+      ...(showArchived ? { includeArchived: true } : {}),
+    }).then(value => {
+      if (!cancelled) setResult(value)
+    }).catch(failedLoad => {
+      if (!cancelled) { setResult(undefined); setLoadError(failedLoad) }
+    }).finally(() => {
+      if (!cancelled) setFetching(false)
+    })
+    return () => { cancelled = true }
+  }, [projectId, deferredQuery, kinds, showArchived, reloadKey])
+
+  const unavailable = isMemoryUnavailable(loadError)
+  const entries = result?.entries ?? []
+  const counts = result?.counts
+  const presentKinds = counts === undefined
+    ? []
+    : (CLIENT_MEMORY_KINDS as readonly ClientMemoryKind[]).filter(kind => counts[kind] > 0)
+  const successorOf = (entry: MemoryEntryView): string | undefined =>
+    entries.find(candidate => candidate.supersedes === entry.id)?.id
+  const toggleKind = (candidate: ClientMemoryKind): void => {
+    setKinds(current => {
+      const next = new Set(current)
+      if (next.has(candidate)) next.delete(candidate)
+      else next.add(candidate)
+      return next
+    })
+  }
+  const mutate = async (key: string, action: () => Promise<void>): Promise<void> => {
+    if (pendingKey !== undefined) return
+    setPendingKey(key)
+    setActionError(undefined)
+    try {
+      await action()
+      reload()
+    } catch (failedAction) {
+      setActionError(failedAction)
+    } finally {
+      setPendingKey(undefined)
+    }
+  }
+
+  return (
+    <div className="dshd-memory-view">
+      <header className="dshd-memory-heading">
+        <div><h2>{t('memory.title')}</h2><p>{t('memory.description')}</p></div>
+        <div className="dshd-memory-controls">
+          <select
+            aria-label={t('memory.projectSelectAria')}
+            value={projectId ?? ''}
+            disabled={busy || projects.length === 0}
+            onChange={event => setProjectId(event.currentTarget.value)}
+          >
+            {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+          <button
+            type="button"
+            className="dshd-memory-primary"
+            disabled={busy || fetching || projectId === undefined || onCreateMemory === undefined}
+            onClick={() => setDialog({ kind: 'create' })}
+          >
+            <PlusIcon size={16} />{t('memory.addNote')}
+          </button>
+        </div>
+      </header>
+      {projects.length === 0 ? (
+        <div className="dshd-empty">{t('memory.noProjects')}</div>
+      ) : (
+        <>
+          {unavailable ? <div className="dshd-error" role="alert">{t('memory.unavailable')}</div> : null}
+          {!unavailable && loadError !== undefined ? <div className="dshd-error" role="alert">{dashboardErrorMessage(loadError, t)}</div> : null}
+          {actionError !== undefined ? <div className="dshd-error" role="alert">{dashboardErrorMessage(actionError, t)}</div> : null}
+          {supersededNotice !== undefined ? (
+            <div className="dshd-warning" role="status">
+              <span>{t('memory.supersededNotice', { id: supersededNotice })}</span>
+              <button type="button" aria-label={t('common.close')} onClick={() => setSupersededNotice(undefined)}><CloseIcon size={14} /></button>
+            </div>
+          ) : null}
+          <div className="dshd-memory-toolbar">
+            <input
+              aria-label={t('memory.searchAria')}
+              placeholder={t('memory.searchAria')}
+              value={query}
+              onChange={event => setQuery(event.currentTarget.value)}
+            />
+            <label className="dshd-memory-archived">
+              <input type="checkbox" checked={showArchived} onChange={event => setShowArchived(event.currentTarget.checked)} />
+              {t('memory.showArchived')}
+            </label>
+            {presentKinds.length > 0 ? (
+              <div className="dshd-memory-chips" role="group" aria-label={t('memory.countsAria')}>
+                {presentKinds.map(kind => (
+                  <button
+                    key={kind}
+                    type="button"
+                    aria-pressed={kinds.has(kind)}
+                    onClick={() => toggleKind(kind)}
+                  >
+                    {t(`memory.kind.${kind}`)} · {counts![kind]}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="dshd-memory-list" role="table" aria-label={t('memory.tableAria')}>
+            {entries.map(entry => (
+              <div className="dshd-memory-entry" role="row" key={entry.id} data-status={entry.status}>
+                <div className="dshd-memory-main">
+                  <div className="dshd-memory-titleline">
+                    <span className="dshd-memory-kind">{t(`memory.kind.${entry.kind}`)}</span>
+                    <strong>{entry.title}</strong>
+                    {entry.pinned === true ? <PinIcon size={14} aria-label={t('memory.pin')} /> : null}
+                    <span className={`dshd-memory-status dshd-memory-status-${entry.status}`}>{t(`memory.status.${entry.status}`)}</span>
+                  </div>
+                  <p className="dshd-memory-body" title={entry.body}>{entry.body}</p>
+                  <div className="dshd-memory-meta">
+                    {entry.tags.map(tag => <span key={tag} className="dshd-memory-tag">{tag}</span>)}
+                    {entry.supersedes !== undefined ? <span className="dshd-memory-relation">{t('memory.supersedes', { id: entry.supersedes })}</span> : null}
+                    {entry.status === 'superseded' && successorOf(entry) !== undefined
+                      ? <span className="dshd-memory-relation">{t('memory.supersededBy', { id: successorOf(entry)! })}</span>
+                      : null}
+                    {entry.sourceRunId !== undefined ? (
+                      <button type="button" className="dshd-memory-source" onClick={() => onOpenRun(entry.sourceRunId!)}>{t('memory.sourceRun')}</button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="dshd-memory-actions">
+                  {entry.status !== 'superseded' ? (
+                    <>
+                      <button
+                        type="button"
+                        disabled={pendingKey !== undefined || onUpdateMemory === undefined}
+                        onClick={() => { void mutate(`pin:${entry.id}`, async () => {
+                          if (onUpdateMemory === undefined) return
+                          await onUpdateMemory({ id: entry.id, expectedVersion: entry.version, pinned: entry.pinned !== true })
+                        }) }}
+                      >
+                        {entry.pinned === true ? t('memory.unpin') : t('memory.pin')}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={pendingKey !== undefined || onUpdateMemory === undefined}
+                        onClick={() => setDialog({ kind: 'edit', entry })}
+                      >
+                        {t('memory.edit')}
+                      </button>
+                      {entry.status === 'active' ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={pendingKey !== undefined || onSetMemoryStatus === undefined}
+                            onClick={() => { void mutate(`status:${entry.id}`, async () => {
+                              if (onSetMemoryStatus === undefined) return
+                              await onSetMemoryStatus({ id: entry.id, expectedVersion: entry.version, status: 'archived' })
+                            }) }}
+                          >
+                            {t('memory.archive')}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={pendingKey !== undefined || onSetMemoryStatus === undefined}
+                            onClick={() => { void mutate(`status:${entry.id}`, async () => {
+                              if (onSetMemoryStatus === undefined) return
+                              await onSetMemoryStatus({ id: entry.id, expectedVersion: entry.version, status: 'superseded' })
+                            }) }}
+                          >
+                            {t('memory.markObsolete')}
+                          </button>
+                        </>
+                      ) : null}
+                      {entry.status === 'archived' ? (
+                        <button
+                          type="button"
+                          disabled={pendingKey !== undefined || onSetMemoryStatus === undefined}
+                          onClick={() => { void mutate(`status:${entry.id}`, async () => {
+                            if (onSetMemoryStatus === undefined) return
+                            await onSetMemoryStatus({ id: entry.id, expectedVersion: entry.version, status: 'active' })
+                          }) }}
+                        >
+                          {t('memory.restore')}
+                        </button>
+                      ) : null}
+                    </>
+                  ) : null}
+                </div>
+              </div>
+            ))}
+            {entries.length === 0 ? <div className="dshd-table-empty" aria-busy={fetching || undefined}>{t('memory.empty')}</div> : null}
+          </div>
+        </>
+      )}
+      {dialog?.kind === 'create' && onCreateMemory !== undefined && projectId !== undefined ? (
+        <MemoryCreateDialog
+          projectId={projectId}
+          onClose={() => setDialog(undefined)}
+          onSubmit={async input => {
+            const created = await onCreateMemory(input)
+            if (created.supersededId !== undefined) setSupersededNotice(created.supersededId)
+            reload()
+            return created
+          }}
+        />
+      ) : null}
+      {dialog?.kind === 'edit' && onUpdateMemory !== undefined ? (
+        <MemoryEditDialog
+          entry={dialog.entry}
+          onClose={() => setDialog(undefined)}
+          onSubmit={async input => {
+            const updated = await onUpdateMemory(input)
+            reload()
+            return updated
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+/** The structured "service not mounted" RPC failure (never a swallowed promise). */
+function isMemoryUnavailable(error: unknown): boolean {
+  return error instanceof DashboardRequestError
+    && error.rpcCode === 'bad-request'
+    && error.message.includes('Project Memory service is not mounted')
+}
+
+function MemoryCreateDialog({ projectId, onClose, onSubmit }: {
+  readonly projectId: string
+  readonly onClose: () => void
+  readonly onSubmit: (input: MemoryCreateInput) => Promise<MemoryCreatePayload>
+}) {
+  const t = useDashboardTranslation()
+  const [kind, setKind] = useState<ClientMemoryKind>('finding')
+  const [title, setTitle] = useState('')
+  const [body, setBody] = useState('')
+  const [tags, setTags] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>()
+  const kindId = useId()
+  const titleId = useId()
+  const bodyId = useId()
+  const tagsId = useId()
+  const blocked = title.trim() === '' || body.trim() === ''
+  const submit = async (): Promise<void> => {
+    if (busy || blocked) return
+    setBusy(true)
+    setError(undefined)
+    try {
+      await onSubmit({
+        projectId,
+        kind,
+        title: title.trim(),
+        body: body.trim(),
+        ...(tags.trim() === '' ? {} : { tags: tags.split(',').map(tag => tag.trim()).filter(tag => tag !== '') }),
+      })
+      onClose()
+    } catch (submitError) {
+      setError(submitError)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="dshd-modal" role="dialog" aria-modal="true" aria-label={t('memory.addTitle')} onKeyDown={(event) => { if (event.key === 'Escape') event.stopPropagation() }}>
+      <div className="dshd-modal-card">
+        <header><h3>{t('memory.addTitle')}</h3><button type="button" aria-label={t('common.close')} onClick={onClose}><CloseIcon size={18} /></button></header>
+        <label htmlFor={kindId}>{t('memory.kindSelectAria')}</label>
+        <select id={kindId} value={kind} onChange={event => setKind(event.currentTarget.value as ClientMemoryKind)}>
+          {(CLIENT_MEMORY_KINDS as readonly ClientMemoryKind[]).map(candidate => (
+            <option key={candidate} value={candidate}>{t(`memory.kind.${candidate}`)}</option>
+          ))}
+        </select>
+        <label htmlFor={titleId}>{t('memory.titlePlaceholder')}</label>
+        <input
+          id={titleId}
+          autoFocus
+          value={title}
+          placeholder={t('memory.titlePlaceholder')}
+          onChange={event => setTitle(event.currentTarget.value)}
+        />
+        <label htmlFor={bodyId}>{t('memory.bodyPlaceholder')}</label>
+        <textarea
+          id={bodyId}
+          rows={5}
+          value={body}
+          placeholder={t('memory.bodyPlaceholder')}
+          onChange={event => setBody(event.currentTarget.value)}
+        />
+        <label htmlFor={tagsId}>{t('memory.tagsPlaceholder')}</label>
+        <input
+          id={tagsId}
+          value={tags}
+          placeholder={t('memory.tagsPlaceholder')}
+          onChange={event => setTags(event.currentTarget.value)}
+        />
+        {error !== undefined ? <div className="dshd-error" role="alert">{dashboardErrorMessage(error, t)}</div> : null}
+        <footer>
+          <button type="button" onClick={onClose}>{t('common.cancel')}</button>
+          <button type="button" className="dshd-primary" disabled={busy || blocked} aria-busy={busy} onClick={() => { void submit() }}>
+            <span>{busy ? t('memory.adding') : t('memory.addTitle')}</span>
+          </button>
+        </footer>
+      </div>
+    </div>
+  )
+}
+
+function MemoryEditDialog({ entry, onClose, onSubmit }: {
+  readonly entry: MemoryEntryView
+  readonly onClose: () => void
+  readonly onSubmit: (input: MemoryUpdateInput) => Promise<MemoryEntryView>
+}) {
+  const t = useDashboardTranslation()
+  const [title, setTitle] = useState(entry.title)
+  const [body, setBody] = useState(entry.body)
+  const [tags, setTags] = useState(entry.tags.join(', '))
+  const [pinned, setPinned] = useState(entry.pinned === true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<unknown>()
+  const titleId = useId()
+  const bodyId = useId()
+  const tagsId = useId()
+  const pinnedId = useId()
+  const blocked = title.trim() === '' || body.trim() === ''
+  const submit = async (): Promise<void> => {
+    if (busy || blocked) return
+    setBusy(true)
+    setError(undefined)
+    try {
+      await onSubmit({
+        id: entry.id,
+        expectedVersion: entry.version,
+        title: title.trim(),
+        body: body.trim(),
+        tags: tags.split(',').map(tag => tag.trim()).filter(tag => tag !== ''),
+        pinned,
+      })
+      onClose()
+    } catch (submitError) {
+      setError(submitError)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="dshd-modal" role="dialog" aria-modal="true" aria-label={t('memory.editTitle')} onKeyDown={(event) => { if (event.key === 'Escape') event.stopPropagation() }}>
+      <div className="dshd-modal-card">
+        <header><h3>{t('memory.editTitle')}</h3><button type="button" aria-label={t('common.close')} onClick={onClose}><CloseIcon size={18} /></button></header>
+        <label htmlFor={titleId}>{t('memory.titlePlaceholder')}</label>
+        <input
+          id={titleId}
+          autoFocus
+          value={title}
+          placeholder={t('memory.titlePlaceholder')}
+          onChange={event => setTitle(event.currentTarget.value)}
+        />
+        <label htmlFor={bodyId}>{t('memory.bodyPlaceholder')}</label>
+        <textarea
+          id={bodyId}
+          rows={5}
+          value={body}
+          placeholder={t('memory.bodyPlaceholder')}
+          onChange={event => setBody(event.currentTarget.value)}
+        />
+        <label htmlFor={tagsId}>{t('memory.tagsPlaceholder')}</label>
+        <input
+          id={tagsId}
+          value={tags}
+          placeholder={t('memory.tagsPlaceholder')}
+          onChange={event => setTags(event.currentTarget.value)}
+        />
+        <label htmlFor={pinnedId} className="dshd-memory-pinned-toggle">
+          <input id={pinnedId} type="checkbox" checked={pinned} onChange={event => setPinned(event.currentTarget.checked)} />
+          {t('memory.pinned')}
+        </label>
+        {error !== undefined ? <div className="dshd-error" role="alert">{dashboardErrorMessage(error, t)}</div> : null}
+        <footer>
+          <button type="button" onClick={onClose}>{t('common.cancel')}</button>
+          <button type="button" className="dshd-primary" disabled={busy || blocked} aria-busy={busy} onClick={() => { void submit() }}>
+            <span>{busy ? t('memory.saving') : t('memory.save')}</span>
+          </button>
+        </footer>
+      </div>
+    </div>
+  )
 }

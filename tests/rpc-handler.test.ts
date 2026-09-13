@@ -5,6 +5,7 @@ import { DashboardDomainError, decodeDashboardError } from '../src/runtime/error
 import type { DashboardRuntimeCoordinator } from '../src/runtime/coordinator.ts'
 import type { RunPlanService } from '../src/plans/plan-service.ts'
 import type { ProjectRunService } from '../src/runs/run-service.ts'
+import type { ProjectMemoryService } from '../src/memory/memory-service.ts'
 import type { ProjectTaskService } from '../src/tasks/task-service.ts'
 import type { ProjectCatalogSelection } from '../src/catalog/types.ts'
 
@@ -825,6 +826,187 @@ describe('Dashboard RPC Task execution', () => {
     if (plain.ok) {
       expect(plain.value).not.toHaveProperty('worker')
       expect((plain.value as { runs?: { runs?: unknown[] } }).runs?.runs?.[0]).not.toHaveProperty('taskCounts')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 6: Project Memory endpoints (spec §9)
+// ---------------------------------------------------------------------------
+
+const MEMORY_ID = '5b0e6c9e-4a2d-4c8e-9f1b-3d7e5a6b8c9d'
+
+function fakeMemoryService(overrides: Partial<Record<'list' | 'create' | 'update' | 'setStatus', unknown>> = {}) {
+  return {
+    list: vi.fn(async () => ({ entries: [], counts: {} })),
+    create: vi.fn(async () => ({ entry: { id: MEMORY_ID } })),
+    update: vi.fn(async () => ({ id: MEMORY_ID })),
+    setStatus: vi.fn(async () => ({ id: MEMORY_ID })),
+    ...overrides,
+  } as unknown as ProjectMemoryService
+}
+
+describe('Dashboard RPC Project Memory (spec §9)', () => {
+  const signal = () => new AbortController().signal
+
+  it('memoryList passes the query filters through and returns entries + zero-filled counts', async () => {
+    const counts = { architecture: 1, decision: 0 }
+    const list = vi.fn(async () => ({ entries: [{ id: MEMORY_ID, kind: 'architecture' }], counts }))
+    const memory = fakeMemoryService({ list })
+    const result = await handleDashboardRpc(
+      fakeRuntime({ mode: 'project', projectId: 'p1' }),
+      'memoryList',
+      { projectId: 'p1', query: 'postgres', kinds: ['testing'], tags: ['db'], limit: 10, includeArchived: true },
+      signal(), Promise.resolve(), undefined, undefined, undefined, undefined, memory,
+    )
+    expect(result).toMatchObject({ ok: true, value: { entries: [{ id: MEMORY_ID, kind: 'architecture' }], counts } })
+    expect(list).toHaveBeenCalledWith({
+      projectId: 'p1',
+      query: 'postgres',
+      kinds: ['testing'],
+      tags: ['db'],
+      limit: 10,
+      includeArchived: true,
+    })
+    // without optional filters the payload stays minimal
+    const minimal = vi.fn(async () => ({ entries: [], counts: {} }))
+    const minimalResult = await handleDashboardRpc(
+      fakeRuntime({ mode: 'project', projectId: 'p1' }),
+      'memoryList',
+      { projectId: 'p1' },
+      signal(), Promise.resolve(), undefined, undefined, undefined, undefined, fakeMemoryService({ list: minimal }),
+    )
+    expect(minimalResult).toMatchObject({ ok: true })
+    expect(minimal).toHaveBeenCalledWith({ projectId: 'p1' })
+  })
+
+  it('memoryList rejects an unmounted service, a missing projectId, and invalid filters', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const unmounted = await handleDashboardRpc(runtime, 'memoryList', { projectId: 'p1' }, signal())
+    expect(unmounted).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('not mounted') } })
+    const missing = await handleDashboardRpc(
+      runtime, 'memoryList', {}, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, fakeMemoryService(),
+    )
+    expect(missing).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('projectId') } })
+    const memory = fakeMemoryService()
+    const badKinds = await handleDashboardRpc(
+      runtime, 'memoryList', { projectId: 'p1', kinds: ['nope'] }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, memory,
+    )
+    expect(badKinds).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('kinds') } })
+    const badLimit = await handleDashboardRpc(
+      runtime, 'memoryList', { projectId: 'p1', limit: 0 }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, memory,
+    )
+    expect(badLimit).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('limit') } })
+    expect(memory.list).not.toHaveBeenCalled()
+  })
+
+  it('memoryCreate passes the candidate through and surfaces the supersession link', async () => {
+    const entry = { id: MEMORY_ID, kind: 'testing', title: 'Tests need Postgres', body: 'start postgres first', status: 'active', version: 2 }
+    const create = vi.fn(async () => ({ entry, supersededId: 'old-entry' }))
+    const memory = fakeMemoryService({ create })
+    const result = await handleDashboardRpc(
+      fakeRuntime({ mode: 'project', projectId: 'p1' }),
+      'memoryCreate',
+      { projectId: 'p1', kind: 'testing', title: 'Tests need Postgres', body: 'start postgres first', tags: ['db'], pinned: true, confidence: 0.8 },
+      signal(), Promise.resolve(), undefined, undefined, undefined, undefined, memory,
+    )
+    expect(result).toMatchObject({ ok: true, value: { entry, supersededId: 'old-entry' } })
+    expect(create).toHaveBeenCalledWith({
+      projectId: 'p1',
+      kind: 'testing',
+      title: 'Tests need Postgres',
+      body: 'start postgres first',
+      tags: ['db'],
+      pinned: true,
+      confidence: 0.8,
+    })
+  })
+
+  it('memoryCreate rejects invalid payloads and propagates service validation failures', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const memory = fakeMemoryService()
+    const missingTitle = await handleDashboardRpc(
+      runtime, 'memoryCreate', { projectId: 'p1', kind: 'testing', title: '  ', body: 'b' }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, memory,
+    )
+    expect(missingTitle).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('title') } })
+    const badKind = await handleDashboardRpc(
+      runtime, 'memoryCreate', { projectId: 'p1', kind: 'nope', title: 't', body: 'b' }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, memory,
+    )
+    expect(badKind).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('kind') } })
+    const badConfidence = await handleDashboardRpc(
+      runtime, 'memoryCreate', { projectId: 'p1', kind: 'testing', title: 't', body: 'b', confidence: 2 }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, memory,
+    )
+    expect(badConfidence).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('confidence') } })
+    expect(memory.create).not.toHaveBeenCalled()
+    // a service-level validation failure rides the structured error path
+    const failing = fakeMemoryService({
+      create: vi.fn(async () => {
+        throw new DashboardDomainError('memory.invalidCandidate', 'invalid', { reason: 'body-too-long' })
+      }),
+    })
+    const invalid = await handleDashboardRpc(
+      runtime, 'memoryCreate', { projectId: 'p1', kind: 'testing', title: 't', body: 'b' }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, failing,
+    )
+    expect(invalid.ok).toBe(false)
+    if (invalid.ok === false) {
+      expect(decodeDashboardError(invalid.error.message)).toMatchObject({
+        dashboardCode: 'memory.invalidCandidate',
+        params: expect.objectContaining({ reason: 'body-too-long' }),
+      })
+    }
+  })
+
+  it('memoryUpdate requires the expected version and at least one patch field', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const update = vi.fn(async () => ({ id: MEMORY_ID, version: 2 }))
+    const memory = fakeMemoryService({ update })
+    const result = await handleDashboardRpc(
+      runtime, 'memoryUpdate',
+      { id: MEMORY_ID, expectedVersion: 1, body: 'new body', pinned: false },
+      signal(), Promise.resolve(), undefined, undefined, undefined, undefined, memory,
+    )
+    expect(result).toMatchObject({ ok: true, value: { id: MEMORY_ID, version: 2 } })
+    expect(update).toHaveBeenCalledWith(MEMORY_ID, 1, { body: 'new body', pinned: false })
+    const noVersion = await handleDashboardRpc(
+      runtime, 'memoryUpdate', { id: MEMORY_ID, title: 't' }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, memory,
+    )
+    expect(noVersion).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('expectedVersion') } })
+    const emptyPatch = await handleDashboardRpc(
+      runtime, 'memoryUpdate', { id: MEMORY_ID, expectedVersion: 1 }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, memory,
+    )
+    expect(emptyPatch).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('at least one patch field') } })
+    expect(update).toHaveBeenCalledTimes(1)
+  })
+
+  it('memorySetStatus validates the target status and propagates CAS failures', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const setStatus = vi.fn(async () => ({ id: MEMORY_ID, status: 'archived' }))
+    const memory = fakeMemoryService({ setStatus })
+    const result = await handleDashboardRpc(
+      runtime, 'memorySetStatus',
+      { id: MEMORY_ID, expectedVersion: 1, status: 'archived' },
+      signal(), Promise.resolve(), undefined, undefined, undefined, undefined, memory,
+    )
+    expect(result).toMatchObject({ ok: true, value: { id: MEMORY_ID, status: 'archived' } })
+    expect(setStatus).toHaveBeenCalledWith(MEMORY_ID, 1, 'archived')
+    const badStatus = await handleDashboardRpc(
+      runtime, 'memorySetStatus', { id: MEMORY_ID, expectedVersion: 1, status: 'deleted' }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, memory,
+    )
+    expect(badStatus).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('status') } })
+    const stale = fakeMemoryService({
+      setStatus: vi.fn(async () => {
+        throw new DashboardDomainError('memory.staleVersion', 'stale', { expectedVersion: 1, actualVersion: 3 })
+      }),
+    })
+    const conflict = await handleDashboardRpc(
+      runtime, 'memorySetStatus', { id: MEMORY_ID, expectedVersion: 1, status: 'archived' }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, stale,
+    )
+    expect(conflict.ok).toBe(false)
+    if (conflict.ok === false) {
+      expect(decodeDashboardError(conflict.error.message)).toMatchObject({
+        dashboardCode: 'memory.staleVersion',
+        params: expect.objectContaining({ expectedVersion: 1, actualVersion: 3 }),
+      })
     }
   })
 })

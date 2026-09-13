@@ -39,6 +39,7 @@ export const GitBranchIcon = (props: IconProps) => <Icon {...props}><circle cx="
 export const MonitorIcon = (props: IconProps) => <Icon {...props}><rect x="3" y="4" width="18" height="13" rx="2" /><path d="M8 21h8M12 17v4" /></Icon>
 export const SearchIcon = (props: IconProps) => <Icon {...props}><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></Icon>
 export const CheckIcon = (props: IconProps) => <Icon {...props}><path d="m5 12 4.2 4.2L19 6.5" /></Icon>
+export const PinIcon = (props: IconProps) => <Icon {...props}><path d="M9 4h6l-1 6 3.2 2.6V15H6.8v-2.4L10 10z" /><path d="M12 15v5" /></Icon>
 
 /** Compact blue whale-like product mark; clicking it returns to Harness. */
 export function DeepSeekMark() {

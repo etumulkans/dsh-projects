@@ -19,6 +19,86 @@ export interface DashboardDataState {
   readonly error?: DashboardRequestError | undefined
 }
 
+/**
+ * Phase 6: client-side mirror of the server's 15 memory kinds. Intentionally
+ * duplicated instead of imported — `src/client/**` must never import
+ * `src/memory/**` (the import-scan invariant).
+ */
+export const CLIENT_MEMORY_KINDS = [
+  'architecture', 'decision', 'convention', 'dependency', 'environment',
+  'testing', 'deployment', 'operations', 'research', 'finding',
+  'known-problem', 'failure-pattern', 'procedure', 'repository-map',
+  'user-preference',
+] as const
+
+export type ClientMemoryKind = (typeof CLIENT_MEMORY_KINDS)[number]
+export type ClientMemoryStatus = 'active' | 'superseded' | 'archived'
+
+/** Phase 6: client-side shape of a project memory record (spec §9 wire format). */
+export interface MemoryEntryView {
+  readonly id: string
+  readonly projectId: string
+  readonly kind: ClientMemoryKind
+  readonly title: string
+  readonly body: string
+  readonly tags: readonly string[]
+  readonly sourceRunId?: string
+  readonly sourceTaskId?: string
+  readonly sourceSessionId?: string
+  readonly confidence?: number
+  readonly status: ClientMemoryStatus
+  readonly supersedes?: string
+  readonly pinned?: boolean
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly version: number
+}
+
+export interface MemoryListPayload {
+  readonly entries: readonly MemoryEntryView[]
+  /** Per-kind counts over all active entries (unfiltered, zero-filled). */
+  readonly counts: Record<ClientMemoryKind, number>
+}
+
+export interface MemoryCreatePayload {
+  readonly entry: MemoryEntryView
+  readonly supersededId?: string
+}
+
+export interface MemoryListInput {
+  readonly projectId: string
+  readonly query?: string
+  readonly kinds?: readonly ClientMemoryKind[]
+  readonly tags?: readonly string[]
+  readonly limit?: number
+  readonly includeArchived?: boolean
+}
+
+export interface MemoryCreateInput {
+  readonly projectId: string
+  readonly kind: ClientMemoryKind
+  readonly title: string
+  readonly body: string
+  readonly tags?: readonly string[]
+  readonly pinned?: boolean
+  readonly confidence?: number
+}
+
+export interface MemoryUpdateInput {
+  readonly id: string
+  readonly expectedVersion: number
+  readonly title?: string
+  readonly body?: string
+  readonly tags?: readonly string[]
+  readonly pinned?: boolean
+}
+
+export interface MemorySetStatusInput {
+  readonly id: string
+  readonly expectedVersion: number
+  readonly status: ClientMemoryStatus
+}
+
 export interface DashboardDataPort {
   getSnapshot(): DashboardDataState
   subscribe(listener: () => void): () => void
@@ -58,6 +138,11 @@ export interface DashboardDataPort {
   }): Promise<RunPlanRecord>
   /** Phase 4: re-queue one failed task (the view refreshes from the next snapshot). */
   taskRetry(taskId: string): Promise<void>
+  /** Phase 6: fetch a project's memory list on demand (the runDetail pattern; no snapshot projection). */
+  loadMemory(input: MemoryListInput): Promise<MemoryListPayload>
+  createMemory(input: MemoryCreateInput): Promise<MemoryCreatePayload>
+  updateMemory(input: MemoryUpdateInput): Promise<MemoryEntryView>
+  setMemoryStatus(input: MemorySetStatusInput): Promise<MemoryEntryView>
 }
 
 /** Root overlay visibility shared by the sidebar trigger and shell-overlay entry. */
@@ -272,6 +357,58 @@ export class DashboardDataController implements DashboardDataPort {
     }
   }
 
+  async loadMemory(input: MemoryListInput): Promise<MemoryListPayload> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'memoryList', input) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseMemoryList(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async createMemory(input: MemoryCreateInput): Promise<MemoryCreatePayload> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'memoryCreate', input) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseMemoryCreate(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async updateMemory(input: MemoryUpdateInput): Promise<MemoryEntryView> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'memoryUpdate', input) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseMemoryEntry(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async setMemoryStatus(input: MemorySetStatusInput): Promise<MemoryEntryView> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'memorySetStatus', input) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseMemoryEntry(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
   private async readState(): Promise<void> {
     await this.call('state', {}, false)
   }
@@ -463,4 +600,68 @@ function isTimelineEvent(value: unknown): boolean {
     && typeof event.title === 'string'
     && (event.detail === undefined || typeof event.detail === 'string')
     && typeof event.at === 'string'
+}
+
+function parseMemoryList(value: unknown): MemoryListPayload {
+  if (!isMemoryList(value)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Project Memory list data')
+  }
+  return value as MemoryListPayload
+}
+
+function parseMemoryCreate(value: unknown): MemoryCreatePayload {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Project Memory create data')
+  }
+  const created = value as { entry?: unknown; supersededId?: unknown }
+  if (!isMemoryEntry(created.entry)
+    || (created.supersededId !== undefined && typeof created.supersededId !== 'string')) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Project Memory create data')
+  }
+  return value as MemoryCreatePayload
+}
+
+function parseMemoryEntry(value: unknown): MemoryEntryView {
+  if (!isMemoryEntry(value)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Project Memory entry data')
+  }
+  return value as MemoryEntryView
+}
+
+function isMemoryList(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const list = value as { entries?: unknown; counts?: unknown }
+  return Array.isArray(list.entries)
+    && list.entries.every(isMemoryEntry)
+    && isMemoryCounts(list.counts)
+}
+
+function isMemoryCounts(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const counts = value as Record<string, unknown>
+  return CLIENT_MEMORY_KINDS.every(kind => typeof counts[kind] === 'number')
+}
+
+function isMemoryEntry(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const entry = value as Record<string, unknown>
+  return typeof entry.id === 'string'
+    && typeof entry.projectId === 'string'
+    && typeof entry.kind === 'string'
+    && (CLIENT_MEMORY_KINDS as readonly string[]).includes(entry.kind)
+    && typeof entry.title === 'string'
+    && typeof entry.body === 'string'
+    && Array.isArray(entry.tags)
+    && entry.tags.every(tag => typeof tag === 'string')
+    && (entry.sourceRunId === undefined || typeof entry.sourceRunId === 'string')
+    && (entry.sourceTaskId === undefined || typeof entry.sourceTaskId === 'string')
+    && (entry.sourceSessionId === undefined || typeof entry.sourceSessionId === 'string')
+    && (entry.confidence === undefined || typeof entry.confidence === 'number')
+    && typeof entry.status === 'string'
+    && ['active', 'superseded', 'archived'].includes(entry.status)
+    && (entry.supersedes === undefined || typeof entry.supersedes === 'string')
+    && (entry.pinned === undefined || typeof entry.pinned === 'boolean')
+    && typeof entry.createdAt === 'string'
+    && typeof entry.updatedAt === 'string'
+    && typeof entry.version === 'number'
 }

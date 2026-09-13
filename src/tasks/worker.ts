@@ -22,6 +22,12 @@ export interface TaskWorkerInput {
   readonly cwd: string
   /** Additive (Phase 5): the task branch, when `cwd` is a dedicated worktree. */
   readonly branch?: string
+  /**
+   * Additive (Phase 6, spec §7.2): a pre-rendered project memory packet
+   * (not an entry list — the adapters stay presentation-only). Absent →
+   * byte-identical prompts.
+   */
+  readonly memoryContext?: string
   readonly title: string
   readonly description: string
   readonly role?: string

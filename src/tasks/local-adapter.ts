@@ -246,6 +246,12 @@ function renderTaskPrompt(input: TaskWorkerInput): string {
   const worktree = input.branch === undefined
     ? ''
     : `\nYou are working in a dedicated Git worktree on branch ${input.branch}; your changes will be committed to this branch.\n`
+  // Phase 6 (spec §7.2): the project memory section, inserted before the
+  // report contract; absent → `undefined` element (filtered out) so the
+  // prompt stays byte-identical to today (no placeholder text).
+  const memory = input.memoryContext === undefined
+    ? undefined
+    : `Project memory (durable knowledge from earlier runs — verify before relying on it):\n${input.memoryContext}`
   return [
     `You are executing one task of a project run. Work in the current working directory (${input.cwd}).`,
     worktree,
@@ -255,6 +261,7 @@ function renderTaskPrompt(input: TaskWorkerInput): string {
     input.description,
     role,
     criteria,
+    memory,
     'When the task work is finished, call dsh_projects_report_task_result exactly once:',
     '- kind "succeeded" with a concise summary (what was done and the outcome), or',
     '- kind "failed" with an error describing what failed and why.',

@@ -29,6 +29,8 @@ import { CoordinatorService } from './coordinator/coordinator-service.ts'
 import { PlanRunCoupler } from './coordinator/coupling.ts'
 import { RunPlanService } from './plans/plan-service.ts'
 import { ProjectRunService } from './runs/run-service.ts'
+import { HarnessMemoryDistillationDriver } from './memory/distillation.ts'
+import { ProjectMemoryService } from './memory/memory-service.ts'
 import { LocalTaskWorker } from './tasks/local-adapter.ts'
 import { TaskWorktreeManager } from './tasks/git-workspace.ts'
 import { resolveTeamTaskWorker } from './tasks/team-adapter.ts'
@@ -95,7 +97,22 @@ export function apply(ctx: Context, config: PluginConfig): void {
   // Phase 5: Git projects provision a worktree + branch per task (spec §4);
   // the merge-in-order integration strategy is the service's default.
   const taskWorktrees = new TaskWorktreeManager()
-  const taskService = new ProjectTaskService(ctx, catalog, runService, taskWorker, taskWorktrees)
+  // Phase 6 (spec §6/§8): Project Memory borrows the shared domain tables and
+  // distills succeeded runs through the Harness session driver.
+  const memoryService = new ProjectMemoryService(ctx, catalog, runService, new HarnessMemoryDistillationDriver(ctx))
+  const taskService = new ProjectTaskService(
+    ctx,
+    catalog,
+    runService,
+    taskWorker,
+    taskWorktrees,
+    undefined, // integrationStrategy (service default: merge-in-order)
+    undefined, // clock
+    undefined, // retryClock
+    memoryService,
+    // Spec §6.3: fire-and-forget distillation after a run reaches succeeded.
+    { onRunSucceeded: run => { void memoryService.distillRun(run) } },
+  )
   const coupler = new PlanRunCoupler(ctx, runService)
   const planService = new RunPlanService(ctx, runService, undefined, {
     onPlanStatus: async event => {
@@ -103,7 +120,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
       await taskService.handlePlanStatus(event)
     },
   })
-  const coordinator = new CoordinatorService(ctx, catalog, runService, planService, agentProfile)
+  const coordinator = new CoordinatorService(ctx, catalog, runService, planService, agentProfile, undefined, undefined, memoryService)
   const sourceRegistry = new TaskSourceRegistry(ctx)
   const runner = new HarnessAgentRunner(ctx, {
     permissionPreset: agentProfile.permissionPreset,
@@ -157,6 +174,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const startup = catalog.start().then(async () => {
     if (disposed) return
     await runService.start()
+    memoryService.start()
     planService.start()
     coordinator.start()
     taskService.start()
@@ -165,7 +183,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
   ctx.connection.rpc.handle(
     '/dsh-dashboard',
-    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup, runService, planService, coordinator, taskService),
+    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup, runService, planService, coordinator, taskService, memoryService),
     { authority: 'trusted-host' },
   )
 
@@ -180,6 +198,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
       taskService.stop()
       coordinator.stop()
       planService.stop()
+      memoryService.stop()
       await runService.stop()
       await catalog.stop()
     }

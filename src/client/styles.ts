@@ -716,6 +716,41 @@ export const DASHBOARD_STYLES = String.raw`
 .dshd-plan-task-editor input, .dshd-plan-task-editor textarea { width: 100%; border: 1px solid #cfd7e4; border-radius: 6px; background: #fff; font: inherit; font-size: 12px; }
 .dshd-plan-task-editor input { height: 34px; padding: 0 10px; }
 .dshd-plan-task-editor textarea { resize: vertical; min-height: 54px; padding: 8px 10px; line-height: 1.45; }
+.dshd-memory-view { height: 100%; overflow: auto; padding: 27px 34px 60px; background: #fff; }
+.dshd-memory-heading { min-height: 72px; display: flex; align-items: flex-start; justify-content: space-between; gap: 28px; margin-bottom: 22px; }
+.dshd-memory-heading h2 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.025em; }
+.dshd-memory-heading p { margin: 6px 0 0; color: var(--dshd-muted); font-size: 12px; }
+.dshd-memory-controls { display: flex; align-items: center; gap: 12px; }
+.dshd-memory-controls select { height: 39px; min-width: 220px; padding: 0 10px; border: 1px solid #cfd7e5; border-radius: 6px; background: #fff; font: inherit; font-size: 13px; }
+.dshd-memory-controls .dshd-memory-primary { height: 39px; padding: 0 15px; border: 1px solid var(--dshd-blue); border-radius: 6px; color: var(--dshd-blue); background: #fff; display: inline-flex; align-items: center; gap: 8px; font-size: 13px; white-space: nowrap; }
+.dshd-memory-controls .dshd-memory-primary:hover { background: #f4f8ff; }
+.dshd-memory-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 14px; }
+.dshd-memory-toolbar input[type="text"], .dshd-memory-toolbar input:not([type]) { min-width: 260px; height: 36px; padding: 0 12px; border: 1px solid #cfd7e5; border-radius: 6px; font: inherit; font-size: 13px; }
+.dshd-memory-archived { display: inline-flex; align-items: center; gap: 7px; color: #4f5d75; font-size: 12px; white-space: nowrap; }
+.dshd-memory-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.dshd-memory-chips button { min-height: 30px; padding: 0 11px; border: 1px solid #ccd5e3; border-radius: 999px; background: #f4f7fc; color: #4a5a75; font-size: 11px; }
+.dshd-memory-chips button[aria-pressed="true"] { border-color: var(--dshd-blue); background: #eaf1ff; color: #174ea6; font-weight: 620; }
+.dshd-memory-list { border-top: 1px solid var(--dshd-border); }
+.dshd-memory-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; padding: 14px 2px; border-bottom: 1px solid var(--dshd-border-soft); }
+.dshd-memory-entry[data-status="archived"] { opacity: .72; }
+.dshd-memory-main { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.dshd-memory-titleline { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.dshd-memory-titleline strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 620; }
+.dshd-memory-kind { flex: 0 0 auto; padding: 1px 8px; border-radius: 999px; background: #eef2f9; color: #42506a; font-size: 10px; font-weight: 620; }
+.dshd-memory-status { flex: 0 0 auto; margin-left: auto; font-size: 10px; color: #6b7890; }
+.dshd-memory-status-active { color: #1d7a3d; }
+.dshd-memory-status-archived { color: #875b00; }
+.dshd-memory-status-superseded { color: #b42332; }
+.dshd-memory-body { margin: 0; color: #33415a; font-size: 12px; line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.dshd-memory-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.dshd-memory-tag { padding: 1px 8px; border-radius: 999px; background: #f4f7fc; border: 1px solid #d7deea; color: #4a5a75; font-size: 10px; }
+.dshd-memory-relation { color: #6b7890; font-size: 10px; }
+.dshd-memory-source { border: 0; padding: 0; color: var(--dshd-blue); font-size: 10px; background: transparent; }
+.dshd-memory-source:hover { text-decoration: underline; }
+.dshd-memory-actions { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; }
+.dshd-memory-actions button { min-width: 92px; min-height: 26px; padding: 0 10px; border: 1px solid #ccd5e3; border-radius: 6px; background: #fff; color: #33415a; font-size: 11px; white-space: nowrap; }
+.dshd-memory-actions button:hover:not(:disabled) { border-color: #aeb9ca; background: #f9fbfe; }
+.dshd-memory-pinned-toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #33415a; }
 `
 
 /** Install once per browser plugin lifetime. */

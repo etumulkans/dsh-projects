@@ -6,12 +6,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { DomainError, type Domain, type KvTable } from '@deepseek-ai/dsh-storage-domain'
 import type { ProjectCatalog } from '../src/catalog/catalog.ts'
+import {
+  type MemoryDistillationDriver,
+  type MemoryDistillationDriverInput,
+  type MemoryDistillationDriverResult,
+  type MemoryDistillationSubmission,
+} from '../src/memory/distillation.ts'
+import { ProjectMemoryService } from '../src/memory/memory-service.ts'
 import { RunPlanService } from '../src/plans/plan-service.ts'
 import { dshProjectsDomainSpec } from '../src/runs/spec.ts'
 import { ProjectRunService } from '../src/runs/run-service.ts'
 import { DashboardDomainError } from '../src/runtime/errors.ts'
 import type { ProjectTaskRecord } from '../src/tasks/types.ts'
-import { ProjectTaskService } from '../src/tasks/task-service.ts'
+import { ProjectTaskService, type ProjectTaskServiceHooks } from '../src/tasks/task-service.ts'
 import {
   integrationBranchName,
   integrationWorktreePath,
@@ -74,7 +81,7 @@ class MemoryStorage {
 
 interface HeldWorker {
   readonly worker: TaskWorker
-  readonly starts: Array<{ taskId: string; attempt: number; sessionId: string; cwd: string; branch?: string }>
+  readonly starts: Array<{ taskId: string; attempt: number; sessionId: string; cwd: string; branch?: string; memoryContext?: string }>
   readonly stopped: string[]
   release(taskId: string, result?: TaskWorkerResult): void
 }
@@ -83,7 +90,7 @@ interface HeldWorker {
 function heldWorker(): HeldWorker {
   const outcomes = new Map<string, TaskWorkerResult>()
   const pending = new Map<string, (result: TaskWorkerResult) => void>()
-  const starts: Array<{ taskId: string; attempt: number; sessionId: string; cwd: string; branch?: string }> = []
+  const starts: Array<{ taskId: string; attempt: number; sessionId: string; cwd: string; branch?: string; memoryContext?: string }> = []
   const stopped: string[] = []
   const worker: TaskWorker = {
     kind: 'local',
@@ -94,6 +101,7 @@ function heldWorker(): HeldWorker {
         sessionId: input.sessionId,
         cwd: input.cwd,
         ...(input.branch === undefined ? {} : { branch: input.branch }),
+        ...(input.memoryContext === undefined ? {} : { memoryContext: input.memoryContext }),
       })
       return new Promise(resolve => {
         pending.set(input.taskId, result => resolve(result))
@@ -303,6 +311,10 @@ interface Fixture {
   held: HeldWorker
   emit: ReturnType<typeof vi.fn>
   runId: string
+  /** Phase 6: the fixture's fake catalog (memory services borrow it). */
+  catalog: ProjectCatalog
+  /** Phase 6: the fixture's memory service, when `overrides.memoryFactory` was given. */
+  memory?: ProjectMemoryService | undefined
 }
 
 async function fixture(overrides: {
@@ -315,6 +327,10 @@ async function fixture(overrides: {
   readonly integrationStrategy?: IntegrationStrategy
   /** Phase 5: the run's project workspace source (absent = controlled-directory). */
   readonly workspaceSource?: { readonly strategy: 'worktree'; readonly projectRoot: string; readonly repositoryRoot: string }
+  /** Phase 6: build the memory service for the task service (absent = no memory). */
+  readonly memoryFactory?: (ctx: Context, catalog: ProjectCatalog, runService: ProjectRunService) => ProjectMemoryService
+  /** Phase 6: service hooks (e.g. onRunSucceeded for fire-and-forget distillation). */
+  readonly hooks?: ProjectTaskServiceHooks
 } = {}): Promise<Fixture> {
   const storage = new MemoryStorage()
   const emit = vi.fn()
@@ -359,6 +375,8 @@ async function fixture(overrides: {
     stopped: [],
     release: () => undefined,
   }
+  const memory = overrides.memoryFactory === undefined ? undefined : overrides.memoryFactory(ctx, catalog, runService)
+  if (memory !== undefined) memory.start()
   const taskService = new ProjectTaskService(
     ctx,
     catalog,
@@ -368,6 +386,8 @@ async function fixture(overrides: {
     overrides.integrationStrategy,
     clock,
     overrides.retryClock ?? (() => Date.now()),
+    memory,
+    overrides.hooks,
   )
   taskService.start()
   const planService = new RunPlanService(ctx, runService, clock, {
@@ -382,7 +402,7 @@ async function fixture(overrides: {
       version: current.version + 1,
     }))
   }
-  return { ctx, runService, planService, taskService, held, emit, runId: run.id }
+  return { ctx, runService, planService, taskService, held, emit, runId: run.id, catalog, memory }
 }
 
 describe('ProjectTaskService (spec §7)', () => {
@@ -1191,4 +1211,183 @@ describe('ProjectTaskService Phase 5 Git pipeline (spec §6/§7/§12)', () => {
     fx.taskService.stop()
     await fx.runService.stop()
   }, 45_000)
+})
+
+// ---------------------------------------------------------------------------
+// Phase 6: project memory injection + run-completion distillation (spec §6.3, §7.2)
+// ---------------------------------------------------------------------------
+
+/** A deterministic distillation driver: submits its entries after a delay. */
+class FakeDistillationDriver implements MemoryDistillationDriver {
+  readonly inputs: MemoryDistillationDriverInput[] = []
+  constructor(
+    private readonly delayMs: number,
+    private readonly submit: (input: MemoryDistillationDriverInput) => MemoryDistillationSubmission,
+  ) {}
+
+  start(input: MemoryDistillationDriverInput): Promise<MemoryDistillationDriverResult> {
+    this.inputs.push(input)
+    return new Promise<MemoryDistillationDriverResult>(resolve => {
+      setTimeout(() => {
+        void input.onMemorySubmit(this.submit(input)).then(() => {
+          resolve({ kind: 'completed' })
+        })
+      }, this.delayMs)
+    })
+  }
+}
+
+describe('ProjectTaskService Phase 6 project memory (spec §6.3, §7.2)', () => {
+  it('passes the project memory packet to the worker input (spec §7.2)', async () => {
+    const fx = await fixture({
+      memoryFactory: (ctx, catalog, runService) => new ProjectMemoryService(ctx, catalog, runService, undefined),
+    })
+    try {
+      await fx.memory!.create({
+        projectId: PROJECT_ID,
+        kind: 'testing',
+        title: 'Tests need Postgres',
+        body: 'start postgres first',
+      })
+      const plan = await fx.planService.createPlan({
+        runId: fx.runId,
+        pattern: 'direct',
+        rationale: 'memory injection',
+        tasks: [{ title: 'postgres fix', description: 'make the tests green' }],
+      })
+      await fx.planService.transitionPlan(plan.id, 'active')
+      const firstStart = await waitFor(() => fx.held.starts.at(-1), 'first task start')
+      const packet = firstStart.memoryContext
+      expect(packet).toBeDefined()
+      expect(packet!).toContain('PROJECT MEMORY (knowledge persisted from earlier runs — verify before relying on it):')
+      expect(packet!).toContain('TESTING:')
+      expect(packet!).toContain('- Tests need Postgres: start postgres first')
+      fx.held.release(firstStart.taskId, { kind: 'succeeded', summary: 'done' })
+      await waitFor(() => fx.taskService.taskList(fx.runId).every(task => task.status === 'succeeded'), 'task succeeded')
+    } finally {
+      fx.planService.stop()
+      fx.taskService.stop()
+      await fx.runService.stop()
+    }
+  })
+
+  it('omits memoryContext from the worker input when no memory service is wired (spec §7.2)', async () => {
+    const fx = await fixture()
+    try {
+      const plan = await fx.planService.createPlan({
+        runId: fx.runId,
+        pattern: 'direct',
+        rationale: 'no memory',
+        tasks: [{ title: 'a', description: 'a' }],
+      })
+      await fx.planService.transitionPlan(plan.id, 'active')
+      const firstStart = await waitFor(() => fx.held.starts.at(-1), 'first task start')
+      expect(firstStart.memoryContext).toBeUndefined()
+      fx.held.release(firstStart.taskId, { kind: 'succeeded', summary: 'done' })
+      await waitFor(() => fx.taskService.taskList(fx.runId).every(task => task.status === 'succeeded'), 'task succeeded')
+    } finally {
+      fx.planService.stop()
+      fx.taskService.stop()
+      await fx.runService.stop()
+    }
+  })
+
+  it('fires onRunSucceeded once with the fresh succeeded record (spec §6.3)', async () => {
+    const seen: Array<{ id: string; phase: string }> = []
+    const fx = await fixture({
+      hooks: { onRunSucceeded: run => { seen.push({ id: run.id, phase: run.phase }) } },
+    })
+    try {
+      const plan = await fx.planService.createPlan({
+        runId: fx.runId,
+        pattern: 'direct',
+        rationale: 'hook',
+        tasks: [{ title: 'a', description: 'a' }],
+      })
+      await fx.planService.transitionPlan(plan.id, 'active')
+      const firstStart = await waitFor(() => fx.held.starts.at(-1), 'first task start')
+      fx.held.release(firstStart.taskId, { kind: 'succeeded', summary: 'done' })
+      await waitFor(() => {
+        const current = fx.runService.domain().table('runs').get(fx.runId)!
+        return current.phase === 'succeeded' ? current : undefined
+      }, 'run succeeded', 10_000)
+      // fire-and-forget: the hook fires as part of the completion pipeline,
+      // not before the transition is applied
+      await waitFor(() => (seen.length === 1 ? seen : undefined), 'hook fired', 5_000)
+      expect(seen).toEqual([{ id: fx.runId, phase: 'succeeded' }])
+    } finally {
+      fx.planService.stop()
+      fx.taskService.stop()
+      await fx.runService.stop()
+    }
+  }, 20_000)
+
+  it('distills run 1 and passes the memory to run 2 worker inputs (spec §12.5)', async () => {
+    const driver = new FakeDistillationDriver(300, () => ({
+      entries: [
+        { kind: 'testing', title: 'Tests need Postgres', body: 'start postgres first' },
+        { kind: 'convention', title: 'Use pnpm', body: 'always pnpm, never npm' },
+      ],
+    }))
+    let fx: Awaited<ReturnType<typeof fixture>>
+    fx = await fixture({
+      memoryFactory: (ctx, catalog, runService) => new ProjectMemoryService(ctx, catalog, runService, driver),
+      hooks: { onRunSucceeded: run => { void fx.memory!.distillRun(run) } },
+    })
+    try {
+      // run #1: one task to completion
+      const plan = await fx.planService.createPlan({
+        runId: fx.runId,
+        pattern: 'direct',
+        rationale: 'run one',
+        tasks: [{ title: 'a', description: 'a' }],
+      })
+      await fx.planService.transitionPlan(plan.id, 'active')
+      const firstStart = await waitFor(() => fx.held.starts.at(-1), 'run 1 task start')
+      fx.held.release(firstStart.taskId, { kind: 'succeeded', summary: 'run 1 done' })
+      const run1 = await waitFor(() => {
+        const current = fx.runService.domain().table('runs').get(fx.runId)!
+        return current.phase === 'succeeded' ? current : undefined
+      }, 'run 1 succeeded', 10_000)
+      expect(run1.phase).toBe('succeeded')
+      // fire-and-forget: the run is already succeeded while the (slow)
+      // distillation session is still in flight
+      expect(await fx.memory!.list({ projectId: PROJECT_ID })).toMatchObject({ entries: [] })
+      await waitFor(() => (driver.inputs.length === 1 ? driver.inputs : undefined), 'distillation started', 5_000)
+      expect(driver.inputs[0]!.sessionId).toMatch(/^dsh-memory-/u)
+      const entries = await waitFor(async () => {
+        const list = await fx.memory!.list({ projectId: PROJECT_ID })
+        return list.entries.length === 2 ? list.entries : undefined
+      }, 'distillation persisted', 5_000)
+      expect(entries.map(entry => entry.title).sort()).toEqual(['Tests need Postgres', 'Use pnpm'])
+      expect(entries.every(entry => entry.sourceRunId === fx.runId)).toBe(true)
+      const detail = await fx.runService.runDetail(fx.runId)
+      const distilled = detail.events.filter(event => event.type === 'run.memory.distilled')
+      expect(distilled).toHaveLength(1)
+      expect(distilled[0]!.detail).toBe('2 entries persisted (0 superseded)')
+      // run #2 in the same project: its task worker input carries run 1's memory
+      const run2 = await fx.runService.createRun({ goal: 'second goal' }, { mode: 'project', projectId: PROJECT_ID })
+      await fx.runService.transitionRun(run2.id, 'planning')
+      await fx.runService.transitionRun(run2.id, 'executing')
+      const plan2 = await fx.planService.createPlan({
+        runId: run2.id,
+        pattern: 'direct',
+        rationale: 'run two',
+        tasks: [{ title: 'postgres fix', description: 'again' }],
+      })
+      await fx.planService.transitionPlan(plan2.id, 'active')
+      const secondStart = await waitFor(() => fx.held.starts.at(1), 'run 2 task start')
+      expect(secondStart.memoryContext).toBeDefined()
+      expect(secondStart.memoryContext).toContain('start postgres first')
+      // spec §5: with a query, only score > 0 entries are returned — the
+      // non-matching convention entry stays out of the packet
+      expect(secondStart.memoryContext).not.toContain('always pnpm, never npm')
+      fx.held.release(secondStart.taskId, { kind: 'succeeded', summary: 'run 2 done' })
+      await waitFor(() => fx.taskService.taskList(run2.id).every(task => task.status === 'succeeded'), 'run 2 task succeeded')
+    } finally {
+      fx.planService.stop()
+      fx.taskService.stop()
+      await fx.runService.stop()
+    }
+  }, 30_000)
 })

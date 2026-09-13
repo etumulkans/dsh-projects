@@ -201,6 +201,47 @@ describe('LocalTaskWorker (spec §6.2)', () => {
     expect(rt.disposed.count).toBe(1)
   })
 
+  it('inserts the project memory section before the report contract (Phase 6, spec §7.2)', async () => {
+    const rt = fakeLocalRuntime()
+    const worker = new LocalTaskWorker(rt.ctx, PROFILE)
+    const packet = 'PINNED:\n- Always: start postgres first'
+    const started = worker.start(taskInput({ memoryContext: packet }))
+    await new Promise(resolve => { setTimeout(resolve, 0) })
+    const raw = (rt.followups[0] as { content: Array<{ type: string; text: string }> }).content[0]!.text
+    expect(raw).toContain(
+      'Project memory (durable knowledge from earlier runs — verify before relying on it):\n'
+      + packet
+      + '\nWhen the task work is finished, call dsh_projects_report_task_result exactly once:',
+    )
+    // complete the session so the worker settles
+    const report = rt.reportTools.find(tool => tool.name === 'dsh_projects_report_task_result')!
+    await report.execute({ kind: 'succeeded', summary: 'done' })
+    rt.session.events.push(...sessionEvents(1, { kind: 'completed' }))
+    rt.emitSessionEvent({ seq: 1, time: 0, type: 'turn/start', data: { turn: 1 } })
+    rt.emitSessionEvent({ seq: 2, time: 0, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    rt.release()
+    await expect(started).resolves.toMatchObject({ kind: 'succeeded' })
+  })
+
+  it('keeps the prompt byte-identical when no memory packet is present (Phase 6, spec §7.2)', async () => {
+    const rt = fakeLocalRuntime()
+    const worker = new LocalTaskWorker(rt.ctx, PROFILE)
+    const started = worker.start(taskInput())
+    await new Promise(resolve => { setTimeout(resolve, 0) })
+    const raw = (rt.followups[0] as { content: Array<{ type: string; text: string }> }).content[0]!.text
+    expect(raw).not.toContain('Project memory')
+    // the prompt is exactly the pre-Phase-6 layout (no placeholder text;
+    // the blank line is the pre-existing criteria trailing newline)
+    expect(raw).toContain('The parser rejects invalid input\n\nWhen the task work is finished, call dsh_projects_report_task_result exactly once:')
+    const report = rt.reportTools.find(tool => tool.name === 'dsh_projects_report_task_result')!
+    await report.execute({ kind: 'failed', error: 'never' })
+    rt.session.events.push(...sessionEvents(1, { kind: 'completed' }))
+    rt.emitSessionEvent({ seq: 1, time: 0, type: 'turn/start', data: { turn: 1 } })
+    rt.emitSessionEvent({ seq: 2, time: 0, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    rt.release()
+    await expect(started).resolves.toMatchObject({ kind: 'failed' })
+  })
+
   it('maps a failed report through with the error', async () => {
     const rt = fakeLocalRuntime()
     const worker = new LocalTaskWorker(rt.ctx, PROFILE)
@@ -445,6 +486,35 @@ describe('TeamTaskWorker (spec §6.3, experimental)', () => {
       summary: 'Shipped the parser with tests.',
       agentId: rt.team.spawnCalls[0]!.name,
     })
+  })
+
+  it('inserts the project memory section before the report contract (Phase 6, spec §7.2)', async () => {
+    const rt = fakeTeamRuntime()
+    const worker = resolveTeamTaskWorker(rt.ctx, PROFILE)!
+    const packet = 'PINNED:\n- Always: start postgres first'
+    const started = worker.start(taskInput({ memoryContext: packet }))
+    await new Promise(resolve => { setTimeout(resolve, 0) })
+    const raw = (rt.team.spawnCalls[0]!.prompt[0] as { readonly type: 'text'; readonly text: string }).text
+    expect(raw).toContain(
+      'Project memory (durable knowledge from earlier runs — verify before relying on it):\n'
+      + packet
+      + `\nYour shared team task has id ${rt.team.rows[0]!.id}. Claim it,`,
+    )
+    rt.team.setRow({ id: rt.team.rows[0]!.id, status: 'completed', description: 'done' })
+    rt.team.change.release()
+    await expect(started).resolves.toMatchObject({ kind: 'succeeded' })
+  })
+
+  it('keeps the teammate prompt byte-identical when no memory packet is present (Phase 6, spec §7.2)', async () => {
+    const rt = fakeTeamRuntime()
+    const worker = resolveTeamTaskWorker(rt.ctx, PROFILE)!
+    const started = worker.start(taskInput())
+    await new Promise(resolve => { setTimeout(resolve, 0) })
+    const raw = (rt.team.spawnCalls[0]!.prompt[0] as { readonly type: 'text'; readonly text: string }).text
+    expect(raw).not.toContain('Project memory')
+    rt.team.setRow({ id: rt.team.rows[0]!.id, status: 'completed', description: 'done' })
+    rt.team.change.release()
+    await expect(started).resolves.toMatchObject({ kind: 'succeeded' })
   })
 
   it('maps the ERROR: description prefix to a failure with the detail', async () => {

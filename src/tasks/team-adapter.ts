@@ -208,6 +208,12 @@ function renderTeamTaskPrompt(input: TaskWorkerInput, teamTaskId: string): strin
     ? ''
     : `\nAcceptance criteria:\n${input.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}\n`
   const role = input.role === undefined ? '' : `\nRole: ${input.role}\n`
+  // Phase 6 (spec §7.2): the project memory section, inserted before the
+  // report contract; absent → `undefined` element (filtered out) so the
+  // prompt stays byte-identical to today (no placeholder text).
+  const memory = input.memoryContext === undefined
+    ? undefined
+    : `Project memory (durable knowledge from earlier runs — verify before relying on it):\n${input.memoryContext}`
   return [
     `You are a teammate on an agent team executing one task of a project run. Work in the current working directory (${input.cwd}).`,
     '',
@@ -216,6 +222,7 @@ function renderTeamTaskPrompt(input: TaskWorkerInput, teamTaskId: string): strin
     input.description,
     role,
     criteria,
+    memory,
     `Your shared team task has id ${teamTaskId}. Claim it, do the work, then update its description with a concise result summary and mark it complete.`,
     'If the work cannot be completed, update the task description starting with "ERROR:" followed by what failed and why, and mark it complete.',
   ].filter(line => line !== undefined).join('\n')

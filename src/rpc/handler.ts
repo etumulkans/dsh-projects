@@ -9,6 +9,8 @@ import { RUN_PLAN_PATTERNS, RUN_PLAN_STATUSES } from '../plans/spec.ts'
 import type { RunPlanService } from '../plans/plan-service.ts'
 import type { CreatePlanInput, PlannedTaskInput, RunPlanPattern, RunPlanStatus } from '../plans/types.ts'
 import type { CoordinatorService } from '../coordinator/coordinator-service.ts'
+import type { ProjectMemoryService } from '../memory/memory-service.ts'
+import { MEMORY_KINDS, MEMORY_STATUSES, type MemoryKind, type MemoryStatus } from '../memory/types.ts'
 import type { ProjectTaskService } from '../tasks/task-service.ts'
 import type { DashboardSnapshot } from '../runtime/types.ts'
 
@@ -23,6 +25,7 @@ export async function handleDashboardRpc(
   plans?: RunPlanService,
   coordinator?: CoordinatorService,
   tasks?: ProjectTaskService,
+  memory?: ProjectMemoryService,
 ): Promise<RpcResult<unknown>> {
   if (signal.aborted) {
     return failure('cancelled', localizedError('request.cancelled', 'Dashboard request was cancelled'))
@@ -211,6 +214,88 @@ export async function handleDashboardRpc(
         const taskId = readUuidField(payload, 'taskId')
         if (taskId === undefined) return badRequest('taskRetry requires a uuid `taskId`')
         return success(await tasks.taskRetry(taskId))
+      }
+      case 'memoryList': {
+        if (memory === undefined) return badRequest('memoryList is unavailable: the Project Memory service is not mounted')
+        const projectId = readStringField(payload, 'projectId')
+        if (projectId === undefined) return badRequest('memoryList requires a non-empty `projectId`')
+        const query = readOptionalString(payload, 'query')
+        if (query === false) return badRequest('memoryList `query` must be a non-empty string when provided')
+        const kinds = readMemoryKinds(payload)
+        if (kinds === false) return badRequest('memoryList `kinds` must be an array of memory kinds when provided')
+        const tags = readStringArray(payload, 'tags')
+        if (tags === false) return badRequest('memoryList `tags` must be an array of strings when provided')
+        const limit = readOptionalInteger(payload, 'limit', 1, 100)
+        if (limit === false) return badRequest('memoryList `limit` must be an integer from 1 to 100')
+        const includeArchived = readBooleanField(payload, 'includeArchived')
+        return success(await memory.list({
+          projectId,
+          ...(query === undefined ? {} : { query }),
+          ...(kinds === undefined ? {} : { kinds }),
+          ...(tags === undefined ? {} : { tags }),
+          ...(limit === undefined ? {} : { limit }),
+          ...(includeArchived === undefined ? {} : { includeArchived }),
+        }))
+      }
+      case 'memoryCreate': {
+        if (memory === undefined) return badRequest('memoryCreate is unavailable: the Project Memory service is not mounted')
+        const projectId = readStringField(payload, 'projectId')
+        if (projectId === undefined) return badRequest('memoryCreate requires a non-empty `projectId`')
+        const kind = readMemoryKind(payload)
+        if (kind === undefined) return badRequest('memoryCreate requires a valid `kind`')
+        const title = readStringField(payload, 'title')
+        if (title === undefined) return badRequest('memoryCreate requires a non-empty `title`')
+        const body = readStringField(payload, 'body')
+        if (body === undefined) return badRequest('memoryCreate requires a non-empty `body`')
+        const tags = readStringArray(payload, 'tags')
+        if (tags === false) return badRequest('memoryCreate `tags` must be an array of strings when provided')
+        const pinned = readBooleanField(payload, 'pinned')
+        const confidence = readOptionalConfidence(payload)
+        if (confidence === false) return badRequest('memoryCreate `confidence` must be a number from 0 to 1 when provided')
+        return success(await memory.create({
+          projectId,
+          kind,
+          title,
+          body,
+          ...(tags === undefined ? {} : { tags }),
+          ...(pinned === undefined ? {} : { pinned }),
+          ...(confidence === undefined ? {} : { confidence }),
+        }))
+      }
+      case 'memoryUpdate': {
+        if (memory === undefined) return badRequest('memoryUpdate is unavailable: the Project Memory service is not mounted')
+        const id = readStringField(payload, 'id')
+        if (id === undefined) return badRequest('memoryUpdate requires a non-empty `id`')
+        const expectedVersion = readOptionalInteger(payload, 'expectedVersion', 1, Number.MAX_SAFE_INTEGER)
+        if (expectedVersion === undefined) return badRequest('memoryUpdate requires a positive integer `expectedVersion`')
+        if (expectedVersion === false) return badRequest('memoryUpdate `expectedVersion` must be a positive integer')
+        const title = readOptionalString(payload, 'title')
+        if (title === false) return badRequest('memoryUpdate `title` must be a non-empty string when provided')
+        const body = readOptionalString(payload, 'body')
+        if (body === false) return badRequest('memoryUpdate `body` must be a non-empty string when provided')
+        const tags = readStringArray(payload, 'tags')
+        if (tags === false) return badRequest('memoryUpdate `tags` must be an array of strings when provided')
+        const pinned = readBooleanField(payload, 'pinned')
+        if (![title, body, tags, pinned].some(field => field !== undefined)) {
+          return badRequest('memoryUpdate requires at least one patch field')
+        }
+        return success(await memory.update(id, expectedVersion, {
+          ...(title === undefined ? {} : { title }),
+          ...(body === undefined ? {} : { body }),
+          ...(tags === undefined ? {} : { tags }),
+          ...(pinned === undefined ? {} : { pinned }),
+        }))
+      }
+      case 'memorySetStatus': {
+        if (memory === undefined) return badRequest('memorySetStatus is unavailable: the Project Memory service is not mounted')
+        const id = readStringField(payload, 'id')
+        if (id === undefined) return badRequest('memorySetStatus requires a non-empty `id`')
+        const expectedVersion = readOptionalInteger(payload, 'expectedVersion', 1, Number.MAX_SAFE_INTEGER)
+        if (expectedVersion === undefined) return badRequest('memorySetStatus requires a positive integer `expectedVersion`')
+        if (expectedVersion === false) return badRequest('memorySetStatus `expectedVersion` must be a positive integer')
+        const status = readMemoryStatus(payload)
+        if (status === undefined) return badRequest('memorySetStatus requires a valid `status`')
+        return success(await memory.setStatus(id, expectedVersion, status))
       }
       default:
         return badRequest(`unknown Dashboard endpoint ${JSON.stringify(endpoint)}`)
@@ -501,4 +586,40 @@ function readBooleanField(value: unknown, key: string): boolean | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
   const field = (value as Record<string, unknown>)[key]
   return typeof field === 'boolean' ? field : undefined
+}
+
+/** Spec §9: a single memory kind — anything outside the fixed set is invalid. */
+function readMemoryKind(value: unknown): string | undefined {
+  const object = readObject(value)
+  const field = object?.['kind']
+  return typeof field === 'string' && (MEMORY_KINDS as readonly string[]).includes(field) ? field : undefined
+}
+
+/** Spec §9: a list of memory kinds; `false` marks an invalid payload shape. */
+function readMemoryKinds(value: unknown): MemoryKind[] | undefined | false {
+  const object = readObject(value)
+  if (object === undefined || !('kinds' in object)) return undefined
+  const field = object['kinds']
+  if (!Array.isArray(field)
+    || field.some(item => typeof item !== 'string' || !(MEMORY_KINDS as readonly string[]).includes(item))) {
+    return false
+  }
+  return field as MemoryKind[]
+}
+
+/** Spec §9: the target status for memorySetStatus. */
+function readMemoryStatus(value: unknown): MemoryStatus | undefined {
+  const object = readObject(value)
+  const field = object?.['status']
+  return typeof field === 'string' && (MEMORY_STATUSES as readonly string[]).includes(field)
+    ? (field as MemoryStatus)
+    : undefined
+}
+
+/** Spec §9: confidence is a finite number in [0, 1] when provided. */
+function readOptionalConfidence(value: unknown): number | undefined | false {
+  const object = readObject(value)
+  if (object === undefined || !('confidence' in object)) return undefined
+  const field = object['confidence']
+  return typeof field === 'number' && Number.isFinite(field) && field >= 0 && field <= 1 ? field : false
 }

@@ -14,6 +14,7 @@ import type {
   CoordinatorPlanSubmission,
 } from '../src/coordinator/session-driver.ts'
 import { RunPlanService } from '../src/plans/plan-service.ts'
+import { ProjectMemoryService } from '../src/memory/memory-service.ts'
 import { dshProjectsDomainSpec } from '../src/runs/spec.ts'
 import { ProjectRunService } from '../src/runs/run-service.ts'
 
@@ -463,6 +464,71 @@ describe('CoordinatorService (Phase 3)', () => {
       expect(call.prompt).toContain('Goal: config')
       expect(call.prompt).toContain('dsh_projects_submit_plan')
       expect(call.sessionId).toMatch(/^dsh-coordinator-/u)
+    } finally {
+      await base.runService.stop()
+      await base.catalog.stop()
+    }
+  })
+
+  it('buildPrompt includes the memory packet when one exists (Phase 6, spec §7.1)', async () => {
+    const base = await fixture(new FakeDriver(() => ({ kind: 'completed' })))
+    try {
+      const memory = new ProjectMemoryService(base.context, base.catalog, base.runService, undefined, () => '2025-01-01T00:00:00.000Z')
+      memory.start()
+      await memory.create({
+        projectId: base.projectId,
+        kind: 'testing',
+        title: 'Integration tests need Postgres',
+        body: 'start postgres first',
+      })
+      const driver = new FakeDriver(() => ({ kind: 'completed' }))
+      const withMemory = new CoordinatorService(
+        base.context, base.catalog, base.runService, base.planService, AGENT_PROFILE,
+        () => '2025-01-01T00:00:00.000Z', driver, memory,
+      )
+      withMemory.start()
+      const run = await base.runService.createRun(
+        { goal: 'make the postgres integration tests pass' },
+        { mode: 'project', projectId: base.projectId },
+      )
+      await withMemory.coordinate(run.id)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const prompt = driver.calls[0]!.prompt
+      expect(prompt).toContain('Goal: make the postgres integration tests pass')
+      expect(prompt).toContain('PROJECT MEMORY (knowledge persisted from earlier runs — verify before relying on it):')
+      expect(prompt).toContain('TESTING:')
+      expect(prompt).toContain('- Integration tests need Postgres: start postgres first')
+      // appended after the existing prompt section
+      expect(prompt.indexOf('PROJECT MEMORY')).toBeGreaterThan(prompt.indexOf('Goal:'))
+      withMemory.stop()
+    } finally {
+      await base.runService.stop()
+      await base.catalog.stop()
+    }
+  })
+
+  it('buildPrompt is byte-identical when the memory packet is absent (Phase 6, spec §7.1)', async () => {
+    const base = await fixture(new FakeDriver(() => ({ kind: 'completed' })))
+    try {
+      // An empty memory service returns no packet (query matches nothing).
+      const memory = new ProjectMemoryService(base.context, base.catalog, base.runService, undefined, () => '2025-01-01T00:00:00.000Z')
+      memory.start()
+      const clock = () => '2025-01-01T00:00:00.000Z'
+      const driverA = new FakeDriver(() => ({ kind: 'completed' }))
+      const driverB = new FakeDriver(() => ({ kind: 'completed' }))
+      const noMemory = new CoordinatorService(base.context, base.catalog, base.runService, base.planService, AGENT_PROFILE, clock, driverA)
+      const withMemory = new CoordinatorService(base.context, base.catalog, base.runService, base.planService, AGENT_PROFILE, clock, driverB, memory)
+      noMemory.start()
+      withMemory.start()
+      const runA = await base.runService.createRun({ goal: 'same goal' }, { mode: 'project', projectId: base.projectId })
+      const runB = await base.runService.createRun({ goal: 'same goal' }, { mode: 'project', projectId: base.projectId })
+      await noMemory.coordinate(runA.id)
+      await withMemory.coordinate(runB.id)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(driverB.calls[0]!.prompt).toBe(driverA.calls[0]!.prompt)
+      expect(driverB.calls[0]!.prompt).not.toContain('PROJECT MEMORY')
+      noMemory.stop()
+      withMemory.stop()
     } finally {
       await base.runService.stop()
       await base.catalog.stop()

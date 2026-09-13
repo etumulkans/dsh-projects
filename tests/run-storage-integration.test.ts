@@ -234,9 +234,10 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    // Phase 4 adds the `tasks` table to the domain (empty here — no tasks in
-    // this leg); every declared table is created on domain open.
-    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs', 'tasks'])
+    // Phase 4 adds the `tasks` table and Phase 6 the `memory` table (empty
+    // here — no tasks or memories in this leg); every declared table is
+    // created on domain open.
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'run_events', 'runs', 'tasks'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(2)
     // 10 boot-1 events + 3 boot-2 events (resume, finalize, completed)
@@ -323,7 +324,8 @@ describe('ProjectRunService against real JSON storage', () => {
       await second.stop()
     }
 
-    // The medium table set is unchanged by Phase 3 (no new tables).
+    // The medium table set is unchanged by Phase 3 (no new tables); Phase 6
+    // adds the shared `memory` table, created empty on domain open.
     const entries = await readdir(root, { recursive: true })
     const mediumFile = entries.find(entry => String(entry).includes('dsh_projects') && String(entry).endsWith('.json'))
     expect(mediumFile).toBeDefined()
@@ -334,7 +336,7 @@ describe('ProjectRunService against real JSON storage', () => {
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
     // Phase 4 adds the `tasks` table to the domain (empty here — no tasks in
     // this leg); every declared table is created on domain open.
-    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'run_events', 'runs', 'tasks'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(1)
     // 7 boot-1 events + 2 boot-2 events (approve, phase change to executing)
@@ -489,7 +491,7 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'run_events', 'runs', 'tasks'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.tasks ?? {})).toHaveLength(2)
@@ -614,7 +616,7 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'run_events', 'runs', 'tasks'])
     const persistedTasks = Object.values(medium.tables.tasks ?? {})
     expect(persistedTasks).toHaveLength(2)
     const persistedTask = persistedTasks[0] as Record<string, unknown>

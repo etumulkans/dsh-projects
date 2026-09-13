@@ -14,6 +14,8 @@ import type { Domain, KvTable } from '@deepseek-ai/dsh-storage-domain'
 import type { AgentProfileConfig } from '../config.ts'
 import type { ProjectId } from '../catalog/types.ts'
 import type { ProjectCatalog } from '../catalog/catalog.ts'
+import type { ProjectMemoryService } from '../memory/memory-service.ts'
+import { COORDINATOR_MEMORY_BUDGET } from '../memory/retrieval.ts'
 import type { RunPlanService } from '../plans/plan-service.ts'
 import type { RunId, ProjectRunEventRecord, ProjectRunRecord, RunEventId } from '../runs/types.ts'
 import { dshProjectsDomainSpec } from '../runs/spec.ts'
@@ -95,6 +97,8 @@ export class CoordinatorService {
     private readonly agentProfile: AgentProfileConfig,
     private readonly clock: () => string = () => new Date().toISOString(),
     private readonly driver: CoordinatorDriver = new HarnessCoordinatorDriver(ctx),
+    /** Phase 6 (spec §7.1): memory service for the first-turn prompt packet. */
+    private readonly memory?: ProjectMemoryService,
   ) {}
 
   /** Borrow the shared domain tables; requires the Run service to be started. */
@@ -314,7 +318,7 @@ export class CoordinatorService {
       rationale: plan.rationale,
       ...(plan.replanReason === undefined ? {} : { replanReason: plan.replanReason }),
     }))
-    return [
+    const base = [
       coordinatorGuidance(),
       '',
       coordinatorPrompt({
@@ -325,6 +329,11 @@ export class CoordinatorService {
         existingPlans: plans,
       }),
     ].join('\n')
+    // Phase 6 (spec §7.1): append the project memory packet (query = run
+    // goal) after the existing prompt section; no packet → byte-identical.
+    if (this.memory === undefined) return base
+    const packet = this.memory.packetFor({ projectId: run.projectId, query: run.goal, budgets: COORDINATOR_MEMORY_BUDGET })
+    return packet === undefined ? base : `${base}\n\n${packet}`
   }
 
   /** Append one high-level event on the run's per-run seq (shared stream). */
