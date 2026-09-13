@@ -30,6 +30,7 @@ import { PlanRunCoupler } from './coordinator/coupling.ts'
 import { RunPlanService } from './plans/plan-service.ts'
 import { ProjectRunService } from './runs/run-service.ts'
 import { LocalTaskWorker } from './tasks/local-adapter.ts'
+import { TaskWorktreeManager } from './tasks/git-workspace.ts'
 import { resolveTeamTaskWorker } from './tasks/team-adapter.ts'
 import { ProjectTaskService } from './tasks/task-service.ts'
 import { UnavailableWorker, type TaskWorker } from './tasks/worker.ts'
@@ -91,7 +92,10 @@ export function apply(ctx: Context, config: PluginConfig): void {
   // Phase 4: tasks execute through the resolved worker seam (spec §6.4) and
   // materialize from the active plan version via the same onPlanStatus hook.
   const taskWorker = resolveTaskWorker(ctx, config, agentProfile)
-  const taskService = new ProjectTaskService(ctx, catalog, runService, taskWorker)
+  // Phase 5: Git projects provision a worktree + branch per task (spec §4);
+  // the merge-in-order integration strategy is the service's default.
+  const taskWorktrees = new TaskWorktreeManager()
+  const taskService = new ProjectTaskService(ctx, catalog, runService, taskWorker, taskWorktrees)
   const coupler = new PlanRunCoupler(ctx, runService)
   const planService = new RunPlanService(ctx, runService, undefined, {
     onPlanStatus: async event => {

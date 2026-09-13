@@ -1,9 +1,10 @@
 /** DSH Projects Phase 4 — task execution constants. */
 
 /**
- * Default task concurrency per run. Phase 4 tasks share the project's working
- * tree (per-task worktrees arrive in Phase 5), so the safe default is serial
- * execution (intent §7.2). A run may override via `maxConcurrentAgents`.
+ * Default task concurrency per run. From Phase 5 every live task of a Git
+ * project runs in its own worktree + branch (one writer per worktree), so
+ * `maxConcurrentAgents > 1` is safe for Git projects; the default stays
+ * serial (intent §7.2). Non-Git projects still share the working tree.
  */
 export const DEFAULT_TASK_CONCURRENCY = 1
 
@@ -27,3 +28,6 @@ export const TICK_INTERVAL_MS = 5_000
 
 /** Upper bound of tasks materialized from one plan version. */
 export const MAX_TASKS_PER_PLAN = 50
+
+/** Timeout for one Git operation (worktree add/remove, commit, merge). */
+export const GIT_OPERATION_TIMEOUT_MS = 30_000

@@ -43,9 +43,14 @@ export const projectRunRecordSchema = z.object({
   coordinatorSessionId: nonBlank.optional(),
   /**
    * Additive (Phase 4): per-run task concurrency override. Absent uses the
-   * default of 1 (shared working tree pre-Phase 5).
+   * default of 1 (shared working tree for non-Git projects; Git projects
+   * isolate every task in its own worktree from Phase 5).
    */
   maxConcurrentAgents: z.number().int().min(1).max(50).optional(),
+  // Additive (Phase 5): integration result, set when the run's task branches
+  // are merged into the integration branch (spec §3.2).
+  integrationBranch: nonBlank.optional(),
+  integrationHead: nonBlank.optional(),
   createdAt: timestamp,
   updatedAt: timestamp,
   phaseChangedAt: timestamp,
@@ -65,6 +70,8 @@ export const RUN_EVENT_TYPES = [
   // Additive (Phase 4): task lifecycle. One aggregate materialization event
   // plus per-task ready/started/completed/failed (spec §3.4).
   'tasks.materialized', 'task.ready', 'task.started', 'task.completed', 'task.failed',
+  // Additive (Phase 5): the run's integration step (spec §3.3).
+  'run.integration.started', 'run.integration.completed', 'run.integration.failed',
 ] as const satisfies readonly ProjectRunEventRecord['type'][]
 
 export const projectRunEventRecordSchema = z.object({

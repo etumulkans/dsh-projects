@@ -1,12 +1,13 @@
 /** Persistent per-issue workspaces and Symphony-compatible lifecycle hooks. */
 
 import { lstat, mkdir, realpath, rm } from 'node:fs/promises'
-import { execFile, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ProjectWorkspaceSource } from '../catalog/types.ts'
 import type { TaskIssue } from '../domain/issue.ts'
 import type { WorkflowDefinition } from '../workflow/types.ts'
+import { runGit } from './git.ts'
 import { assertContained, issueWorkspaceLeaf, resolveWorkspaceRoot } from './path-safety.ts'
 
 export interface PreparedWorkspace {
@@ -171,7 +172,7 @@ export class WorkspaceManager {
     timeoutMs: number,
     signal?: AbortSignal,
   ): Promise<void> {
-    await this.runGit(
+    await runGit(
       source.repositoryRoot,
       ['worktree', 'add', '--detach', path, 'HEAD'],
       timeoutMs,
@@ -187,9 +188,9 @@ export class WorkspaceManager {
     signal?: AbortSignal,
   ): Promise<void> {
     const [sourceCommonDirectory, targetCommonDirectory, targetRoot] = await Promise.all([
-      this.runGit(source.repositoryRoot, ['rev-parse', '--path-format=absolute', '--git-common-dir'], timeoutMs, signal),
-      this.runGit(path, ['rev-parse', '--path-format=absolute', '--git-common-dir'], timeoutMs, signal),
-      this.runGit(path, ['rev-parse', '--path-format=absolute', '--show-toplevel'], timeoutMs, signal),
+      runGit(source.repositoryRoot, ['rev-parse', '--path-format=absolute', '--git-common-dir'], timeoutMs, signal),
+      runGit(path, ['rev-parse', '--path-format=absolute', '--git-common-dir'], timeoutMs, signal),
+      runGit(path, ['rev-parse', '--path-format=absolute', '--show-toplevel'], timeoutMs, signal),
     ])
     if (!samePath(sourceCommonDirectory, targetCommonDirectory) || !samePath(path, targetRoot)) {
       throw new Error(`issue workspace is not a worktree of the selected repository: ${path}`)
@@ -202,7 +203,7 @@ export class WorkspaceManager {
     signal?: AbortSignal,
   ): Promise<void> {
     if (target.source?.strategy === 'worktree') {
-      await this.runGit(
+      await runGit(
         target.source.repositoryRoot,
         ['worktree', 'remove', '--force', target.path],
         timeoutMs,
@@ -211,35 +212,6 @@ export class WorkspaceManager {
       return
     }
     await rm(target.path, { recursive: true, force: false })
-  }
-
-  private async runGit(
-    cwd: string,
-    args: readonly string[],
-    timeoutMs: number,
-    outerSignal?: AbortSignal,
-  ): Promise<string> {
-    const timeout = AbortSignal.timeout(timeoutMs)
-    const signal = outerSignal === undefined ? timeout : AbortSignal.any([outerSignal, timeout])
-    return await new Promise<string>((accept, reject) => {
-      execFile('git', ['-C', cwd, ...args], {
-        encoding: 'utf8',
-        maxBuffer: HOOK_OUTPUT_LIMIT_BYTES,
-        windowsHide: true,
-        signal,
-      }, (error, stdout, stderr) => {
-        if (signal.aborted) {
-          reject(signal.reason instanceof Error ? signal.reason : new Error('Git workspace operation was cancelled'))
-          return
-        }
-        if (error !== null) {
-          const detail = stderr.trim().slice(-4000)
-          reject(new Error(`git ${args.join(' ')} failed${detail === '' ? '' : `: ${detail}`}`))
-          return
-        }
-        accept(stdout.trim())
-      })
-    })
   }
 
   private async runHook(

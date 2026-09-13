@@ -241,8 +241,14 @@ function renderTaskPrompt(input: TaskWorkerInput): string {
     ? ''
     : `\nAcceptance criteria:\n${input.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}\n`
   const role = input.role === undefined ? '' : `\nRole: ${input.role}\n`
+  // Phase 5: one line of worktree guidance when the task runs in its own
+  // Git worktree (spec §6.1); the shared-tree prompt is unchanged otherwise.
+  const worktree = input.branch === undefined
+    ? ''
+    : `\nYou are working in a dedicated Git worktree on branch ${input.branch}; your changes will be committed to this branch.\n`
   return [
     `You are executing one task of a project run. Work in the current working directory (${input.cwd}).`,
+    worktree,
     '',
     `Task ${input.attempt}: ${input.title}`,
     '',

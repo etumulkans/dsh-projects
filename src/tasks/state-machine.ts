@@ -53,6 +53,8 @@ export interface TaskTransitionContext {
   readonly assignedAgentId?: string
   readonly tokenUsage?: ProjectTaskRecord['tokenUsage']
   readonly turnCount?: number
+  /** Additive (Phase 5): the task branch tip after the task's commit (carried onto `succeeded`). */
+  readonly headCommit?: string
 }
 
 /**
@@ -99,6 +101,7 @@ export function transitionTask(
     if (context.assignedAgentId !== undefined) next.assignedAgentId = context.assignedAgentId
     if (context.tokenUsage !== undefined) next.tokenUsage = context.tokenUsage
     if (context.turnCount !== undefined) next.turnCount = context.turnCount
+    if (context.headCommit !== undefined) next.headCommit = context.headCommit
   }
   if (to === 'failed') {
     const failure = context.error

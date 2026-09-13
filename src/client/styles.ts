@@ -698,6 +698,14 @@ export const DASHBOARD_STYLES = String.raw`
 .dshd-task-summary { margin: 0; font-size: 11px; color: #42506a; line-height: 1.5; overflow-wrap: anywhere; }
 .dshd-task-error { margin: 0; font-size: 11px; color: #c52b3a; line-height: 1.5; overflow-wrap: anywhere; }
 .dshd-task-row .dshd-plain-control { flex-shrink: 0; }
+.dshd-task-branch { padding: 1px 7px; border: 1px solid #ccd5e3; border-radius: 999px; background: #f4f7fc; color: #4a5a75; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.dshd-integration { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 9px 11px; border: 1px solid #ccd5e3; border-radius: 8px; background: #f4f7fc; margin-bottom: 10px; }
+.dshd-integration strong { font-size: 11px; font-weight: 600; color: #1d2b43; }
+.dshd-integration-branch { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; color: #164ec3; background: #eef5fe; border: 1px solid #bcd7f2; border-radius: 4px; padding: 1px 7px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshd-integration-head { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; color: #42506a; }
+.dshd-integration-phase { font-size: 10px; color: #52617a; }
+.dshd-integration-failure { margin: 0; width: 100%; font-size: 10px; color: #c52b3a; line-height: 1.5; overflow-wrap: anywhere; }
+.dshd-integration-nogit { padding: 8px 11px; border: 1px solid #dde4ee; border-radius: 6px; background: #f7f9fc; color: #52617a; font-size: 11px; margin-bottom: 10px; }
 .dshd-plan-dialog { width: min(640px, 100%); }
 .dshd-plan-dialog select { width: 100%; height: 38px; padding: 0 10px; border: 1px solid #cfd7e4; border-radius: 6px; background: #fff; font: inherit; font-size: 12px; }
 .dshd-plan-task-editor { border: 1px solid #d7deea; border-radius: 8px; padding: 10px 11px; display: flex; flex-direction: column; gap: 8px; background: #fff; }

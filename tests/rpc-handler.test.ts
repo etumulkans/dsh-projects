@@ -707,6 +707,88 @@ describe('Dashboard RPC Task execution', () => {
     if (withoutTasks.ok) expect(withoutTasks.value).not.toHaveProperty('tasks')
   })
 
+  it('passes the Phase 5 Git fields through runDetail, run views, and the event stream', async () => {
+    // The RPC layer never re-derives Git state: the view, the task rows, and
+    // the integration events must arrive exactly as the services report them.
+    const integrationBranch = 'dsh/run-a1b2c3d4/integration'
+    const runView = {
+      id: PLAN_RUN_ID,
+      phase: 'succeeded',
+      integrationBranch,
+      integrationHead: '9e8d7c6b5a493827160514233241506978879605',
+      resultSummary: `integrated branch ${integrationBranch} @ 9e8d7c6b`,
+    }
+    const events = [
+      {
+        id: 'e-int-start', runId: PLAN_RUN_ID, type: 'run.integration.started',
+        title: 'Integration started', detail: integrationBranch, seq: 9, at: '2026-08-14T10:00:00.000Z',
+      },
+      {
+        id: 'e-int-done', runId: PLAN_RUN_ID, type: 'run.integration.completed',
+        title: 'Integration completed',
+        detail: '2 task branch(es) into dsh/run-a1b2c3d4/integration @ 9e8d7c6b',
+        seq: 10, at: '2026-08-14T10:00:05.000Z',
+      },
+    ]
+    const gitTask = {
+      id: TASK_ID,
+      planTaskId: 't1',
+      status: 'succeeded',
+      branch: 'dsh/run-a1b2c3d4/t1',
+      baseCommit: '1111111111111111111111111111111111111111',
+      headCommit: '2222222222222222222222222222222222222222',
+    }
+    const taskList = vi.fn(() => [gitTask])
+    const runs = fakeRunService({
+      runDetail: vi.fn(async () => ({ run: runView, events, truncated: false })),
+      listForSnapshot: vi.fn(async () => ({ runs: [runView], total: 1 })),
+    })
+    const tasks = fakeTaskService({ taskList })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const detail = await handleDashboardRpc(
+      runtime, 'runDetail', { runId: PLAN_RUN_ID }, new AbortController().signal, Promise.resolve(), runs, undefined, undefined, tasks,
+    )
+    expect(detail).toMatchObject({
+      ok: true,
+      value: expect.objectContaining({
+        run: expect.objectContaining({ integrationBranch, integrationHead: runView.integrationHead }),
+        tasks: [expect.objectContaining({ branch: gitTask.branch, baseCommit: gitTask.baseCommit, headCommit: gitTask.headCommit })],
+      }),
+    })
+    if (detail.ok) {
+      const value = detail.value as { events?: readonly { type: string; detail?: string }[] }
+      expect(value.events).toEqual(events)
+    }
+
+    // The same fields ride the bounded runs projection (state/refresh).
+    const state = await handleDashboardRpc(runtime, 'state', {}, new AbortController().signal, Promise.resolve(), runs)
+    expect(state).toMatchObject({
+      ok: true,
+      value: expect.objectContaining({ runs: { runs: [expect.objectContaining({ integrationBranch })], total: 1 } }),
+    })
+
+    // A blocked run's integration-failed event (conflict paths) passes through too.
+    const blockedView = { id: PLAN_RUN_ID, phase: 'blocked', suspendedFrom: 'integrating', integrationBranch }
+    const failedEvent = {
+      id: 'e-int-fail', runId: PLAN_RUN_ID, type: 'run.integration.failed',
+      title: 'Integration failed', detail: 'integration conflict: src/clash.ts', seq: 11,
+      at: '2026-08-14T10:01:00.000Z',
+    }
+    const blockedRuns = fakeRunService({ runDetail: vi.fn(async () => ({ run: blockedView, events: [failedEvent], truncated: false })) })
+    const blocked = await handleDashboardRpc(
+      runtime, 'runDetail', { runId: PLAN_RUN_ID }, new AbortController().signal, Promise.resolve(), blockedRuns,
+    )
+    if (blocked.ok) {
+      expect(blocked.value).toMatchObject({
+        run: expect.objectContaining({ phase: 'blocked', suspendedFrom: 'integrating', integrationBranch }),
+        events: [failedEvent],
+      })
+    } else {
+      throw new Error('expected success')
+    }
+  })
+
   it('enriches state and refresh with the worker kind and per-run task counts', async () => {
     const counts = { total: 2, pending: 0, ready: 0, running: 1, blocked: 0, failed: 0, succeeded: 1 }
     const taskCounts = vi.fn((runId: string) => (runId === 'run-1' ? counts : { ...counts, total: 0 }))

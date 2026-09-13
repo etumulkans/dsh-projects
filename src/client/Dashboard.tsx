@@ -591,6 +591,7 @@ export function DashboardSurface({
           onPlanTransition={onPlanTransition}
           onTaskRetry={onTaskRetry}
           worker={snapshot?.runs?.worker}
+          project={snapshot?.catalog.projects.find(candidate => candidate.id === selectedRun.projectId)}
         />
       ) : null}
       {newRunOpen && onCreateRun !== undefined ? (
@@ -2074,7 +2075,7 @@ function RunListView({ summary, runs, global, busy, selectedRunId, onSelect, onN
   )
 }
 
-function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cancelPending, pausePending, resumePending, onRefresh, refreshPending, onLoadDetail, onCoordinateRun, onLoadPlans, onPlanCreate, onPlanTransition, onTaskRetry, worker }: {
+function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cancelPending, pausePending, resumePending, onRefresh, refreshPending, onLoadDetail, onCoordinateRun, onLoadPlans, onPlanCreate, onPlanTransition, onTaskRetry, worker, project }: {
   readonly run: ProjectRunView
   readonly global: boolean
   readonly onClose: () => void
@@ -2100,6 +2101,8 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
   readonly onTaskRetry?: ((taskId: string) => Promise<void>) | undefined
   /** Phase 4: the worker kind the Host can currently execute tasks with. */
   readonly worker?: TaskWorkerKindView | undefined
+  /** Phase 5: the run's project (workspace-isolation notice + integration panel). */
+  readonly project?: ProjectView | undefined
 }) {
   const t = useDashboardTranslation()
   const [detail, setDetail] = useState<RunDetailView | undefined>()
@@ -2248,6 +2251,20 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
   }, [detail?.tasks])
   const taskDepLabel = (depId: string): string => taskById.get(depId)?.planTaskId ?? depId.slice(-6)
   const taskCounts = run.taskCounts
+  // Phase 5: the run's integration panel (spec §8 UI). The client never
+  // imports the node-side Git modules; the branch preview is derived from the
+  // run id (the same deterministic name the Host provisions).
+  const hasTasks = taskCounts !== undefined && taskCounts.total > 0
+  const gitProject = project?.workspaceStrategy === 'worktree'
+  const integrationFailed = events.find(event => event.type === 'run.integration.failed')
+  const integrationBranch = run.integrationBranch ?? (hasTasks ? `dsh/run-${run.id.slice(0, 8)}/integration` : undefined)
+  const integrationVisible = hasTasks && (
+    run.phase === 'integrating' ||
+    run.phase === 'validating' ||
+    (run.phase === 'finalizing' && (gitProject || run.integrationBranch !== undefined)) ||
+    (run.phase === 'succeeded' && run.integrationBranch !== undefined) ||
+    (run.phase === 'blocked' && integrationFailed !== undefined)
+  )
   return (
     <>
       <aside
@@ -2466,6 +2483,20 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
           {taskNotice !== undefined ? (
             <div className="dshd-plan-notice" data-tone={taskNotice.tone} role="status">{taskNotice.message}</div>
           ) : null}
+          {project?.workspaceStrategy === 'controlled-directory' && hasTasks ? (
+            <div className="dshd-integration-nogit" role="status">{t('runs.integration.noGit')}</div>
+          ) : null}
+          {integrationVisible && integrationBranch !== undefined ? (
+            <div className="dshd-integration" role="status">
+              <strong>{t('runs.integration.title')}</strong>
+              <span className="dshd-integration-branch" title={integrationBranch}>{integrationBranch}</span>
+              {run.integrationHead !== undefined ? <span className="dshd-integration-head">{run.integrationHead.slice(0, 7)}</span> : null}
+              <span className="dshd-integration-phase">{runPhaseLabel(run.phase, t)}</span>
+              {integrationFailed !== undefined && integrationFailed.detail !== undefined ? (
+                <p className="dshd-integration-failure">{integrationFailed.detail}</p>
+              ) : null}
+            </div>
+          ) : null}
           {tasks === undefined ? (
             <div className="dshd-inspector-runtime-empty">{detailLoading ? t('runs.tasks.loading') : t('runs.tasks.empty')}</div>
           ) : tasks.length === 0 ? (
@@ -2491,6 +2522,14 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
                             : String(task.attempt)}
                         </span>
                         {task.assignedAgentId !== undefined ? <span className="dshd-task-agent">{task.assignedAgentId.slice(-8)}</span> : null}
+                        {task.branch !== undefined ? (
+                          <span
+                            className="dshd-task-branch"
+                            title={task.headCommit !== undefined ? `${task.branch} @ ${task.headCommit}` : task.branch}
+                          >
+                            {task.branch}{task.headCommit !== undefined ? ` · ${task.headCommit.slice(0, 7)}` : ''}
+                          </span>
+                        ) : null}
                         {task.startedAt !== undefined ? <small>{relativeTime(task.startedAt, t)}</small> : null}
                         {task.tokenUsage !== undefined ? <span className="dshd-task-tokens">{compactNumber(task.tokenUsage.total, t)}</span> : null}
                       </div>
@@ -2950,9 +2989,9 @@ function runSourceLabel(source: ProjectRunView['source'], t: ReturnType<typeof u
 }
 
 function runEventTone(type: ProjectRunEventView['type']): 'green' | 'amber' | 'red' | 'gray' {
-  if (type === 'run.completed' || type === 'plan.completed' || type === 'plan.approved' || type === 'run.coordinator.completed') return 'green'
-  if (type === 'plan.rejected' || type === 'run.coordinator.failed') return 'red'
-  if (type === 'run.created' || type === 'plan.created' || type === 'run.coordinator.started') return 'gray'
+  if (type === 'run.completed' || type === 'plan.completed' || type === 'plan.approved' || type === 'run.coordinator.completed' || type === 'run.integration.completed') return 'green'
+  if (type === 'plan.rejected' || type === 'run.coordinator.failed' || type === 'run.integration.failed') return 'red'
+  if (type === 'run.created' || type === 'plan.created' || type === 'run.coordinator.started' || type === 'run.integration.started') return 'gray'
   return 'amber'
 }
 

@@ -45,6 +45,7 @@ describe('WorkspaceManager lifecycle safety', () => {
   })
 
   it('materializes and removes a real detached worktree for the selected Git project', async () => {
+    // real `git` processes; generous budget under full-suite disk contention
     const parent = await temporaryDirectory()
     const repository = join(parent, 'repository')
     const root = join(repository, '.dsh-dashboard', 'workspaces')
@@ -81,7 +82,7 @@ describe('WorkspaceManager lifecycle safety', () => {
 
     await expect(manager.remove(issue, definition)).resolves.toBe(true)
     await expect(stat(prepared.path)).rejects.toMatchObject({ code: 'ENOENT' })
-  })
+  }, 30_000)
 })
 
 const issue: TaskIssue = {

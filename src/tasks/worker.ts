@@ -18,8 +18,10 @@ export interface TaskWorkerInput {
   readonly projectId: ProjectId
   /** Plugin-generated session id (`dsh-task-<uuid>`), as in Phase 3. */
   readonly sessionId: string
-  /** The project root (Phase 4: shared tree; Phase 5 isolates workspaces). */
+  /** The execution directory (Phase 5: the per-task worktree for Git projects; the project root otherwise). */
   readonly cwd: string
+  /** Additive (Phase 5): the task branch, when `cwd` is a dedicated worktree. */
+  readonly branch?: string
   readonly title: string
   readonly description: string
   readonly role?: string

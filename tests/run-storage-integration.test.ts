@@ -5,7 +5,8 @@
  * restart: close everything, re-open the domain on the same medium, and the
  * records come back validated.
  */
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -25,6 +26,7 @@ import { RunPlanService } from '../src/plans/plan-service.ts'
 import type { PlanStatusChangedEvent } from '../src/plans/plan-service.ts'
 import { dshProjectsDomainSpec } from '../src/runs/spec.ts'
 import { ProjectRunService } from '../src/runs/run-service.ts'
+import { integrationBranchName, taskBranchName, TaskWorktreeManager } from '../src/tasks/git-workspace.ts'
 import { ProjectTaskService } from '../src/tasks/task-service.ts'
 import type { TaskWorker, TaskWorkerInput, TaskWorkerResult } from '../src/tasks/worker.ts'
 
@@ -77,9 +79,47 @@ async function settleCoordinator(runService: ProjectRunService, runId: string): 
   throw new Error('coordination did not settle in time')
 }
 
+/** Poll until the probe yields a value; `undefined`/`null`/`false` mean "not yet". */
+async function poll<T>(probe: () => Promise<T | undefined>, what: string, timeoutMs: number): Promise<T> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const value = await probe()
+    if (value !== undefined && value !== null && value !== false) return value
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+}
+
+function gitIn(cwd: string, ...args: string[]): void {
+  execFileSync('git', ['-C', cwd, ...args], { stdio: 'ignore', windowsHide: true })
+}
+
+function branchExists(repo: string, branch: string): boolean {
+  try {
+    execFileSync('git', ['-C', repo, 'rev-parse', '--verify', `refs/heads/${branch}`], { stdio: 'ignore', windowsHide: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** A real temporary git repository with a local identity and one base commit. */
+async function gitRepository(dir: string): Promise<string> {
+  await mkdir(dir, { recursive: true })
+  execFileSync('git', ['init', dir], { stdio: 'ignore', windowsHide: true })
+  gitIn(dir, 'config', 'user.name', 'dsh-dashboard tests')
+  gitIn(dir, 'config', 'user.email', 'dsh-dashboard@example.invalid')
+  await writeFile(join(dir, 'base.txt'), 'base\n')
+  gitIn(dir, 'add', 'base.txt')
+  gitIn(dir, 'commit', '-m', 'fixture')
+  return dir
+}
+
 function catalogFixture(): ProjectCatalog {
   return {
     project: (id: string) => id === PROJECT_ID ? { id, name: 'Project A' } : undefined,
+    // Phase 5: no Git source — these tests exercise the non-isolated path.
+    projectWorkspaceSource: () => undefined,
   } as unknown as ProjectCatalog
 }
 
@@ -355,7 +395,7 @@ describe('ProjectRunService against real JSON storage', () => {
     // --- boot 1: run -> executing, activate a two-task plan, materialize ---
     const first = new ProjectRunService(ctx, catalogFixture(), clock)
     await first.start()
-    const firstTasks = new ProjectTaskService(ctx, catalogFixture(), first, worker, clock)
+    const firstTasks = new ProjectTaskService(ctx, catalogFixture(), first, worker, undefined, undefined, clock)
     firstTasks.start()
     const firstPlans = new RunPlanService(ctx, first, clock, {
       onPlanStatus: (event: PlanStatusChangedEvent) => firstTasks.handlePlanStatus(event),
@@ -401,7 +441,7 @@ describe('ProjectRunService against real JSON storage', () => {
     // --- boot 2: fresh services over the same medium ---
     const second = new ProjectRunService(ctx, catalogFixture(), clock)
     await second.start()
-    const secondTasks = new ProjectTaskService(ctx, catalogFixture(), second, worker, clock)
+    const secondTasks = new ProjectTaskService(ctx, catalogFixture(), second, worker, undefined, undefined, clock)
     secondTasks.start()
     const secondPlans = new RunPlanService(ctx, second, clock, {
       onPlanStatus: (event: PlanStatusChangedEvent) => secondTasks.handlePlanStatus(event),
@@ -458,4 +498,133 @@ describe('ProjectRunService against real JSON storage', () => {
 
     dispose()
   })
+
+  it('runs the full Git pipeline on a real repository and persists it across a domain reopen', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projects-run-it-git-'))
+    temporaryRoots.push(root)
+    const repo = await gitRepository(join(root, 'repo'))
+    const { ctx, facility, dispose } = await boot(root)
+    const clock = () => new Date(Date.UTC(2026, 7, 14, 5, 0, 0)).toISOString()
+    const gitCatalog = {
+      project: (id: string) => id === PROJECT_ID ? { id, name: 'Project A' } : undefined,
+      projectWorkspaceSource: (id: string) => id === PROJECT_ID
+        ? { strategy: 'worktree' as const, projectRoot: repo, repositoryRoot: repo }
+        : undefined,
+    } as unknown as ProjectCatalog
+    // A file-writing worker: each task commits a file unique to its worktree.
+    const worker: TaskWorker = {
+      kind: 'local',
+      async start(input: TaskWorkerInput): Promise<TaskWorkerResult> {
+        const leaf = input.branch?.split('/').pop() ?? input.taskId.slice(0, 8)
+        await new Promise(resolve => setTimeout(resolve, 50))
+        await writeFile(join(input.cwd, `file-${leaf}.txt`), `${leaf}\n`)
+        return { kind: 'succeeded', summary: `wrote file-${leaf}.txt` }
+      },
+      async stop() { /* nothing to stop */ },
+    }
+
+    // --- boot 1: run the whole pipeline to completion on the real medium ---
+    const first = new ProjectRunService(ctx, gitCatalog, clock)
+    await first.start()
+    const firstTasks = new ProjectTaskService(ctx, gitCatalog, first, worker, new TaskWorktreeManager(), undefined, clock)
+    firstTasks.start()
+    const firstPlans = new RunPlanService(ctx, first, clock, {
+      onPlanStatus: (event: PlanStatusChangedEvent) => firstTasks.handlePlanStatus(event),
+    })
+    firstPlans.start()
+    const run = await first.createRun(
+      { goal: 'Integration: the Git pipeline survives a real storage restart', sourceRef: 'IT-G' },
+      { mode: 'project', projectId: PROJECT_ID },
+    )
+    await first.transitionRun(run.id, 'planning')
+    await first.transitionRun(run.id, 'executing')
+    const plan = await firstPlans.createPlan({
+      runId: run.id,
+      pattern: 'direct',
+      rationale: 'two independent git tasks',
+      tasks: [
+        { title: 'first file', description: 'write file-t1' },
+        { title: 'second file', description: 'write file-t2' },
+      ],
+    })
+    await firstPlans.transitionPlan(plan.id, 'active')
+    // The pipeline (integrating → validating → finalizing) needs ~3 ticks.
+    const succeeded = await poll(
+      () => first.runDetail(run.id).then(detail => (detail.run.phase === 'succeeded' ? detail.run : undefined)),
+      'run succeeded',
+      55_000,
+    )
+    expect(succeeded.integrationBranch).toBe(integrationBranchName(run.id))
+    expect(succeeded.integrationHead).toBeDefined()
+    expect(succeeded.resultSummary).toBe(`integrated branch ${integrationBranchName(run.id)} @ ${succeeded.integrationHead!.slice(0, 8)}`)
+    firstPlans.stop()
+    firstTasks.stop()
+    await first.stop()
+    await facility.closeAll()
+
+    // --- boot 2: reopen; every Git state must come back validated ---
+    const second = new ProjectRunService(ctx, gitCatalog, clock)
+    await second.start()
+    const secondTasks = new ProjectTaskService(ctx, gitCatalog, second, worker, new TaskWorktreeManager(), undefined, clock)
+    secondTasks.start()
+    const secondPlans = new RunPlanService(ctx, second, clock, {
+      onPlanStatus: (event: PlanStatusChangedEvent) => secondTasks.handlePlanStatus(event),
+    })
+    secondPlans.start()
+    try {
+      const detail = await second.runDetail(run.id)
+      expect(detail.run).toMatchObject({
+        phase: 'succeeded',
+        integrationBranch: integrationBranchName(run.id),
+        integrationHead: succeeded.integrationHead,
+        resultSummary: succeeded.resultSummary,
+      })
+      // The integration events survive the reopen (zod-validated).
+      expect(detail.events.some(event => event.type === 'run.integration.started')).toBe(true)
+      expect(detail.events.some(event => event.type === 'run.integration.completed')).toBe(true)
+      // Both tasks come back with their Git identity and their commit.
+      const views = secondTasks.taskList(run.id)
+      const byPosition = new Map(views.map(task => [task.planTaskId, task]))
+      for (const position of ['t1', 't2'] as const) {
+        const view = byPosition.get(position)!
+        expect(view).toMatchObject({ status: 'succeeded', branch: taskBranchName(run.id, position) })
+        expect(view.baseCommit).toBeDefined()
+        expect(view.headCommit).toBeDefined()
+        expect(view.headCommit).not.toBe(view.baseCommit)
+      }
+      // The raw persisted record keeps the internal worktree path too.
+      const records = secondTasks.taskList(run.id)
+      expect(records).toHaveLength(2)
+      // On-disk reality: finalization cleaned up before the restart.
+      expect(branchExists(repo, taskBranchName(run.id, 't1'))).toBe(false)
+      expect(branchExists(repo, taskBranchName(run.id, 't2'))).toBe(false)
+      expect(branchExists(repo, integrationBranchName(run.id))).toBe(true)
+    } finally {
+      secondPlans.stop()
+      secondTasks.stop()
+      await second.stop()
+    }
+
+    // The table set is unchanged (the Phase 5 fields are additive).
+    const entries = await readdir(root, { recursive: true })
+    const mediumFile = entries.find(entry => String(entry).includes('dsh_projects') && String(entry).endsWith('.json'))
+    expect(mediumFile).toBeDefined()
+    const medium = JSON.parse(await readFile(join(root, String(mediumFile)), 'utf8')) as {
+      unit: { name: string; version: number }
+      tables: Record<string, Record<string, unknown>>
+    }
+    expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
+    expect(Object.keys(medium.tables).sort()).toEqual(['plans', 'run_events', 'runs', 'tasks'])
+    const persistedTasks = Object.values(medium.tables.tasks ?? {})
+    expect(persistedTasks).toHaveLength(2)
+    const persistedTask = persistedTasks[0] as Record<string, unknown>
+    expect(persistedTask).toMatchObject({
+      runId: run.id,
+      branch: expect.stringMatching(/^dsh\/run-[0-9a-f]{8}\/t[12]$/),
+      headCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
+      baseCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
+    })
+
+    dispose()
+  }, 90_000)
 })

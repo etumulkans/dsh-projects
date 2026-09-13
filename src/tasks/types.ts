@@ -40,8 +40,14 @@ export interface ProjectTaskRecord {
   readonly status: ProjectTaskStatus
   /** Native agent identity of the last/current execution (session id or member name). */
   readonly assignedAgentId?: string
-  /** RESERVED (Phase 5): per-task workspace; Phase 4 never writes it. */
+  /** Populated (Phase 5): the canonical per-task Git worktree path; absent for non-Git projects. */
   readonly workspaceId?: string
+  /** Additive (Phase 5): the task branch (`dsh/run-<short>/<leaf>`); set with `workspaceId`. */
+  readonly branch?: string
+  /** Additive (Phase 5): the repository `HEAD` at worktree creation (full SHA). */
+  readonly baseCommit?: string
+  /** Additive (Phase 5): the task branch tip after the task's commit (full SHA; = `baseCommit` when the task produced no changes). */
+  readonly headCommit?: string
   readonly acceptanceCriteria: readonly string[]
   /** Executions already STARTED (initial 0; bumps on `ready → running`). */
   readonly attempt: number
@@ -74,6 +80,12 @@ export interface ProjectTaskView {
   readonly dependencies: readonly string[]
   readonly status: ProjectTaskStatus
   readonly assignedAgentId?: string
+  /** Additive (Phase 5): the task branch, when the task runs in its own worktree. */
+  readonly branch?: string
+  /** Additive (Phase 5): the repository `HEAD` at worktree creation. */
+  readonly baseCommit?: string
+  /** Additive (Phase 5): the task branch tip after the task's commit. */
+  readonly headCommit?: string
   readonly acceptanceCriteria: readonly string[]
   readonly attempt: number
   readonly maxAttempts?: number

@@ -44,6 +44,10 @@ export interface ProjectRunRecord {
   readonly coordinatorSessionId?: string
   /** Additive (Phase 4): per-run task concurrency override (default 1). */
   readonly maxConcurrentAgents?: number
+  /** Additive (Phase 5): the integrated branch produced by the run's integration step (survives to `succeeded`). */
+  readonly integrationBranch?: string
+  /** Additive (Phase 5): the integrated branch tip at integration completion (full SHA). */
+  readonly integrationHead?: string
   readonly createdAt: string
   readonly updatedAt: string
   readonly phaseChangedAt: string
@@ -52,7 +56,7 @@ export interface ProjectRunRecord {
 
 /**
  * High-level run event types: Phase 1 run events + Phase 2 plan events +
- * Phase 3 coordinator events + Phase 4 task lifecycle.
+ * Phase 3 coordinator events + Phase 4 task lifecycle + Phase 5 integration.
  * The stream is per-run, so plan, coordinator, task, and run events
  * interleave on one seq.
  */
@@ -75,6 +79,10 @@ export type ProjectRunEventType =
   | 'task.started'
   | 'task.completed'
   | 'task.failed'
+  // Additive (Phase 5): the run's integration step (spec §3.3).
+  | 'run.integration.started'
+  | 'run.integration.completed'
+  | 'run.integration.failed'
 
 /** High-level Run event; detailed agent activity stays in Harness session logs. */
 export interface ProjectRunEventRecord {
@@ -109,6 +117,10 @@ export interface ProjectRunView {
   readonly coordinatorSessionId?: string
   /** Additive (Phase 4): per-run task concurrency override (default 1). */
   readonly maxConcurrentAgents?: number
+  /** Additive (Phase 5): the integrated branch, when the run produced one. */
+  readonly integrationBranch?: string
+  /** Additive (Phase 5): the integrated branch tip at integration completion. */
+  readonly integrationHead?: string
   /** Additive (Phase 4): per-status task counts for this run, when the Host has a task service. */
   readonly taskCounts?: TaskCountsView
   readonly createdAt: string

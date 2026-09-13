@@ -28,8 +28,9 @@ export const TASK_STATUSES = [
 
 /**
  * Durable task record (spec §3.2). `awaiting-review` is declared for schema
- * completeness (master spec §11) but unreachable in Phase 4; `workspaceId`
- * is reserved for Phase 5 and never written by Phase 4.
+ * completeness (master spec §11) but unreachable until Phase 7; Phase 5
+ * populates `workspaceId`/`branch`/`baseCommit`/`headCommit` for Git-isolated
+ * tasks (all optional — non-Git projects leave them absent).
  */
 export const projectTaskRecordSchema = z.object({
   id,
@@ -43,6 +44,10 @@ export const projectTaskRecordSchema = z.object({
   status: z.enum(TASK_STATUSES),
   assignedAgentId: nonBlank.optional(),
   workspaceId: nonBlank.optional(),
+  // Additive (Phase 5): per-task Git isolation metadata (spec §3.1).
+  branch: nonBlank.optional(),
+  baseCommit: nonBlank.optional(),
+  headCommit: nonBlank.optional(),
   acceptanceCriteria: z.array(nonBlank).default([]),
   attempt: z.number().int().min(0),
   maxAttempts: z.number().int().min(1).optional(),

@@ -1,12 +1,34 @@
-import { describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { mkdir, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { DomainError, type Domain, type KvTable } from '@deepseek-ai/dsh-storage-domain'
 import type { ProjectCatalog } from '../src/catalog/catalog.ts'
 import { RunPlanService } from '../src/plans/plan-service.ts'
 import { dshProjectsDomainSpec } from '../src/runs/spec.ts'
 import { ProjectRunService } from '../src/runs/run-service.ts'
+import { DashboardDomainError } from '../src/runtime/errors.ts'
 import type { ProjectTaskRecord } from '../src/tasks/types.ts'
 import { ProjectTaskService } from '../src/tasks/task-service.ts'
+import {
+  integrationBranchName,
+  integrationWorktreePath,
+  taskBranchName,
+  taskWorktreePath,
+  type CommitTaskWorkInput,
+  type ProvisionTaskWorktreeInput,
+  type RemoveBranchInput,
+  type RemoveTaskWorktreeInput,
+  TaskWorktreeManager,
+} from '../src/tasks/git-workspace.ts'
+import {
+  MergeInOrderStrategy,
+  type IntegrationInput,
+  type IntegrationOutcome,
+  type IntegrationStrategy,
+} from '../src/tasks/integration.ts'
 import { UnavailableWorker, type TaskWorker, type TaskWorkerInput, type TaskWorkerResult } from '../src/tasks/worker.ts'
 
 const PROJECT_ID = '123e4567-e89b-42d3-a456-426614174000'
@@ -52,7 +74,7 @@ class MemoryStorage {
 
 interface HeldWorker {
   readonly worker: TaskWorker
-  readonly starts: Array<{ taskId: string; attempt: number; sessionId: string }>
+  readonly starts: Array<{ taskId: string; attempt: number; sessionId: string; cwd: string; branch?: string }>
   readonly stopped: string[]
   release(taskId: string, result?: TaskWorkerResult): void
 }
@@ -61,12 +83,18 @@ interface HeldWorker {
 function heldWorker(): HeldWorker {
   const outcomes = new Map<string, TaskWorkerResult>()
   const pending = new Map<string, (result: TaskWorkerResult) => void>()
-  const starts: Array<{ taskId: string; attempt: number; sessionId: string }> = []
+  const starts: Array<{ taskId: string; attempt: number; sessionId: string; cwd: string; branch?: string }> = []
   const stopped: string[] = []
   const worker: TaskWorker = {
     kind: 'local',
     start(input: TaskWorkerInput): Promise<TaskWorkerResult> {
-      starts.push({ taskId: input.taskId, attempt: input.attempt, sessionId: input.sessionId })
+      starts.push({
+        taskId: input.taskId,
+        attempt: input.attempt,
+        sessionId: input.sessionId,
+        cwd: input.cwd,
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
+      })
       return new Promise(resolve => {
         pending.set(input.taskId, result => resolve(result))
       })
@@ -104,6 +132,169 @@ async function waitFor<T>(probe: () => (T | undefined) | Promise<T | undefined>,
   }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 5 Git fixtures: a real temporary repository plus a recording
+// worktree manager (real behavior, observable calls, injected failures).
+// ---------------------------------------------------------------------------
+
+const temporaryRoots: string[] = []
+
+afterEach(async () => {
+  const roots = temporaryRoots.splice(0)
+  for (const root of roots) {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+function gitIn(cwd: string, ...args: string[]): string {
+  return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', windowsHide: true })
+}
+
+/** A real temporary git repository with a local identity and one base commit. */
+async function gitRepository(): Promise<string> {
+  const root = join(tmpdir(), `dsh-task-git-${Date.now()}-${Math.floor(Math.random() * 1e6).toString(36)}`)
+  const repo = join(root, 'repo')
+  await mkdir(repo, { recursive: true })
+  temporaryRoots.push(root)
+  execFileSync('git', ['init', repo], { stdio: 'ignore', windowsHide: true })
+  gitIn(repo, 'config', 'user.name', 'dsh-dashboard tests')
+  gitIn(repo, 'config', 'user.email', 'dsh-dashboard@example.invalid')
+  await writeFile(join(repo, 'base.txt'), 'base\n')
+  gitIn(repo, 'add', 'base.txt')
+  gitIn(repo, 'commit', '-m', 'fixture')
+  return repo
+}
+
+function branchExists(repo: string, branch: string): boolean {
+  try {
+    execFileSync('git', ['-C', repo, 'rev-parse', '--verify', `refs/heads/${branch}`], { stdio: 'ignore', windowsHide: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** The real TaskWorktreeManager with call recording and deterministic failures. */
+class RecordingWorktreeManager extends TaskWorktreeManager {
+  readonly provisions: Array<{ runId: string; planTaskId: string }> = []
+  readonly commits: Array<{ path: string; planTaskId: string }> = []
+  readonly removals: Array<{ path: string }> = []
+  readonly branchRemovals: Array<{ branch: string }> = []
+  provisionFailures = 0
+  commitFailures = 0
+
+  override async provisionTaskWorktree(input: ProvisionTaskWorktreeInput) {
+    this.provisions.push({ runId: input.runId, planTaskId: input.planTaskId })
+    if (this.provisionFailures > 0) {
+      this.provisionFailures -= 1
+      throw new DashboardDomainError('task.worktreeFailed', 'injected provisioning failure')
+    }
+    return super.provisionTaskWorktree(input)
+  }
+
+  override async commitTaskWork(input: CommitTaskWorkInput) {
+    this.commits.push({ path: input.path, planTaskId: input.planTaskId })
+    if (this.commitFailures > 0) {
+      this.commitFailures -= 1
+      throw new DashboardDomainError('task.commitFailed', 'injected commit failure')
+    }
+    return super.commitTaskWork(input)
+  }
+
+  override async removeTaskWorktree(input: RemoveTaskWorktreeInput) {
+    this.removals.push({ path: input.path })
+    return super.removeTaskWorktree(input)
+  }
+
+  override async removeBranch(input: RemoveBranchInput) {
+    this.branchRemovals.push({ branch: input.branch })
+    return super.removeBranch(input)
+  }
+}
+
+interface WorkerInvocation {
+  readonly cwd: string
+  readonly branch?: string
+  readonly attempt: number
+  readonly startedAt: number
+  readonly finishedAt: number
+}
+
+/**
+ * A worker doing real dirty work in the given cwd: it writes a per-task,
+ * per-attempt file (the branch leaf distinguishes tasks), so the commit
+ * contract commits a real change. `delayMs` widens the window for the
+ * parallelism proofs.
+ */
+function writingWorker(invocations: WorkerInvocation[] = [], delayMs = 300): TaskWorker {
+  return {
+    kind: 'local',
+    async start(input: TaskWorkerInput): Promise<TaskWorkerResult> {
+      const leaf = input.branch?.split('/').pop() ?? input.taskId.slice(0, 8)
+      const startedAt = Date.now()
+      await new Promise(resolve => setTimeout(resolve, delayMs))
+      await writeFile(join(input.cwd, `work-${leaf}-a${input.attempt}.txt`), 'work\n')
+      invocations.push({
+        cwd: input.cwd,
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
+        attempt: input.attempt,
+        startedAt,
+        finishedAt: Date.now(),
+      })
+      return { kind: 'succeeded', summary: `wrote work-${leaf}-a${input.attempt}.txt` }
+    },
+    async stop() { /* nothing to stop */ },
+  }
+}
+
+/** Every task writes the same file with task-specific content → add/add conflict. */
+function sharedFileWorker(): TaskWorker {
+  return {
+    kind: 'local',
+    async start(input: TaskWorkerInput): Promise<TaskWorkerResult> {
+      const leaf = input.branch?.split('/').pop() ?? input.taskId.slice(0, 8)
+      await new Promise(resolve => setTimeout(resolve, 300))
+      await writeFile(join(input.cwd, 'shared.txt'), `${leaf}\n`)
+      return { kind: 'succeeded', summary: 'wrote shared.txt' }
+    },
+    async stop() { /* nothing to stop */ },
+  }
+}
+
+/**
+ * First `run()` is a pure fake conflict outcome (no Git touched — proves the
+ * strategy seam accepts injected outcomes); the second delegates to the real
+ * merge-in-order strategy.
+ */
+class ConflictOnceStrategy implements IntegrationStrategy {
+  readonly name = 'conflict-once'
+  calls = 0
+  private readonly inner = new MergeInOrderStrategy()
+
+  async run(input: IntegrationInput): Promise<IntegrationOutcome> {
+    this.calls += 1
+    if (this.calls === 1) {
+      return {
+        status: 'conflict',
+        integratedBranch: integrationBranchName(input.runId),
+        merged: [],
+        skipped: input.tasks.map(task => task.planTaskId),
+        conflictingPaths: ['src/clash.ts'],
+      }
+    }
+    return this.inner.run(input)
+  }
+}
+
 interface Fixture {
   ctx: Context
   runService: ProjectRunService
@@ -118,6 +309,12 @@ async function fixture(overrides: {
   readonly maxConcurrentAgents?: number
   readonly worker?: TaskWorker
   readonly retryClock?: () => number
+  /** Phase 5: real TaskWorktreeManager for Git-isolation tests (absent = Phase 4 behavior). */
+  readonly worktreeManager?: TaskWorktreeManager
+  /** Phase 5: deterministic integration strategy (absent = service default merge-in-order). */
+  readonly integrationStrategy?: IntegrationStrategy
+  /** Phase 5: the run's project workspace source (absent = controlled-directory). */
+  readonly workspaceSource?: { readonly strategy: 'worktree'; readonly projectRoot: string; readonly repositoryRoot: string }
 } = {}): Promise<Fixture> {
   const storage = new MemoryStorage()
   const emit = vi.fn()
@@ -142,6 +339,10 @@ async function fixture(overrides: {
   } as unknown as Context
   const catalog = {
     project: (id: string) => id === PROJECT_ID ? { id, name: 'Project A', root: PROJECT_ROOT } : undefined,
+    projectWorkspaceSource: (id: string) => id === PROJECT_ID
+      ? overrides.workspaceSource
+        ?? { strategy: 'controlled-directory' as const, projectRoot: PROJECT_ROOT }
+      : undefined,
   } as unknown as ProjectCatalog
   const clock = () => NOW
   const runService = new ProjectRunService(ctx, catalog, clock)
@@ -163,6 +364,8 @@ async function fixture(overrides: {
     catalog,
     runService,
     held.worker,
+    overrides.worktreeManager,
+    overrides.integrationStrategy,
     clock,
     overrides.retryClock ?? (() => Date.now()),
   )
@@ -194,7 +397,7 @@ describe('ProjectTaskService (spec §7)', () => {
     const catalog = { project: () => undefined } as unknown as ProjectCatalog
     const runService = new ProjectRunService(ctx, catalog, () => NOW)
     await runService.start()
-    const service = new ProjectTaskService(ctx, catalog, runService, new UnavailableWorker(), () => NOW)
+    const service = new ProjectTaskService(ctx, catalog, runService, new UnavailableWorker(), undefined, undefined, () => NOW)
     await expect(service.taskRetry('unknown')).rejects.toMatchObject({ dashboardCode: 'task.notStarted' })
     expect(() => service.taskList('run-1')).toThrow(/task\.notStarted|not started/i)
     await runService.stop()
@@ -291,13 +494,20 @@ describe('ProjectTaskService (spec §7)', () => {
     expect(detail.events.map(event => event.type)).toEqual(expect.arrayContaining([
       'tasks.materialized', 'task.started', 'task.completed', 'task.ready', 'task.started', 'task.completed',
     ]))
-    // the run stays executing (Phase 5 owns the all-done coupling — intent §3)
+    // Phase 5 owns the all-done coupling (spec §3.3): this fixture's project
+    // has no Git source, so the run moves executing -> finalizing ->
+    // succeeded as the completion pipeline advances it.
+    await waitFor(() => {
+      const current = fx.runService.domain().table('runs').get(fx.runId)!
+      return current.phase === 'succeeded' ? current : undefined
+    }, 'run succeeded', 10_000)
     const after = fx.runService.domain().table('runs').get(fx.runId)!
-    expect(after.phase).toBe('executing')
+    expect(after.phase).toBe('succeeded')
+    expect(after.resultSummary).toBeDefined()
     fx.planService.stop()
     fx.taskService.stop()
     await fx.runService.stop()
-  })
+  }, 15_000)
 
   it('retries a failed task with backoff until the attempt budget is exhausted', async () => {
     let clockMs = Date.parse('2026-09-12T08:00:00.000Z')
@@ -622,4 +832,363 @@ describe('ProjectTaskService (spec §7)', () => {
     fx.taskService.stop()
     await fx.runService.stop()
   })
+})
+
+describe('ProjectTaskService Phase 5 Git pipeline (spec §6/§7/§12)', () => {
+  it('provisions a worktree per task, commits on success, integrates, verifies, and finalizes to succeeded', async () => {
+    const repo = await gitRepository()
+    const manager = new RecordingWorktreeManager()
+    const invocations: WorkerInvocation[] = []
+    const fx = await fixture({
+      worktreeManager: manager,
+      worker: writingWorker(invocations),
+      workspaceSource: { strategy: 'worktree', projectRoot: repo, repositoryRoot: repo },
+    })
+    const plan = await fx.planService.createPlan({
+      runId: fx.runId,
+      pattern: 'direct',
+      rationale: 'git pipeline',
+      tasks: [{ title: 'a', description: 'a' }],
+    })
+    await fx.planService.transitionPlan(plan.id, 'active')
+    await waitFor(() => (invocations.length === 1 ? invocations[0] : undefined), 'worker dispatch', 10_000)
+    // the worker ran in the per-task worktree on the task branch
+    expect(invocations[0]!.cwd).toContain(join('worktree', `run-${fx.runId.slice(0, 8)}`, 't1'))
+    expect(invocations[0]!.branch).toBe(taskBranchName(fx.runId, 't1'))
+    // the task record carries the Git identity (the view omits the internal
+    // workspaceId, so the canonical path is checked on the raw record)
+    const task = fx.taskService.taskList(fx.runId)[0]!
+    expect(task.branch).toBe(taskBranchName(fx.runId, 't1'))
+    expect(task.baseCommit).toBeDefined()
+    const taskRecord = fx.runService.domain().table('tasks').get(task.id) as ProjectTaskRecord
+    expect(taskRecord.workspaceId).toBe(invocations[0]!.cwd)
+    // the commit contract ran: dirty tree → real commit → headCommit ≠ baseCommit
+    await waitFor(() => {
+      const t = fx.taskService.taskList(fx.runId)[0]!
+      return t.status === 'succeeded' && t.headCommit !== undefined && t.headCommit !== t.baseCommit ? t : undefined
+    }, 'task succeeded with a commit', 20_000)
+    expect(manager.commits).toHaveLength(1)
+    // the completion pipeline: integrating → validating → finalizing → succeeded
+    const run = await waitFor(() => {
+      const current = fx.runService.domain().table('runs').get(fx.runId)!
+      return current.phase === 'succeeded' ? current : undefined
+    }, 'run succeeded', 40_000)
+    expect(run.integrationBranch).toBe(integrationBranchName(fx.runId))
+    expect(run.integrationHead).toBeDefined()
+    expect(run.resultSummary).toBe(`integrated branch ${integrationBranchName(fx.runId)} @ ${run.integrationHead!.slice(0, 8)}`)
+    const detail = await fx.runService.runDetail(fx.runId)
+    const events = detail.events.map(event => event.type)
+    expect(events).toContain('run.integration.started')
+    expect(events).toContain('run.integration.completed')
+    // finalization cleaned up: task branch + both worktrees gone; the
+    // integration branch is kept for the operator
+    expect(manager.branchRemovals).toEqual([{ branch: taskBranchName(fx.runId, 't1') }])
+    expect(branchExists(repo, taskBranchName(fx.runId, 't1'))).toBe(false)
+    expect(branchExists(repo, integrationBranchName(fx.runId))).toBe(true)
+    expect(await pathExists(taskWorktreePath(repo, fx.runId, 't1'))).toBe(false)
+    expect(await pathExists(integrationWorktreePath(repo, fx.runId))).toBe(false)
+    // the succeeded task's worktree was already removed right after its commit
+    expect(manager.removals.map(entry => entry.path)).toContain(invocations[0]!.cwd)
+    fx.planService.stop()
+    fx.taskService.stop()
+    await fx.runService.stop()
+  }, 45_000)
+
+  it('blocks on an integration conflict and resumes to succeeded on the next attempt', async () => {
+    const repo = await gitRepository()
+    const strategy = new ConflictOnceStrategy()
+    const fx = await fixture({
+      worktreeManager: new RecordingWorktreeManager(),
+      worker: writingWorker(),
+      integrationStrategy: strategy,
+      workspaceSource: { strategy: 'worktree', projectRoot: repo, repositoryRoot: repo },
+    })
+    const plan = await fx.planService.createPlan({
+      runId: fx.runId,
+      pattern: 'direct',
+      rationale: 'conflict then resume',
+      tasks: [
+        { title: 'a', description: 'a' },
+        { title: 'b', description: 'b' },
+      ],
+    })
+    await fx.planService.transitionPlan(plan.id, 'active')
+    // first attempt: the fake conflict → blocked, resumable from `integrating`
+    const blocked = await waitFor(() => {
+      const current = fx.runService.domain().table('runs').get(fx.runId)!
+      return current.phase === 'blocked' ? current : undefined
+    }, 'run blocked', 25_000)
+    expect(blocked.suspendedFrom).toBe('integrating')
+    // the record carries no error on `blocked` (only `failed` transitions
+    // persist one); the conflict detail lives on the run event
+    expect(strategy.calls).toBe(1)
+    let detail = await fx.runService.runDetail(fx.runId)
+    const failedEvents = detail.events.filter(event => event.type === 'run.integration.failed')
+    expect(failedEvents).toHaveLength(1)
+    expect(failedEvents[0]!.detail).toContain('src/clash.ts')
+    // the task branches survive the blocked attempt (a fresh re-merge uses them)
+    expect(branchExists(repo, taskBranchName(fx.runId, 't1'))).toBe(true)
+    expect(branchExists(repo, taskBranchName(fx.runId, 't2'))).toBe(true)
+    // the operator resumes via the existing run transition path; the second
+    // attempt is a real merge
+    await fx.runService.transitionRun(fx.runId, 'integrating')
+    const run = await waitFor(() => {
+      const current = fx.runService.domain().table('runs').get(fx.runId)!
+      return current.phase === 'succeeded' ? current : undefined
+    }, 'run succeeded after resume', 40_000)
+    expect(strategy.calls).toBe(2)
+    expect(run.integrationBranch).toBe(integrationBranchName(fx.runId))
+    detail = await fx.runService.runDetail(fx.runId)
+    const started = detail.events.filter(event => event.type === 'run.integration.started')
+    const completed = detail.events.filter(event => event.type === 'run.integration.completed')
+    expect(started).toHaveLength(2)
+    expect(completed).toHaveLength(1)
+    expect(branchExists(repo, integrationBranchName(fx.runId))).toBe(true)
+    fx.planService.stop()
+    fx.taskService.stop()
+    await fx.runService.stop()
+  }, 45_000)
+
+  it('advances from a persisted integration-completed event without re-merging (crash safety)', async () => {
+    const repo = await gitRepository()
+    const fx = await fixture({
+      worktreeManager: new RecordingWorktreeManager(),
+      worker: writingWorker(),
+      workspaceSource: { strategy: 'worktree', projectRoot: repo, repositoryRoot: repo },
+    })
+    // Simulate a crash between the persisted `run.integration.completed` event
+    // and the phase move: reject the first transition to `validating`.
+    let rejectValidatingOnce = true
+    const original = fx.runService.transitionRun.bind(fx.runService)
+    const spy = vi.spyOn(fx.runService, 'transitionRun').mockImplementation(((runId, to, options) => {
+      if (rejectValidatingOnce && to === 'validating') {
+        rejectValidatingOnce = false
+        return Promise.reject(new Error('simulated crash before the phase move'))
+      }
+      return original(runId, to, options)
+    }) as typeof fx.runService.transitionRun)
+    const plan = await fx.planService.createPlan({
+      runId: fx.runId,
+      pattern: 'direct',
+      rationale: 'crash safety',
+      tasks: [{ title: 'a', description: 'a' }],
+    })
+    await fx.planService.transitionPlan(plan.id, 'active')
+    const run = await waitFor(() => {
+      const current = fx.runService.domain().table('runs').get(fx.runId)!
+      return current.phase === 'succeeded' ? current : undefined
+    }, 'run succeeded after simulated crash', 40_000)
+    spy.mockRestore()
+    expect(run.integrationBranch).toBe(integrationBranchName(fx.runId))
+    const detail = await fx.runService.runDetail(fx.runId)
+    const started = detail.events.filter(event => event.type === 'run.integration.started')
+    const completed = detail.events.filter(event => event.type === 'run.integration.completed')
+    // exactly one merge attempt: the crash-safety leg verified the persisted
+    // integration and advanced without re-running the strategy
+    expect(started).toHaveLength(1)
+    expect(completed).toHaveLength(1)
+    expect(branchExists(repo, integrationBranchName(fx.runId))).toBe(true)
+    fx.planService.stop()
+    fx.taskService.stop()
+    await fx.runService.stop()
+  }, 45_000)
+
+  it('settles a provisioning failure as a retryable failure and re-provisions on retry', async () => {
+    const repo = await gitRepository()
+    const manager = new RecordingWorktreeManager()
+    manager.provisionFailures = 1
+    const fx = await fixture({
+      worktreeManager: manager,
+      worker: writingWorker(),
+      workspaceSource: { strategy: 'worktree', projectRoot: repo, repositoryRoot: repo },
+    })
+    const plan = await fx.planService.createPlan({
+      runId: fx.runId,
+      pattern: 'direct',
+      rationale: 'provisioning failure',
+      tasks: [{ title: 'a', description: 'a' }],
+    })
+    await fx.planService.transitionPlan(plan.id, 'active')
+    // attempt 1: provisioning fails → synthetic failed result → `ready` (retryable)
+    await waitFor(() => {
+      const t = fx.taskService.taskList(fx.runId)[0]!
+      return t.attempt >= 2 || t.status === 'succeeded' ? t : undefined
+    }, 'retry started', 25_000)
+    expect(manager.provisions).toHaveLength(2)
+    expect(manager.provisions[0]).toEqual({ runId: fx.runId, planTaskId: 't1' })
+    // attempt 2 succeeds end-to-end through the pipeline
+    const run = await waitFor(() => {
+      const current = fx.runService.domain().table('runs').get(fx.runId)!
+      return current.phase === 'succeeded' ? current : undefined
+    }, 'run succeeded', 40_000)
+    expect(run.integrationBranch).toBe(integrationBranchName(fx.runId))
+    const detail = await fx.runService.runDetail(fx.runId)
+    // one initial ready (dependency transition) plus one retry-ready
+    const retryEvents = detail.events.filter(
+      event => event.type === 'task.ready' && (event.detail ?? '').includes('retry after failure'),
+    )
+    expect(retryEvents).toHaveLength(1)
+    fx.planService.stop()
+    fx.taskService.stop()
+    await fx.runService.stop()
+  }, 45_000)
+
+  it('keeps the worktree on a commit failure and reuses it without reset on retry', async () => {
+    const repo = await gitRepository()
+    const manager = new RecordingWorktreeManager()
+    manager.commitFailures = 1
+    const fx = await fixture({
+      worktreeManager: manager,
+      worker: writingWorker(),
+      workspaceSource: { strategy: 'worktree', projectRoot: repo, repositoryRoot: repo },
+    })
+    const plan = await fx.planService.createPlan({
+      runId: fx.runId,
+      pattern: 'direct',
+      rationale: 'commit failure',
+      tasks: [{ title: 'a', description: 'a' }],
+    })
+    await fx.planService.transitionPlan(plan.id, 'active')
+    const run = await waitFor(() => {
+      const current = fx.runService.domain().table('runs').get(fx.runId)!
+      return current.phase === 'succeeded' ? current : undefined
+    }, 'run succeeded', 45_000)
+    expect(run.integrationBranch).toBe(integrationBranchName(fx.runId))
+    // both attempts provisioned (the second was an idempotent reuse) and the
+    // commit ran on both attempts (the first injected, the second real)
+    expect(manager.provisions).toHaveLength(2)
+    expect(manager.commits).toHaveLength(2)
+    const task = fx.taskService.taskList(fx.runId)[0]!
+    expect(task.attempt).toBe(2)
+    expect(task.headCommit).toBeDefined()
+    expect(task.headCommit).not.toBe(task.baseCommit)
+    // the reused worktree kept attempt 1's uncommitted file: the integrated
+    // tree contains the files of both attempts (no reset on reuse)
+    const files = gitIn(repo, 'ls-tree', '-r', '--name-only', integrationBranchName(fx.runId)).split('\n').filter(Boolean)
+    expect(files).toContain('work-t1-a1.txt')
+    expect(files).toContain('work-t1-a2.txt')
+    fx.planService.stop()
+    fx.taskService.stop()
+    await fx.runService.stop()
+  }, 60_000)
+
+  it('keeps Phase 4 behavior for non-Git projects even when a manager is mounted', async () => {
+    const manager = new RecordingWorktreeManager()
+    const fx = await fixture({ worktreeManager: manager })
+    const plan = await fx.planService.createPlan({
+      runId: fx.runId,
+      pattern: 'direct',
+      rationale: 'non-git with manager',
+      tasks: [{ title: 'a', description: 'a' }],
+    })
+    await fx.planService.transitionPlan(plan.id, 'active')
+    const first = await waitFor(() => fx.held.starts.at(-1), 'task start')
+    expect(first!.cwd).toBe(PROJECT_ROOT) // the shared tree — no worktree
+    expect(first!.branch).toBeUndefined()
+    fx.held.release(first!.taskId, { kind: 'succeeded', summary: 'done' })
+    const run = await waitFor(() => {
+      const current = fx.runService.domain().table('runs').get(fx.runId)!
+      return current.phase === 'succeeded' ? current : undefined
+    }, 'run succeeded', 10_000)
+    expect(run.resultSummary).toBe('all tasks succeeded (no Git isolation)')
+    expect(run.integrationBranch).toBeUndefined()
+    const task = fx.taskService.taskList(fx.runId)[0]!
+    expect(task).toMatchObject({ status: 'succeeded' })
+    expect(task.branch).toBeUndefined()
+    expect(task.headCommit).toBeUndefined()
+    const taskRecord = fx.runService.domain().table('tasks').get(task.id) as ProjectTaskRecord
+    expect(taskRecord.workspaceId).toBeUndefined()
+    // the manager was never touched
+    expect(manager.provisions).toHaveLength(0)
+    expect(manager.commits).toHaveLength(0)
+    expect(manager.removals).toHaveLength(0)
+    expect(manager.branchRemovals).toHaveLength(0)
+    fx.planService.stop()
+    fx.taskService.stop()
+    await fx.runService.stop()
+  }, 15_000)
+
+  it('integrates disjoint parallel tasks (maxConcurrentAgents 2) into one branch', async () => {
+    const repo = await gitRepository()
+    const manager = new RecordingWorktreeManager()
+    const invocations: WorkerInvocation[] = []
+    const fx = await fixture({
+      maxConcurrentAgents: 2,
+      worktreeManager: manager,
+      worker: writingWorker(invocations, 800),
+      workspaceSource: { strategy: 'worktree', projectRoot: repo, repositoryRoot: repo },
+    })
+    const plan = await fx.planService.createPlan({
+      runId: fx.runId,
+      pattern: 'direct',
+      rationale: 'parallel disjoint',
+      tasks: [
+        { title: 'a', description: 'a' },
+        { title: 'b', description: 'b' },
+      ],
+    })
+    await fx.planService.transitionPlan(plan.id, 'active')
+    await waitFor(() => (invocations.length === 2 ? invocations.length : undefined), 'both dispatched', 10_000)
+    // real parallelism in separate worktrees: the second task started before
+    // the first finished
+    const starts = invocations.map(invocation => invocation.startedAt).sort((a, b) => a - b)
+    const finishes = invocations.map(invocation => invocation.finishedAt).sort((a, b) => a - b)
+    expect(starts[1]!).toBeLessThan(finishes[0]!)
+    expect(new Set(invocations.map(invocation => invocation.cwd)).size).toBe(2)
+    expect(invocations.map(invocation => invocation.branch).sort()).toEqual(
+      [taskBranchName(fx.runId, 't1'), taskBranchName(fx.runId, 't2')].sort(),
+    )
+    const run = await waitFor(() => {
+      const current = fx.runService.domain().table('runs').get(fx.runId)!
+      return current.phase === 'succeeded' ? current : undefined
+    }, 'run succeeded', 40_000)
+    expect(run.integrationBranch).toBe(integrationBranchName(fx.runId))
+    // the integration branch contains both tasks' files
+    const files = gitIn(repo, 'ls-tree', '-r', '--name-only', integrationBranchName(fx.runId)).split('\n').filter(Boolean)
+    expect(files).toContain('work-t1-a1.txt')
+    expect(files).toContain('work-t2-a1.txt')
+    fx.planService.stop()
+    fx.taskService.stop()
+    await fx.runService.stop()
+  }, 45_000)
+
+  it('lets parallel tasks with conflicting edits succeed in their worktrees and blocks at integration', async () => {
+    const repo = await gitRepository()
+    const fx = await fixture({
+      maxConcurrentAgents: 2,
+      worktreeManager: new RecordingWorktreeManager(),
+      worker: sharedFileWorker(),
+      workspaceSource: { strategy: 'worktree', projectRoot: repo, repositoryRoot: repo },
+    })
+    const plan = await fx.planService.createPlan({
+      runId: fx.runId,
+      pattern: 'direct',
+      rationale: 'parallel conflict',
+      tasks: [
+        { title: 'a', description: 'a' },
+        { title: 'b', description: 'b' },
+      ],
+    })
+    await fx.planService.transitionPlan(plan.id, 'active')
+    const blocked = await waitFor(() => {
+      const current = fx.runService.domain().table('runs').get(fx.runId)!
+      return current.phase === 'blocked' ? current : undefined
+    }, 'run blocked', 30_000)
+    // both tasks succeeded in their isolated worktrees (the Phase 4
+    // concurrency rationale); the conflict only surfaces at integration
+    const tasks = fx.taskService.taskList(fx.runId)
+    expect(tasks.every(task => task.status === 'succeeded')).toBe(true)
+    expect(blocked.suspendedFrom).toBe('integrating')
+    const detail = await fx.runService.runDetail(fx.runId)
+    const failed = detail.events.filter(event => event.type === 'run.integration.failed')
+    expect(failed).toHaveLength(1)
+    expect(failed[0]!.detail).toContain('shared.txt')
+    // the conflicted merge was aborted: the task branches are intact for a
+    // resumed re-merge
+    expect(branchExists(repo, taskBranchName(fx.runId, 't1'))).toBe(true)
+    expect(branchExists(repo, taskBranchName(fx.runId, 't2'))).toBe(true)
+    fx.planService.stop()
+    fx.taskService.stop()
+    await fx.runService.stop()
+  }, 45_000)
 })

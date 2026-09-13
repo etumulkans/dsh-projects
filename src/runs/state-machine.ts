@@ -100,6 +100,10 @@ export function transitionRun(
     // Phase 3: the coordinator session reference survives run phase
     // transitions (only the Coordinator service sets it).
     ...(run.coordinatorSessionId === undefined ? {} : { coordinatorSessionId: run.coordinatorSessionId }),
+    // Phase 5: the integration result survives run phase transitions (the
+    // integration step sets it; finalizing and succeeded keep it).
+    ...(run.integrationBranch === undefined ? {} : { integrationBranch: run.integrationBranch }),
+    ...(run.integrationHead === undefined ? {} : { integrationHead: run.integrationHead }),
     createdAt: run.createdAt,
     updatedAt: context.now,
     phaseChangedAt: context.now,
