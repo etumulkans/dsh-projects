@@ -1,5 +1,76 @@
 # Maintenance Log — DSH Projects
 
+## Cycle 4 (post v0.11.0 deploy) — 2026-09-13
+
+**Status: no incidents.** Phase 5 (Git isolation + integration + run
+completion pipeline) released as v0.11.0 (commit `e2ca05f`, build `c44e054`,
+test report `51416f6`). This cycle shipped **directly on local `main` with no
+fork PR** (the user drove the loop gate-by-gate in-session; `main` is 9
+commits ahead of `origin/main`). A release marker branch
+`dsh-projects-phase-5` (at `c44e054`) was created for consistency with the
+Phase 3/4 markers.
+
+### Post-deploy verification
+
+- `pnpm run typecheck` — clean
+- `pnpm run build` — clean (dual tsdown, host + client)
+- `pnpm run test` — 336 passed / 3 failed (339 total); the 3 failures are the
+  pre-existing, documented macOS tmpdir environment failures in
+  `tests/project-catalog.test.ts` (`/var/folders` vs `/private/var/folders`
+  realpath mismatch), present before Phase 5 and unrelated to it. Every Phase 5
+  suite is green (see `test-report.md`): git-workspace (21),
+  integration-strategy (7), task-service (20, incl. the 8 pipeline cases),
+  run-storage-integration (5, incl. the real-Git reopen leg), rpc-handler (34),
+  dashboard-tasks-interactions (8, incl. the 3 Phase 5 UI cases).
+- Working tree clean; `dsh_projects` storage domain remains at format version 0
+  (Phase 5 is additive — 4 task fields, 2 run fields, 3 run event types, no new
+  tables; the `tasks` table dates from Phase 4 — no migration needed for
+  installed instances).
+- Invariant checks: the client still never imports `git-workspace.ts`
+  (`Dashboard.tsx` renders the projected `runDetail` only); the Phase 4
+  import-isolation scan still passes (`agentTeams` in exactly one file,
+  `subagents` in none); the new Git modules are host-only.
+
+### Test-stage findings (fixed during the build, recorded in test-report §3)
+
+1. **Full-suite disk contention.** The default vitest pool (one fork per core
+   — 8 on this host) ran every real-Git suite simultaneously and their
+   timeouts fired. Fixed with `vitest.config.ts` (`maxWorkers: 4`) and explicit
+   budgets on every real-Git test; the suite is now stable across repeated full
+   runs.
+2. **`blocked` runs carry no `error` by design.** The state machine persists
+   `error` only on `failed` transitions; the integration-conflict detail lives
+   on the `run.integration.failed` event. The pipeline tests now assert on the
+   event detail (the authoritative contract), not on the run record.
+
+### Known issues (tracked, non-blocking)
+
+1. **`project-catalog.test.ts` × 3** — macOS sandbox realpath mismatch
+   (`/var/folders` vs `/private/var/folders`). Fails identically before and
+   after every Phase 5 commit; not a regression.
+2. **Running GUI lags the repo** — the dashboard at http://127.0.0.1:3080 still
+   serves a pre-Phase-1 build; the Phase 5 UI (集成 integration panel, per-task
+   branch chips, the no-Git notice) is only visible after the plugin is
+   reinstalled/restarted against this checkout's v0.11.0 build output.
+3. **Phase 5 work is local-only** — `main` is 9 commits ahead of `origin/main`
+   (Phase 5 intent/spec/build/test + release); no fork PR was opened this
+   cycle. `dsh-projects-phase-5` (at `c44e054`) is the release marker.
+
+### Follow-ups (next intent cycle)
+
+- Reinstall/restart the GUI plugin against the v0.11.0 build so the running
+  dashboard serves the Phase 5 UI (integration panel, branch chips, no-Git
+  notice).
+- Decide whether to fix the `project-catalog.test.ts` tmpdir expectations
+  (normalize `realpath` in the assertions) or keep them documented.
+- Optionally push `main` / open a fork PR for the Phase 5 work (9 commits
+  ahead of `origin/main`) so it lands via review; the in-session gate
+  approval substituted for it this cycle.
+- Phase 6 scope (per `DSH_PROJECTS_SPEC.md` and Phase 5 spec §14 non-goals):
+  Project Memory (per-project durable knowledge surfaced to plans and tasks) —
+  to be drafted as the next `intent.md` when this maintain loop hands back to
+  intent.
+
 ## Cycle 3 (post v0.10.0 deploy) — 2026-09-13
 
 **Status: no incidents.** Phase 4 (Task DAG + team execution) released as
