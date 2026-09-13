@@ -10,6 +10,7 @@ const options: WorkflowParseOptions = {
     maxConcurrentAgents: 10,
     maxTurns: 20,
     maxRetryBackoffMs: 300_000,
+    approvalMode: 'plan',
   },
   agentProfile: {
     id: 'default',

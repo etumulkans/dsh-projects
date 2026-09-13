@@ -27,11 +27,13 @@ import type {
 } from '../runtime/types.ts'
 import { buildTaskTimelinePage } from '../runtime/timeline.ts'
 import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
-import type { CreateRunInput, ProjectRunEventView, ProjectRunPhase, ProjectRunView, RunDetailView } from '../runs/types.ts'
+import type { CreateRunInput, ProjectRunEventView, ProjectRunPhase, ProjectRunView, RunBudget, RunDetailView } from '../runs/types.ts'
 import type { CreatePlanInput, PlannedTaskInput, RunPlanPattern, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
 import type { ProjectTaskView, TaskWorkerKindView } from '../tasks/types.ts'
-import { CLIENT_MEMORY_KINDS } from './controller.ts'
+import { CLIENT_MEMORY_KINDS, CLIENT_APPROVAL_MODES } from './controller.ts'
 import type {
+  ApprovalRequestView,
+  ClientApprovalMode,
   ClientMemoryKind,
   DashboardDataPort,
   MemoryCreateInput,
@@ -162,6 +164,7 @@ export function DashboardOverlay({ ui, data, openSession, t }: DashboardOverlayP
           onCreateMemory={input => data.createMemory(input)}
           onUpdateMemory={input => data.updateMemory(input)}
           onSetMemoryStatus={input => data.setMemoryStatus(input)}
+          onResolveApproval={(id, decision, expectedVersion) => data.resolveApproval(id, decision, expectedVersion)}
           onOpenSession={(sessionId) => { ui.close(); openSession(sessionId) }}
         />
       </DashboardI18nProvider>
@@ -214,6 +217,8 @@ export interface DashboardSurfaceProps {
   readonly onCreateMemory?: ((input: MemoryCreateInput) => Promise<MemoryCreatePayload>) | undefined
   readonly onUpdateMemory?: ((input: MemoryUpdateInput) => Promise<MemoryEntryView>) | undefined
   readonly onSetMemoryStatus?: ((input: MemorySetStatusInput) => Promise<MemoryEntryView>) | undefined
+  /** Phase 7: resolve a pending approval (approve/reject) from the Run inspector. */
+  readonly onResolveApproval?: ((id: string, decision: 'approved' | 'rejected', expectedVersion: number) => Promise<void>) | undefined
   readonly onOpenSession: (sessionId: string) => void
 }
 
@@ -262,6 +267,7 @@ export function DashboardSurface({
   onCreateMemory,
   onUpdateMemory,
   onSetMemoryStatus,
+  onResolveApproval,
   onOpenSession,
 }: DashboardSurfaceProps) {
   const t = useDashboardTranslation()
@@ -627,6 +633,7 @@ export function DashboardSurface({
           onPlanCreate={onPlanCreate}
           onPlanTransition={onPlanTransition}
           onTaskRetry={onTaskRetry}
+          onResolveApproval={onResolveApproval}
           worker={snapshot?.runs?.worker}
           project={snapshot?.catalog.projects.find(candidate => candidate.id === selectedRun.projectId)}
         />
@@ -634,11 +641,8 @@ export function DashboardSurface({
       {newRunOpen && onCreateRun !== undefined ? (
         <NewRunDialog
           onClose={() => setNewRunOpen(false)}
-          onSubmit={async (goal, sourceRef) => {
-            await runAction('run:create', () => onCreateRun({
-              goal,
-              ...(sourceRef === undefined ? {} : { sourceRef }),
-            }), t('feedback.runCreated'), false)
+          onSubmit={async (input) => {
+            await runAction('run:create', () => onCreateRun(input), t('feedback.runCreated'), false)
             setNewRunOpen(false)
           }}
         />
@@ -2112,7 +2116,7 @@ function RunListView({ summary, runs, global, busy, selectedRunId, onSelect, onN
   )
 }
 
-function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cancelPending, pausePending, resumePending, onRefresh, refreshPending, onLoadDetail, onCoordinateRun, onLoadPlans, onPlanCreate, onPlanTransition, onTaskRetry, worker, project }: {
+function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cancelPending, pausePending, resumePending, onRefresh, refreshPending, onLoadDetail, onCoordinateRun, onLoadPlans, onPlanCreate, onPlanTransition, onTaskRetry, onResolveApproval, worker, project }: {
   readonly run: ProjectRunView
   readonly global: boolean
   readonly onClose: () => void
@@ -2136,6 +2140,8 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
   }) => Promise<RunPlanRecord>) | undefined
   /** Phase 4: re-queue one failed task. */
   readonly onTaskRetry?: ((taskId: string) => Promise<void>) | undefined
+  /** Phase 7: resolve a pending approval (approve/reject). */
+  readonly onResolveApproval?: ((id: string, decision: 'approved' | 'rejected', expectedVersion: number) => Promise<void>) | undefined
   /** Phase 4: the worker kind the Host can currently execute tasks with. */
   readonly worker?: TaskWorkerKindView | undefined
   /** Phase 5: the run's project (workspace-isolation notice + integration panel). */
@@ -2180,6 +2186,26 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
       setTaskNotice({ tone: 'error', message: dashboardErrorMessage(retryError, t) })
     } finally {
       setRetryingTaskIds(current => current.filter(id => id !== taskId))
+    }
+  }
+
+  // Phase 7: approvals — resolve a pending approval object (approve/reject);
+  // the section re-renders from the next detail load after the resolve lands.
+  const [resolvingApprovalIds, setResolvingApprovalIds] = useState<readonly string[]>([])
+  const [approvalNotice, setApprovalNotice] = useState<{ readonly tone: 'success' | 'error'; readonly message: string } | undefined>()
+  const resolveApproval = async (approval: ApprovalRequestView, decision: 'approved' | 'rejected'): Promise<void> => {
+    if (onResolveApproval === undefined) return
+    setApprovalNotice(undefined)
+    setResolvingApprovalIds(current => [...current, approval.id])
+    try {
+      await onResolveApproval(approval.id, decision, approval.version)
+      setApprovalNotice({ tone: 'success', message: t(decision === 'approved' ? 'feedback.approvalApproved' : 'feedback.approvalRejected') })
+      await onRefresh(run.id)
+      void loadDetail()
+    } catch (resolveError) {
+      setApprovalNotice({ tone: 'error', message: dashboardErrorMessage(resolveError, t) })
+    } finally {
+      setResolvingApprovalIds(current => current.filter(id => id !== approval.id))
     }
   }
 
@@ -2281,6 +2307,9 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
   // Phase 4: tasks come from the additive `runDetail.tasks` field; the worker
   // banner comes from the snapshot-level worker kind (spec §10).
   const tasks = detail?.tasks
+  // Phase 7: approvals come from the additive `runDetail.approvals` field
+  // (newest first); the client mirrors the record shape (spec §3.1).
+  const approvals = detail?.approvals
   const taskById = useMemo(() => {
     const map = new Map<string, ProjectTaskView>()
     for (const task of detail?.tasks ?? []) map.set(task.id, task)
@@ -2328,6 +2357,9 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
         ) : null}
         {taskCounts !== undefined && taskCounts.total > 0 ? (
           <span className="dshd-tasks-chip">{t('runs.tasks.headerCounts', { done: taskCounts.succeeded, total: taskCounts.total })}</span>
+        ) : null}
+        {run.approvalMode !== undefined ? (
+          <span className="dshd-approval-mode-chip" title={t('run.approvalMode')}>{t(`mode.${run.approvalMode}`)}</span>
         ) : null}
       </div>
       <div className="dshd-inspector-body">
@@ -2593,6 +2625,81 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
             </ul>
           )}
         </InspectorSection>
+        <InspectorSection title={t('run.approvals')}>
+          {approvalNotice !== undefined ? (
+            <div className="dshd-plan-notice" data-tone={approvalNotice.tone} role="status">{approvalNotice.message}</div>
+          ) : null}
+          {approvals === undefined ? (
+            <div className="dshd-inspector-runtime-empty">{detailLoading ? t('runs.tasks.loading') : t('run.approvals.empty')}</div>
+          ) : approvals.length === 0 ? (
+            <div className="dshd-tasks-empty">{t('run.approvals.empty')}</div>
+          ) : (
+            <ul className="dshd-approval-list">
+              {approvals.map(approval => {
+                const resolving = resolvingApprovalIds.includes(approval.id)
+                const pending = approval.status === 'pending' && onResolveApproval !== undefined
+                return (
+                  <li key={approval.id} className={`dshd-approval-row dshd-approval-row-${approval.status}`}>
+                    <div className="dshd-approval-main">
+                      <span className={`dshd-approval-status dshd-approval-status-${approval.status}`}>{t(`approval.status.${approval.status}`)}</span>
+                      <span className="dshd-approval-type">{t(`approval.type.${approval.type}`)}</span>
+                      <strong>{approval.summary}</strong>
+                      <div className="dshd-approval-meta">
+                        <span>{t('approval.requestedAt')}: {relativeTime(approval.requestedAt, t)}</span>
+                        {approval.resolvedAt !== undefined ? <span>{t('approval.resolvedAt')}: {relativeTime(approval.resolvedAt, t)}</span> : null}
+                        {approval.resolvedBy !== undefined ? <span>{t('approval.resolvedBy')}: {approval.resolvedBy}</span> : null}
+                      </div>
+                    </div>
+                    {pending ? (
+                      <div className="dshd-approval-actions">
+                        <button
+                          type="button"
+                          className="dshd-plain-control"
+                          disabled={resolving}
+                          aria-busy={resolving}
+                          onClick={() => { void resolveApproval(approval, 'rejected') }}
+                        >
+                          <span>{t('approval.reject')}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="dshd-primary"
+                          disabled={resolving}
+                          aria-busy={resolving}
+                          onClick={() => { void resolveApproval(approval, 'approved') }}
+                        >
+                          <span>{t('approval.approve')}</span>
+                        </button>
+                      </div>
+                    ) : null}
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </InspectorSection>
+        {run.budget !== undefined ? (
+          <InspectorSection title={t('run.budget')}>
+            <ul className="dshd-budget-list">
+              {BUDGET_KEYS.map(key => {
+                const limit = run.budget?.[key]
+                if (limit === undefined) return null
+                const usage = budgetUsageFor(key, run)
+                const warned = run.budgetWarnings?.includes(key) ?? false
+                return (
+                  <li key={key} className="dshd-budget-row">
+                    <span className="dshd-budget-label">{t(`budget.${key}`)}{warned ? <span className="dshd-budget-warning" title={t('budget.warning')}>⚠</span> : null}</span>
+                    <span className="dshd-budget-value">
+                      {usage === undefined
+                        ? (key === 'maxCost' ? t('run.budgetNoData') : '—')
+                        : `${compactNumber(usage, t)} / ${compactNumber(limit, t)}`}
+                    </span>
+                  </li>
+                )
+              })}
+            </ul>
+          </InspectorSection>
+        ) : null}
         <InspectorSection title={t('runs.events')} grow>
           {detailError !== undefined ? <div className="dshd-inspector-runtime-empty">{dashboardErrorMessage(detailError, t)}</div> : null}
           {detailLoading && events.length === 0 ? <div className="dshd-inspector-runtime-empty">{t('runs.loadingEvents')}</div> : null}
@@ -2697,20 +2804,47 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
 
 function NewRunDialog({ onClose, onSubmit }: {
   readonly onClose: () => void
-  readonly onSubmit: (goal: string, sourceRef?: string) => Promise<void>
+  readonly onSubmit: (input: CreateRunInput) => Promise<void>
 }) {
   const t = useDashboardTranslation()
   const [goal, setGoal] = useState('')
   const [sourceRef, setSourceRef] = useState('')
+  const [approvalMode, setApprovalMode] = useState<ClientApprovalMode | ''>('')
+  const [budgetFields, setBudgetFields] = useState<Record<BudgetKey, string>>(() => ({
+    maxRuntimeMinutes: '', maxTotalTokens: '', maxInputTokens: '', maxOutputTokens: '',
+    maxAgents: '', maxConcurrentAgents: '', maxReplans: '', maxRetriesPerTask: '', maxCost: '',
+  }))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>()
   const goalId = useId()
+  const modeId = useId()
+  const setBudgetField = (key: BudgetKey, value: string): void => {
+    setBudgetFields(current => ({ ...current, [key]: value }))
+  }
+  /** Parse the nine optional budget fields into a `RunBudget` (absent keys omitted). */
+  const buildBudget = (): RunBudget | undefined => {
+    const budget: { [K in BudgetKey]?: number } = {}
+    for (const key of BUDGET_KEYS) {
+      const raw = budgetFields[key].trim()
+      if (raw === '') continue
+      const parsed = Number(raw)
+      if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`budget.${key}`)
+      budget[key] = parsed
+    }
+    return Object.keys(budget).length === 0 ? undefined : budget
+  }
   const submit = async (): Promise<void> => {
     if (busy || goal.trim() === '') return
     setBusy(true)
     setError(undefined)
     try {
-      await onSubmit(goal.trim(), sourceRef.trim() === '' ? undefined : sourceRef.trim())
+      const budget = buildBudget()
+      await onSubmit({
+        goal: goal.trim(),
+        ...(sourceRef.trim() === '' ? {} : { sourceRef: sourceRef.trim() }),
+        ...(approvalMode === '' ? {} : { approvalMode }),
+        ...(budget === undefined ? {} : { budget }),
+      })
     } catch (submitError) {
       setError(submitError)
     } finally {
@@ -2719,7 +2853,7 @@ function NewRunDialog({ onClose, onSubmit }: {
   }
   return (
     <div className="dshd-modal" role="dialog" aria-modal="true" aria-label={t('runs.newTitle')} onKeyDown={(event) => { if (event.key === 'Escape') event.stopPropagation() }}>
-      <div className="dshd-modal-card">
+      <div className="dshd-modal-card dshd-newrun-dialog">
         <header><h3>{t('runs.newTitle')}</h3><button type="button" aria-label={t('common.close')} onClick={onClose}><CloseIcon size={18} /></button></header>
         <label htmlFor={goalId}>{t('runs.goal')}</label>
         <textarea
@@ -2737,6 +2871,34 @@ function NewRunDialog({ onClose, onSubmit }: {
           placeholder={t('runs.sourceRefPlaceholder')}
           onChange={event => setSourceRef(event.currentTarget.value)}
         />
+        <label htmlFor={modeId}>{t('run.approvalMode')}</label>
+        <select
+          id={modeId}
+          value={approvalMode}
+          onChange={event => setApprovalMode(event.currentTarget.value as ClientApprovalMode | '')}
+        >
+          <option value="">{t('run.approvalModeDefault')}</option>
+          {CLIENT_APPROVAL_MODES.map(mode => (
+            <option key={mode} value={mode}>{t(`mode.${mode}`)}</option>
+          ))}
+        </select>
+        <fieldset className="dshd-budget-fields">
+          <legend>{t('run.budget')}</legend>
+          <div className="dshd-budget-grid">
+            {BUDGET_KEYS.map(key => (
+              <label key={key} htmlFor={`${modeId}-budget-${key}`}>
+                <span>{t(`budget.${key}`)}</span>
+                <input
+                  id={`${modeId}-budget-${key}`}
+                  type="number"
+                  min={0}
+                  value={budgetFields[key]}
+                  onChange={event => setBudgetField(key, event.currentTarget.value)}
+                />
+              </label>
+            ))}
+          </div>
+        </fieldset>
         {error !== undefined ? <div className="dshd-error" role="alert">{dashboardErrorMessage(error, t)}</div> : null}
         <footer>
           <button type="button" onClick={onClose}>{t('common.cancel')}</button>
@@ -3319,6 +3481,34 @@ function priorityTone(priority?: number): string {
 
 function compactNumber(value: number, t: ReturnType<typeof useDashboardTranslation>): string {
   return new Intl.NumberFormat(t('meta.locale'), { notation: 'compact', maximumFractionDigits: 2 }).format(value)
+}
+
+/** Phase 7: the nine budget keys in display order (spec §5.1 check-site table). */
+const BUDGET_KEYS = [
+  'maxRuntimeMinutes', 'maxTotalTokens', 'maxInputTokens', 'maxOutputTokens',
+  'maxAgents', 'maxConcurrentAgents', 'maxReplans', 'maxRetriesPerTask', 'maxCost',
+] as const
+type BudgetKey = (typeof BUDGET_KEYS)[number]
+
+/**
+ * Phase 7: the run's current usage for a budget key, when the client has the
+ * data (token totals + elapsed runtime). Cap-only keys (`maxAgents`,
+ * `maxConcurrentAgents`, `maxReplans`, `maxRetriesPerTask`) and `maxCost`
+ * (no cost source — spec §5.5) return `undefined`.
+ */
+function budgetUsageFor(key: BudgetKey, run: ProjectRunView): number | undefined {
+  switch (key) {
+    case 'maxTotalTokens': return run.tokenUsage?.total
+    case 'maxInputTokens': return run.tokenUsage?.input
+    case 'maxOutputTokens': return run.tokenUsage?.output
+    case 'maxRuntimeMinutes': {
+      if (run.startedAt === undefined) return undefined
+      const elapsed = Date.now() - Date.parse(run.startedAt)
+      if (!Number.isFinite(elapsed) || elapsed < 0) return undefined
+      return elapsed / 60000
+    }
+    default: return undefined
+  }
 }
 
 function pathLeaf(value: string): string {

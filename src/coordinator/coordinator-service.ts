@@ -11,6 +11,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Domain, KvTable } from '@deepseek-ai/dsh-storage-domain'
+import { requiresApproval } from '../approvals/approval-policy.ts'
 import type { AgentProfileConfig } from '../config.ts'
 import type { ProjectId } from '../catalog/types.ts'
 import type { ProjectCatalog } from '../catalog/catalog.ts'
@@ -262,7 +263,17 @@ export class CoordinatorService {
       if (submitted.plan.pattern === 'direct') {
         await this.planService.transitionPlan(submitted.plan.planId, 'active')
       } else {
-        await this.planService.transitionPlan(submitted.plan.planId, 'awaiting-approval')
+        // Phase 7 (spec §4.4): consult the approval-mode policy. `manual`/`plan`
+        // gate the plan (awaiting-approval, today's behavior); `guarded`/
+        // `autonomous` activate it directly (the direct-pattern path). The mode
+        // comes from the run record (config default `plan` when absent).
+        const run = this.tables?.runs.get(runId)
+        const mode = run?.approvalMode ?? 'plan'
+        if (requiresApproval(mode, 'plan')) {
+          await this.planService.transitionPlan(submitted.plan.planId, 'awaiting-approval')
+        } else {
+          await this.planService.transitionPlan(submitted.plan.planId, 'active')
+        }
       }
       await this.appendRunEvent({
         runId,

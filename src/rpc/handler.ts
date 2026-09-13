@@ -12,6 +12,10 @@ import type { CoordinatorService } from '../coordinator/coordinator-service.ts'
 import type { ProjectMemoryService } from '../memory/memory-service.ts'
 import { MEMORY_KINDS, MEMORY_STATUSES, type MemoryKind, type MemoryStatus } from '../memory/types.ts'
 import type { ProjectTaskService } from '../tasks/task-service.ts'
+import type { ApprovalService } from '../approvals/approval-service.ts'
+import { APPROVAL_MODES } from '../approvals/types.ts'
+import type { RunBudget } from '../runs/types.ts'
+import { runBudgetSchema } from '../runs/spec.ts'
 import type { DashboardSnapshot } from '../runtime/types.ts'
 
 /** Dispatch the intentionally small Dashboard RPC surface. */
@@ -26,6 +30,7 @@ export async function handleDashboardRpc(
   coordinator?: CoordinatorService,
   tasks?: ProjectTaskService,
   memory?: ProjectMemoryService,
+  approvals?: ApprovalService,
 ): Promise<RpcResult<unknown>> {
   if (signal.aborted) {
     return failure('cancelled', localizedError('request.cancelled', 'Dashboard request was cancelled'))
@@ -148,8 +153,16 @@ export async function handleDashboardRpc(
         if (runId === undefined) return badRequest('runDetail requires a non-empty `runId`')
         const detail = await runs.runDetail(runId)
         // Additive (Phase 4): attach the run's tasks when a task service is mounted.
-        if (tasks === undefined) return success(detail)
-        return success({ ...detail, tasks: tasks.taskList(detail.run.id) })
+        // Additive (Phase 7): attach the run's approvals when the Approval
+        // service is mounted (the on-demand pattern, §6.2).
+        const tasksList = tasks === undefined ? undefined : tasks.taskList(detail.run.id)
+        const approvalsList = approvals === undefined ? undefined : approvals.listApprovals(detail.run.id)
+        if (tasksList === undefined && approvalsList === undefined) return success(detail)
+        return success({
+          ...detail,
+          ...(tasksList === undefined ? {} : { tasks: tasksList }),
+          ...(approvalsList === undefined ? {} : { approvals: approvalsList }),
+        })
       }
       case 'runTransition': {
         if (runs === undefined) return badRequest('runTransition is unavailable: the Project Run service is not mounted')
@@ -297,6 +310,53 @@ export async function handleDashboardRpc(
         if (status === undefined) return badRequest('memorySetStatus requires a valid `status`')
         return success(await memory.setStatus(id, expectedVersion, status))
       }
+      case 'approvalList': {
+        if (approvals === undefined) return badRequest('approvalList is unavailable: the Approval service is not mounted')
+        const runId = readUuidField(payload, 'runId')
+        const projectId = readOptionalString(payload, 'projectId')
+        if (projectId === false) return badRequest('approvalList `projectId` must be a non-empty string when provided')
+        if (runId === undefined && projectId === undefined) {
+          return badRequest('approvalList requires a uuid `runId` or a non-empty `projectId`')
+        }
+        const list = approvals.listApprovals(runId, projectId)
+        return success({ approvals: list })
+      }
+      case 'approvalResolve': {
+        if (approvals === undefined) return badRequest('approvalResolve is unavailable: the Approval service is not mounted')
+        const id = readUuidField(payload, 'id')
+        if (id === undefined) return badRequest('approvalResolve requires a uuid `id`')
+        const decision = readApprovalDecision(payload)
+        if (decision === undefined) return badRequest('approvalResolve requires a `decision` of approved | rejected')
+        const expectedVersion = readOptionalInteger(payload, 'expectedVersion', 1, Number.MAX_SAFE_INTEGER)
+        if (expectedVersion === false) return badRequest('approvalResolve `expectedVersion` must be a positive integer when provided')
+        const resolvedBy = readOptionalString(payload, 'resolvedBy')
+        if (resolvedBy === false) return badRequest('approvalResolve `resolvedBy` must be a non-empty string when provided')
+        return success(await approvals.resolveApproval(id, decision, {
+          ...(expectedVersion === undefined ? {} : { expectedVersion }),
+          ...(resolvedBy === undefined ? {} : { resolvedBy }),
+        }))
+      }
+      case 'approvalExpire': {
+        if (approvals === undefined) return badRequest('approvalExpire is unavailable: the Approval service is not mounted')
+        const id = readUuidField(payload, 'id')
+        if (id === undefined) return badRequest('approvalExpire requires a uuid `id`')
+        const expectedVersion = readOptionalInteger(payload, 'expectedVersion', 1, Number.MAX_SAFE_INTEGER)
+        if (expectedVersion === false) return badRequest('approvalExpire `expectedVersion` must be a positive integer when provided')
+        return success(await approvals.expireApproval(id, {
+          ...(expectedVersion === undefined ? {} : { expectedVersion }),
+        }))
+      }
+      case 'runSetBudget': {
+        if (runs === undefined) return badRequest('runSetBudget is unavailable: the Project Run service is not mounted')
+        const runId = readUuidField(payload, 'runId')
+        if (runId === undefined) return badRequest('runSetBudget requires a uuid `runId`')
+        const budget = readRunBudget(payload)
+        if (typeof budget === 'string') return badRequest(budget)
+        if (budget === undefined) return badRequest('runSetBudget requires a `budget` object')
+        const expectedVersion = readOptionalInteger(payload, 'expectedVersion', 1, Number.MAX_SAFE_INTEGER)
+        if (expectedVersion === false) return badRequest('runSetBudget `expectedVersion` must be a positive integer when provided')
+        return success(await runs.setRunBudget(runId, budget, expectedVersion))
+      }
       default:
         return badRequest(`unknown Dashboard endpoint ${JSON.stringify(endpoint)}`)
     }
@@ -396,11 +456,18 @@ function readCreateRun(value: unknown): import('../runs/types.ts').CreateRunInpu
   }
   const sourceRef = readOptionalString(object, 'sourceRef')
   if (sourceRef === false) return 'runCreate `sourceRef` must be a non-empty string when provided'
+  // Phase 7 (spec §6.2): optional approval mode + budget.
+  const approvalMode = readApprovalMode(object)
+  if (approvalMode === false) return 'runCreate `approvalMode` must be one of manual | plan | guarded | autonomous when provided'
+  const budget = readRunBudget(object)
+  if (typeof budget === 'string') return `runCreate ${budget}`
   return {
     goal,
     ...(projectId === undefined ? {} : { projectId }),
     ...(source === undefined ? {} : { source: source as import('../runs/types.ts').ProjectRunSource }),
     ...(sourceRef === undefined ? {} : { sourceRef }),
+    ...(approvalMode === undefined ? {} : { approvalMode }),
+    ...(budget === undefined ? {} : { budget }),
   }
 }
 
@@ -418,6 +485,38 @@ function readPlanStatus(value: unknown): RunPlanStatus | undefined {
   return typeof field === 'string' && (RUN_PLAN_STATUSES as readonly string[]).includes(field)
     ? (field as RunPlanStatus)
     : undefined
+}
+
+/** Phase 7: `approvalResolve` decision — `approved` | `rejected`. */
+function readApprovalDecision(value: unknown): 'approved' | 'rejected' | undefined {
+  const object = readObject(value)
+  const field = object?.['decision']
+  return field === 'approved' || field === 'rejected' ? field : undefined
+}
+
+/** Phase 7: `runCreate` approval mode. `false` = present but invalid. */
+function readApprovalMode(value: unknown): import('../approvals/types.ts').ApprovalMode | undefined | false {
+  const object = readObject(value)
+  if (object === undefined || !('approvalMode' in object)) return undefined
+  const field = object['approvalMode']
+  return typeof field === 'string' && (APPROVAL_MODES as readonly string[]).includes(field)
+    ? (field as import('../approvals/types.ts').ApprovalMode)
+    : false
+}
+
+/**
+ * Phase 7: read the optional `budget` object. Returns `undefined` when absent,
+ * a `RunBudget` when present (schema validation happens in the service, which
+ * throws `run.budgetInvalid`), or an error string when present but not an object.
+ */
+function readRunBudget(value: unknown): RunBudget | undefined | string {
+  const object = readObject(value)
+  if (object === undefined || !('budget' in object)) return undefined
+  const field = object['budget']
+  if (typeof field !== 'object' || field === null || Array.isArray(field)) {
+    return '`budget` must be an object when provided'
+  }
+  return field as RunBudget
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu

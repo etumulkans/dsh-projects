@@ -3,7 +3,7 @@
 import type { ClientConnectionRpc, RpcResult } from '@deepseek-ai/dsh-client-connection/client'
 import type { DashboardSnapshot, TaskTimelinePage } from '../runtime/types.ts'
 import type { AddDiscoveryRootInput, ProjectScanResult, RegisterProjectInput } from '../catalog/types.ts'
-import type { CreateRunInput, ProjectRunPhase, RunDetailView } from '../runs/types.ts'
+import type { CreateRunInput, ProjectRunPhase, RunBudget, RunDetailView } from '../runs/types.ts'
 import type { CreatePlanInput, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
 import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
 import {
@@ -99,6 +99,44 @@ export interface MemorySetStatusInput {
   readonly status: ClientMemoryStatus
 }
 
+/**
+ * Phase 7: client-side mirror of the server's approval domain. Intentionally
+ * duplicated instead of imported — `src/client/**` must never import
+ * `src/approvals/**` (the import-scan invariant). `RunBudget` is shared from
+ * `../runs/types.ts` (a host-agnostic types module the client already imports).
+ */
+export const CLIENT_APPROVAL_MODES = ['manual', 'plan', 'guarded', 'autonomous'] as const
+export type ClientApprovalMode = (typeof CLIENT_APPROVAL_MODES)[number]
+
+export const CLIENT_APPROVAL_TYPES = [
+  'plan', 'external-write', 'git-push', 'pull-request', 'merge', 'dangerous-action',
+] as const
+export type ClientApprovalType = (typeof CLIENT_APPROVAL_TYPES)[number]
+
+export const CLIENT_APPROVAL_STATUSES = ['pending', 'approved', 'rejected', 'expired'] as const
+export type ClientApprovalStatus = (typeof CLIENT_APPROVAL_STATUSES)[number]
+
+/** Phase 7: client-side shape of a durable approval request (spec §3.1 wire format). */
+export interface ApprovalRequestView {
+  readonly id: string
+  readonly projectId: string
+  readonly runId: string
+  readonly type: ClientApprovalType
+  readonly summary: string
+  readonly payload?: unknown
+  readonly status: ClientApprovalStatus
+  readonly requestedAt: string
+  readonly resolvedAt?: string
+  readonly resolvedBy?: string
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly version: number
+}
+
+export interface ApprovalListPayload {
+  readonly approvals: readonly ApprovalRequestView[]
+}
+
 export interface DashboardDataPort {
   getSnapshot(): DashboardDataState
   subscribe(listener: () => void): () => void
@@ -143,6 +181,14 @@ export interface DashboardDataPort {
   createMemory(input: MemoryCreateInput): Promise<MemoryCreatePayload>
   updateMemory(input: MemoryUpdateInput): Promise<MemoryEntryView>
   setMemoryStatus(input: MemorySetStatusInput): Promise<MemoryEntryView>
+  /** Phase 7: fetch a run's approval objects (newest first). */
+  loadApprovals(runId: string): Promise<readonly ApprovalRequestView[]>
+  /** Phase 7: resolve a pending approval (approve/reject). */
+  resolveApproval(id: string, decision: 'approved' | 'rejected', expectedVersion?: number): Promise<void>
+  /** Phase 7: explicitly expire a pending approval (no TTL — spec §11). */
+  expireApproval(id: string, expectedVersion?: number): Promise<void>
+  /** Phase 7: wholesale-replace a paused/blocked run's budget limits. */
+  setRunBudget(runId: string, budget: RunBudget, expectedVersion?: number): Promise<void>
 }
 
 /** Root overlay visibility shared by the sidebar trigger and shell-overlay entry. */
@@ -409,6 +455,66 @@ export class DashboardDataController implements DashboardDataPort {
     }
   }
 
+  async loadApprovals(runId: string): Promise<readonly ApprovalRequestView[]> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'approvalList', { runId }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseApprovalList(result.value).approvals
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async resolveApproval(id: string, decision: 'approved' | 'rejected', expectedVersion?: number): Promise<void> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'approvalResolve', {
+        id,
+        decision,
+        ...(expectedVersion === undefined ? {} : { expectedVersion }),
+      }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async expireApproval(id: string, expectedVersion?: number): Promise<void> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'approvalExpire', {
+        id,
+        ...(expectedVersion === undefined ? {} : { expectedVersion }),
+      }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async setRunBudget(runId: string, budget: RunBudget, expectedVersion?: number): Promise<void> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'runSetBudget', {
+        runId,
+        budget,
+        ...(expectedVersion === undefined ? {} : { expectedVersion }),
+      }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
   private async readState(): Promise<void> {
     await this.call('state', {}, false)
   }
@@ -498,15 +604,46 @@ function parseRunDetail(value: unknown): RunDetailView {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run detail data')
   }
-  const detail = value as { run?: unknown; events?: unknown; truncated?: unknown; tasks?: unknown }
+  const detail = value as { run?: unknown; events?: unknown; truncated?: unknown; tasks?: unknown; approvals?: unknown }
   if (!isRunView(detail.run)
     || !Array.isArray(detail.events)
     || !detail.events.every(isRunEventView)
     || typeof detail.truncated !== 'boolean'
-    || (detail.tasks !== undefined && (!Array.isArray(detail.tasks) || !detail.tasks.every(isTaskView)))) {
+    || (detail.tasks !== undefined && (!Array.isArray(detail.tasks) || !detail.tasks.every(isTaskView)))
+    || (detail.approvals !== undefined && (!Array.isArray(detail.approvals) || !detail.approvals.every(isApprovalRequestView)))) {
     throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run detail data')
   }
   return value as RunDetailView
+}
+
+function parseApprovalList(value: unknown): ApprovalListPayload {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported approval list data')
+  }
+  const list = value as { approvals?: unknown }
+  if (!Array.isArray(list.approvals) || !list.approvals.every(isApprovalRequestView)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported approval list data')
+  }
+  return value as ApprovalListPayload
+}
+
+function isApprovalRequestView(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const approval = value as Record<string, unknown>
+  return typeof approval.id === 'string'
+    && typeof approval.projectId === 'string'
+    && typeof approval.runId === 'string'
+    && typeof approval.type === 'string'
+    && (CLIENT_APPROVAL_TYPES as readonly string[]).includes(approval.type)
+    && typeof approval.summary === 'string'
+    && typeof approval.status === 'string'
+    && (CLIENT_APPROVAL_STATUSES as readonly string[]).includes(approval.status)
+    && typeof approval.requestedAt === 'string'
+    && (approval.resolvedAt === undefined || typeof approval.resolvedAt === 'string')
+    && (approval.resolvedBy === undefined || typeof approval.resolvedBy === 'string')
+    && typeof approval.createdAt === 'string'
+    && typeof approval.updatedAt === 'string'
+    && typeof approval.version === 'number'
 }
 
 function parseRunPlan(value: unknown): RunPlanRecord {

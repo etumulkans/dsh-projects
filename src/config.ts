@@ -36,6 +36,8 @@ export interface PolicyDefaultsConfig {
   maxConcurrentAgents: number
   maxTurns: number
   maxRetryBackoffMs: number
+  /** Phase 7 (spec §6.1): the default approval mode stamped on new runs. */
+  approvalMode: 'manual' | 'plan' | 'guarded' | 'autonomous'
 }
 
 export interface DiscoveryRootConfig {
@@ -108,6 +110,8 @@ export const Config: z<Config> = z.object({
     maxConcurrentAgents: z.number().step(1).min(1).default(10),
     maxTurns: z.number().step(1).min(1).default(20),
     maxRetryBackoffMs: z.number().step(1).min(1).default(300000),
+    // Phase 7 (spec §6.1): the default approval mode stamped on new runs.
+    approvalMode: z.union(['manual', 'plan', 'guarded', 'autonomous']).default('plan'),
   }).default({
     pollingIntervalMs: 5000,
     workspaceRoot: '.dsh-dashboard/workspaces',
@@ -115,6 +119,7 @@ export const Config: z<Config> = z.object({
     maxConcurrentAgents: 10,
     maxTurns: 20,
     maxRetryBackoffMs: 300000,
+    approvalMode: 'plan',
   }),
   discovery: z.object({
     roots: z.array(z.object({

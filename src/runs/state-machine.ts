@@ -15,8 +15,14 @@ export const SUSPENDED_RUN_PHASES: readonly ProjectRunPhase[] = ['paused', 'bloc
 const ALLOWED_TRANSITIONS: Readonly<Record<ProjectRunPhase, readonly ProjectRunPhase[]>> = {
   created: ['planning', 'canceled'],
   planning: ['awaiting_approval', 'executing', 'paused', 'blocked', 'failed', 'canceled'],
-  awaiting_approval: ['executing', 'planning', 'paused', 'blocked', 'failed', 'canceled'],
-  executing: ['integrating', 'validating', 'finalizing', 'paused', 'blocked', 'failed', 'canceled'],
+  // Additive (Phase 7): an approved merge resumes directly into the
+  // integration step (spec §4.5) — resuming to `executing` would re-trigger
+  // the all-succeeded detection and re-request the approval.
+  awaiting_approval: ['executing', 'integrating', 'planning', 'paused', 'blocked', 'failed', 'canceled'],
+  // Additive (Phase 7, spec §4.5): the merge gate pauses an executing run at
+  // `awaiting_approval` (suspendedFrom `executing`) when the mode requires a
+  // merge approval.
+  executing: ['integrating', 'validating', 'finalizing', 'awaiting_approval', 'paused', 'blocked', 'failed', 'canceled'],
   integrating: ['validating', 'finalizing', 'paused', 'blocked', 'failed', 'canceled'],
   validating: ['finalizing', 'executing', 'paused', 'blocked', 'failed', 'canceled'],
   finalizing: ['succeeded', 'failed', 'canceled'],
@@ -77,7 +83,10 @@ export function transitionRun(
   const suspended = to === 'paused' || to === 'blocked'
   const startedAt = to === 'executing' ? (run.startedAt ?? context.now) : run.startedAt
   const error = to === 'failed' && context.error !== undefined ? context.error : run.error
-  const resultSummary = to === 'succeeded' && context.resultSummary !== undefined
+  // Additive (Phase 7, spec §5.3): a budget pause carries the "why execution
+  // stopped" explanation; `succeeded` behavior is unchanged, and a
+  // resultSummary on any other transition is still ignored.
+  const resultSummary = (to === 'succeeded' || to === 'paused') && context.resultSummary !== undefined
     ? context.resultSummary
     : run.resultSummary
   const next: ProjectRunRecord = {
@@ -104,6 +113,15 @@ export function transitionRun(
     // integration step sets it; finalizing and succeeded keep it).
     ...(run.integrationBranch === undefined ? {} : { integrationBranch: run.integrationBranch }),
     ...(run.integrationHead === undefined ? {} : { integrationHead: run.integrationHead }),
+    // Phase 4: the per-run concurrency override survives run phase
+    // transitions (only createRun / a direct update set it).
+    ...(run.maxConcurrentAgents === undefined ? {} : { maxConcurrentAgents: run.maxConcurrentAgents }),
+    // Phase 7 (spec §4.2/§5): the approval mode, budget, and the
+    // already-warned budget keys survive run phase transitions (only
+    // createRun / setRunBudget / the budget checks set them).
+    ...(run.approvalMode === undefined ? {} : { approvalMode: run.approvalMode }),
+    ...(run.budget === undefined ? {} : { budget: run.budget }),
+    ...(run.budgetWarnings === undefined ? {} : { budgetWarnings: run.budgetWarnings }),
     createdAt: run.createdAt,
     updatedAt: context.now,
     phaseChangedAt: context.now,

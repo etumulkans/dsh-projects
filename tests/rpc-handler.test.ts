@@ -8,6 +8,7 @@ import type { ProjectRunService } from '../src/runs/run-service.ts'
 import type { ProjectMemoryService } from '../src/memory/memory-service.ts'
 import type { ProjectTaskService } from '../src/tasks/task-service.ts'
 import type { ProjectCatalogSelection } from '../src/catalog/types.ts'
+import type { ApprovalService } from '../src/approvals/approval-service.ts'
 
 describe('Dashboard RPC project switching', () => {
   it('loads a validated timeline page without refreshing the Dashboard snapshot', async () => {
@@ -1008,5 +1009,146 @@ describe('Dashboard RPC Project Memory (spec §9)', () => {
         params: expect.objectContaining({ expectedVersion: 1, actualVersion: 3 }),
       })
     }
+  })
+})
+
+function fakeApprovalService(overrides: Partial<Record<'listApprovals' | 'resolveApproval' | 'expireApproval' | 'pendingFor', unknown>> = {}) {
+  return {
+    listApprovals: vi.fn(() => []),
+    resolveApproval: vi.fn(async () => ({ id: 'approval-1', status: 'approved' })),
+    expireApproval: vi.fn(async () => ({ id: 'approval-1', status: 'expired' })),
+    pendingFor: vi.fn(() => undefined),
+    ...overrides,
+  } as unknown as ApprovalService
+}
+
+describe('Dashboard RPC Approvals + budgets (Phase 7, spec §6.2)', () => {
+  const signal = () => new AbortController().signal
+  const RUN_ID = '123e4567-e89b-42d3-a456-426614174000'
+  const APPROVAL_ID = '9b1deb4d-3b7d-4bad-9bdd-2d06a2985a57'
+
+  it('approvalList requires a runId or projectId and passes filters through', async () => {
+    const listApprovals = vi.fn(() => [{ id: APPROVAL_ID, status: 'pending', type: 'merge' }])
+    const approvals = fakeApprovalService({ listApprovals })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const none = await handleDashboardRpc(runtime, 'approvalList', {}, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, undefined, approvals)
+    expect(none).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(listApprovals).not.toHaveBeenCalled()
+
+    const byRun = await handleDashboardRpc(runtime, 'approvalList', { runId: RUN_ID }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, undefined, approvals)
+    expect(byRun).toMatchObject({ ok: true, value: { approvals: [{ id: APPROVAL_ID }] } })
+    expect(listApprovals).toHaveBeenLastCalledWith(RUN_ID, undefined)
+
+    const byProject = await handleDashboardRpc(runtime, 'approvalList', { projectId: 'p1' }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, undefined, approvals)
+    expect(byProject).toMatchObject({ ok: true })
+    expect(listApprovals).toHaveBeenLastCalledWith(undefined, 'p1')
+  })
+
+  it('approvalList is unavailable without an Approval service', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const result = await handleDashboardRpc(runtime, 'approvalList', { runId: RUN_ID }, signal(), Promise.resolve())
+    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('not mounted') } })
+  })
+
+  it('approvalResolve dispatches a validated decision with optional CAS + resolver', async () => {
+    const resolveApproval = vi.fn(async () => ({ id: APPROVAL_ID, status: 'approved' }))
+    const approvals = fakeApprovalService({ resolveApproval })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const result = await handleDashboardRpc(
+      runtime, 'approvalResolve', { id: APPROVAL_ID, decision: 'approved', expectedVersion: 2, resolvedBy: 'alice' },
+      signal(), Promise.resolve(), undefined, undefined, undefined, undefined, undefined, approvals,
+    )
+    expect(result).toMatchObject({ ok: true, value: { status: 'approved' } })
+    expect(resolveApproval).toHaveBeenCalledWith(APPROVAL_ID, 'approved', { expectedVersion: 2, resolvedBy: 'alice' })
+
+    const noDecision = await handleDashboardRpc(runtime, 'approvalResolve', { id: APPROVAL_ID, decision: 'maybe' }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, undefined, approvals)
+    expect(noDecision).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    const noId = await handleDashboardRpc(runtime, 'approvalResolve', { decision: 'approved' }, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, undefined, approvals)
+    expect(noId).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
+
+  it('approvalExpire dispatches a validated id with optional CAS', async () => {
+    const expireApproval = vi.fn(async () => ({ id: APPROVAL_ID, status: 'expired' }))
+    const approvals = fakeApprovalService({ expireApproval })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const result = await handleDashboardRpc(
+      runtime, 'approvalExpire', { id: APPROVAL_ID, expectedVersion: 1 },
+      signal(), Promise.resolve(), undefined, undefined, undefined, undefined, undefined, approvals,
+    )
+    expect(result).toMatchObject({ ok: true, value: { status: 'expired' } })
+    expect(expireApproval).toHaveBeenCalledWith(APPROVAL_ID, { expectedVersion: 1 })
+
+    const noId = await handleDashboardRpc(runtime, 'approvalExpire', {}, signal(), Promise.resolve(), undefined, undefined, undefined, undefined, undefined, approvals)
+    expect(noId).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
+
+  it('runSetBudget dispatches a validated budget with optional CAS', async () => {
+    const setRunBudget = vi.fn(async () => ({ id: RUN_ID, budget: { maxTotalTokens: 1000 } }))
+    const runs = fakeRunService({ setRunBudget })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const result = await handleDashboardRpc(
+      runtime, 'runSetBudget', { runId: RUN_ID, budget: { maxTotalTokens: 1000, maxRuntimeMinutes: 30 }, expectedVersion: 3 },
+      signal(), Promise.resolve(), runs,
+    )
+    expect(result).toMatchObject({ ok: true, value: { budget: { maxTotalTokens: 1000 } } })
+    expect(setRunBudget).toHaveBeenCalledWith(RUN_ID, { maxTotalTokens: 1000, maxRuntimeMinutes: 30 }, 3)
+
+    const noBudget = await handleDashboardRpc(runtime, 'runSetBudget', { runId: RUN_ID }, signal(), Promise.resolve(), runs)
+    expect(noBudget).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    // A non-object budget is rejected at the handler; per-key limits are
+    // validated by the Run service (run.budgetInvalid).
+    const notObject = await handleDashboardRpc(runtime, 'runSetBudget', { runId: RUN_ID, budget: 42 }, signal(), Promise.resolve(), runs)
+    expect(notObject).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(setRunBudget).toHaveBeenCalledTimes(1)
+  })
+
+  it('runSetBudget is unavailable without a Run service', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const result = await handleDashboardRpc(runtime, 'runSetBudget', { runId: RUN_ID, budget: { maxTotalTokens: 1 } }, signal(), Promise.resolve())
+    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('not mounted') } })
+  })
+
+  it('runCreate carries approvalMode and budget through to the Run service', async () => {
+    const createRun = vi.fn(async () => ({}))
+    const runs = fakeRunService({ createRun })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const result = await handleDashboardRpc(
+      runtime,
+      'runCreate',
+      { goal: 'Ship it', approvalMode: 'guarded', budget: { maxTotalTokens: 5000, maxAgents: 2 } },
+      signal(), Promise.resolve(), runs,
+    )
+    expect(result).toMatchObject({ ok: true })
+    expect(createRun).toHaveBeenCalledWith(
+      { goal: 'Ship it', approvalMode: 'guarded', budget: { maxTotalTokens: 5000, maxAgents: 2 } },
+      { mode: 'project', projectId: 'p1' },
+    )
+
+    const badMode = await handleDashboardRpc(runtime, 'runCreate', { goal: 'x', approvalMode: 'yolo' }, signal(), Promise.resolve(), runs)
+    expect(badMode).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(createRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('runDetail attaches the run approvals when an Approval service is mounted', async () => {
+    const runDetail = vi.fn(async () => ({ run: { id: RUN_ID }, events: [], truncated: false }))
+    const listApprovals = vi.fn(() => [{ id: APPROVAL_ID, status: 'pending', type: 'plan' }])
+    const runs = fakeRunService({ runDetail })
+    const approvals = fakeApprovalService({ listApprovals })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const withApprovals = await handleDashboardRpc(
+      runtime, 'runDetail', { runId: RUN_ID }, signal(), Promise.resolve(), runs, undefined, undefined, undefined, undefined, approvals,
+    )
+    expect(withApprovals).toMatchObject({ ok: true, value: { run: { id: RUN_ID }, approvals: [{ id: APPROVAL_ID, type: 'plan' }] } })
+    expect(listApprovals).toHaveBeenCalledWith(RUN_ID)
+
+    const bare = await handleDashboardRpc(runtime, 'runDetail', { runId: RUN_ID }, signal(), Promise.resolve(), runs)
+    expect(bare).toMatchObject({ ok: true, value: { run: { id: RUN_ID } } })
+    expect((bare as { value: Record<string, unknown> }).value.approvals).toBeUndefined()
   })
 })

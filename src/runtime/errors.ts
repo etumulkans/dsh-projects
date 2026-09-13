@@ -15,6 +15,12 @@ export type DashboardErrorCode =
   | 'coordinator.notStarted'
   | 'coordinator.projectUnknown'
   | 'coordinator.runPhaseInvalid'
+  // Additive (Phase 7): approval objects (master spec §19).
+  | 'approval.notStarted'
+  | 'approval.runUnknown'
+  | 'approval.invalidStatus'
+  | 'approval.staleVersion'
+  | 'approval.unknown'
   | 'local.priorityInvalid'
   | 'local.projectInvalid'
   | 'local.stateUnknown'
@@ -42,6 +48,8 @@ export type DashboardErrorCode =
   | 'plan.patternRequiresTasks'
   | 'plan.rationaleEmpty'
   | 'plan.rationaleTooLong'
+  // Additive (Phase 7): the replan budget (master spec §30).
+  | 'plan.replanBudgetExceeded'
   | 'plan.revisionConflict'
   | 'plan.runTerminal'
   | 'plan.runUnknown'
@@ -51,6 +59,9 @@ export type DashboardErrorCode =
   | 'plan.tasksTooMany'
   | 'plan.transitionInvalid'
   | 'plan.unknown'
+  // Additive (Phase 7): budget enforcement (master spec §30).
+  | 'run.budgetInvalid'
+  | 'run.budgetPhaseInvalid'
   | 'run.goalEmpty'
   | 'run.goalTooLong'
   | 'run.notStarted'
@@ -63,6 +74,8 @@ export type DashboardErrorCode =
   | 'task.commitFailed'
   | 'task.dagInvalid'
   | 'task.notStarted'
+  // Additive (Phase 7): the per-task retry budget (master spec §30).
+  | 'task.retryBudgetExceeded'
   | 'task.retryNotAllowed'
   | 'task.unknown'
   | 'task.workerUnavailable'

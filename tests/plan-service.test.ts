@@ -312,6 +312,49 @@ describe('RunPlanService', () => {
     }
   })
 
+  it('refuses a replan once the run budget maxReplans is exhausted (spec §5.3)', async () => {
+    const { planService, runService, projectId } = await fixture()
+    try {
+      const run = await runService.createRun({ goal: 'replan-budget', budget: { maxReplans: 1 } }, { mode: 'project', projectId })
+      // v1 is allowed (the budget counts existing plans, so 0 < 1).
+      await planService.createPlan({ runId: run.id, pattern: 'direct', rationale: 'one' })
+      // v2 is refused: 1 existing plan >= maxReplans 1.
+      await expect(planService.createPlan({ runId: run.id, pattern: 'direct', rationale: 'two', replanReason: 'pivot' }))
+        .rejects.toMatchObject({
+          dashboardCode: 'plan.replanBudgetExceeded',
+          params: expect.objectContaining({ max: 1 }),
+        })
+      // A run without a budget can replan freely.
+      const free = await runService.createRun({ goal: 'free' }, { mode: 'project', projectId })
+      await planService.createPlan({ runId: free.id, pattern: 'direct', rationale: 'one' })
+      const second = await planService.createPlan({ runId: free.id, pattern: 'direct', rationale: 'two', replanReason: 'pivot' })
+      expect(second.version).toBe(2)
+    } finally {
+      await runService.stop()
+    }
+  })
+
+  it('fires onPlanApproval at the three transition points (spec §4.4)', async () => {
+    const base = await fixture()
+    base.planService.stop()
+    const seen: string[] = []
+    const planService = new RunPlanService(base.context, base.runService, undefined, {
+      onPlanApproval: async event => { seen.push(`${event.action}:v${event.version}`) },
+    })
+    planService.start()
+    try {
+      const run = await base.runService.createRun({ goal: 'hook' }, { mode: 'project', projectId: base.projectId })
+      const plan = await planService.createPlan({ runId: run.id, pattern: 'direct', rationale: 'r' })
+      await planService.transitionPlan(plan.id, 'awaiting-approval')
+      await planService.transitionPlan(plan.id, 'draft')
+      await planService.transitionPlan(plan.id, 'active')
+      expect(seen).toEqual(['requested:v1', 'rejected:v1', 'approved:v1'])
+    } finally {
+      planService.stop()
+      await base.runService.stop()
+    }
+  })
+
   it('lists plans per run, newest first, bounded at 50', async () => {
     const { planService, runService, projectId } = await fixture()
     try {

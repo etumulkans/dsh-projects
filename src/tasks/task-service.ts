@@ -13,6 +13,9 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { KvTable } from '@deepseek-ai/dsh-storage-domain'
+import type { ApprovalService } from '../approvals/approval-service.ts'
+import { requiresApproval } from '../approvals/approval-policy.ts'
+import { checkBudget, type BudgetCheckResult } from '../approvals/budgetCheck.ts'
 import type { ProjectCatalog } from '../catalog/catalog.ts'
 import type { ProjectId, ProjectWorkspaceSource } from '../catalog/types.ts'
 import type { ProjectMemoryService } from '../memory/memory-service.ts'
@@ -20,6 +23,7 @@ import { TASK_MEMORY_BUDGET } from '../memory/retrieval.ts'
 import type { PlanStatusChangedEvent } from '../plans/plan-service.ts'
 import type { PlanId, RunPlanRecord } from '../plans/types.ts'
 import { DashboardDomainError } from '../runtime/errors.ts'
+import { addTokens, emptyTokens, type TokenTotals } from '../runtime/types.ts'
 import type { ProjectRunService } from '../runs/run-service.ts'
 import { isTerminalRunPhase } from '../runs/state-machine.ts'
 import type { ProjectRunEventRecord, ProjectRunPhase, ProjectRunRecord } from '../runs/types.ts'
@@ -139,6 +143,8 @@ export class ProjectTaskService {
     private readonly memory?: ProjectMemoryService,
     /** Phase 6 (spec §6.3/§7.3): lifecycle hooks (onRunSucceeded → fire-and-forget distillation). */
     private readonly hooks?: ProjectTaskServiceHooks,
+    /** Phase 7 (spec §4.5): approval service for the merge gate; `undefined` ⇒ no merge gate (test seam). */
+    private readonly approvalService?: ApprovalService,
   ) {
     this.configuredIntegrationStrategy = integrationStrategy
   }
@@ -270,6 +276,17 @@ export class ProjectTaskService {
         status: task.status,
       })
     }
+    // Phase 7 (spec §5.1/§5.3): the per-task retry budget. `task.attempt` is
+    // 0-based; refusing when it has reached the budget leaves the task
+    // `failed` and the run unaffected (a human can raise the budget and retry).
+    const run = tables.runs.get(task.runId)
+    const maxRetries = run?.budget?.maxRetriesPerTask
+    if (maxRetries !== undefined && task.attempt >= maxRetries) {
+      throw new DashboardDomainError('task.retryBudgetExceeded', `task ${taskId} has used ${task.attempt} attempt(s); the run's retry budget is ${maxRetries}`, {
+        attempt: task.attempt,
+        max: maxRetries,
+      })
+    }
     const next = await tables.tasks.update(taskId, current => {
       if (current.status !== 'failed') {
         throw new DashboardDomainError('task.retryNotAllowed', `task ${taskId} is no longer failed (now ${current.status})`, {
@@ -312,6 +329,10 @@ export class ProjectTaskService {
     const now = this.retryClock()
     for (const [runId, run] of tables.runs.entries()) {
       if (isTerminalRunPhase(run.phase)) continue
+      // 0. Phase 7 (spec §5.1): the runtime budget, once per tick per
+      // non-terminal run (cheap: `now - run.startedAt`).
+      await this.checkRuntimeBudget(run)
+      if (this.tables === undefined) return
       // 1. Dependency-driven transitions.
       let tasks = this.tasksForRun(runId)
       if (tasks.length === 0) continue
@@ -350,7 +371,15 @@ export class ProjectTaskService {
       if (this.tables === undefined) return
       // 3. Execution under the concurrency limit.
       if (this.worker.kind === 'unavailable') continue
-      const limit = run.maxConcurrentAgents ?? DEFAULT_TASK_CONCURRENCY
+      // Phase 7 (spec §5.1): the budget's concurrency keys silently cap the
+      // scheduler's ready-task pick (a concurrency bound, not a stop condition
+      // — no event, no pause).
+      let limit = run.maxConcurrentAgents ?? DEFAULT_TASK_CONCURRENCY
+      const budget = run.budget
+      if (budget !== undefined) {
+        if (budget.maxConcurrentAgents !== undefined) limit = Math.min(limit, budget.maxConcurrentAgents)
+        if (budget.maxAgents !== undefined) limit = Math.min(limit, budget.maxAgents)
+      }
       tasks = this.tasksForRun(runId)
       for (const taskId of pickReadyTasks(tasks, limit, now)) {
         const task = tasks.find(candidate => candidate.id === taskId)
@@ -411,6 +440,30 @@ export class ProjectTaskService {
     if (tasks.length === 0) return
     if (!tasks.every(task => task.status === 'succeeded')) return
     const target: 'integrating' | 'finalizing' = this.gitSource(run) !== undefined ? 'integrating' : 'finalizing'
+    // Phase 7 (spec §4.5): the merge gate, at the `executing → integrating`
+    // edge. When the mode requires a merge approval, pause at the gate:
+    // request the approval object and move the run to `awaiting_approval`
+    // (suspendedFrom: `executing`). The pipeline does not run until the
+    // approval is resolved (the `onApprovalResolved` hook moves the run
+    // `awaiting_approval → integrating` directly — resuming to `executing`
+    // would re-trigger this detection and re-request the approval).
+    if (target === 'integrating' && this.approvalService !== undefined) {
+      const mode = run.approvalMode ?? 'plan'
+      if (requiresApproval(mode, 'merge')) {
+        const integrationBranch = integrationBranchName(run.id)
+        const taskBranches = tasks
+          .filter(task => task.status === 'succeeded' && task.branch !== undefined)
+          .map(task => task.branch as string)
+        await this.approvalService.requestApproval({
+          runId: run.id,
+          type: 'merge',
+          summary: `Merge ${taskBranches.length} task branch(es) into ${integrationBranch}`,
+          payload: { integrationBranch, taskBranches },
+        })
+        await this.safeTransitionRun(run.id, 'awaiting_approval')
+        return
+      }
+    }
     await this.safeTransitionRun(run.id, target)
   }
 
@@ -944,6 +997,15 @@ export class ProjectTaskService {
     const identity = result.agentId === undefined ? {} : { assignedAgentId: result.agentId }
     const usage = result.tokenUsage === undefined ? {} : { tokenUsage: result.tokenUsage }
     const turns = result.turnCount === undefined ? {} : { turnCount: result.turnCount }
+    // Phase 7 (spec §5.1): accumulate the task's token usage onto the run so
+    // the token budget checks have a persisted usage source (`run.tokenUsage`),
+    // then check the token budget keys against the fresh run record.
+    if (result.tokenUsage !== undefined) {
+      await this.accumulateRunTokenUsage(run, result.tokenUsage)
+      if (this.tables === undefined) return
+      const fresh = this.tables.runs.get(task.runId)
+      if (fresh !== undefined) await this.checkTokenBudgets(fresh)
+    }
     if (result.kind === 'succeeded' && result.summary !== undefined && result.summary.trim() !== '') {
       const summary = truncateSummary(result.summary.trim(), 1000)
       // Phase 5: commit the task's work before it may reach `succeeded`
@@ -1103,6 +1165,125 @@ export class ProjectTaskService {
       }
       return transitionTask(current, to, context)
     })
+  }
+
+  /**
+   * Phase 7 (spec §5.1): add one task's token usage onto the run's persisted
+   * `tokenUsage` (creating it on first use). A run-record update, not a phase
+   * transition — the budget check reads `run.tokenUsage` right after.
+   */
+  private async accumulateRunTokenUsage(run: ProjectRunRecord, usage: TokenTotals): Promise<void> {
+    const tables = this.tables
+    if (tables === undefined) return
+    const now = this.clock()
+    await tables.runs.update(run.id, current => ({
+      ...current,
+      tokenUsage: addTokens(current.tokenUsage ?? emptyTokens(), usage),
+      updatedAt: now,
+      version: current.version + 1,
+    }))
+  }
+
+  /**
+   * Phase 7 (spec §5.1/§5.2/§5.3): check the three token budget keys against
+   * the run's accumulated `tokenUsage`. A warning appends the key to
+   * `run.budgetWarnings` + a `run.budget.warning` event (once per key); an
+   * exceeded key pauses the run with a `resultSummary` + a
+   * `run.budget.exceeded` event.
+   */
+  private async checkTokenBudgets(run: ProjectRunRecord): Promise<void> {
+    const usage = run.tokenUsage
+    if (usage === undefined) return
+    const checks: Array<[string, number]> = [
+      ['maxTotalTokens', usage.total],
+      ['maxInputTokens', usage.input],
+      ['maxOutputTokens', usage.output],
+    ]
+    for (const [key, value] of checks) {
+      if (this.tables === undefined) return
+      const result = checkBudget(run.budget, value, key, run.budgetWarnings ?? [])
+      if (result === undefined) continue
+      if (result.exceeded) {
+        await this.applyBudgetExceeded(run, result)
+      } else if (result.warning) {
+        await this.recordBudgetWarning(run, result)
+      }
+    }
+  }
+
+  /**
+   * Phase 7 (spec §5.1/§5.2/§5.3): check `maxRuntimeMinutes` against the run's
+   * elapsed wall-clock time (`now - run.startedAt`). Called once per tick per
+   * non-terminal run.
+   */
+  private async checkRuntimeBudget(run: ProjectRunRecord): Promise<void> {
+    const startedAt = run.startedAt
+    if (startedAt === undefined) return
+    const elapsedMs = this.retryClock() - Date.parse(startedAt)
+    if (Number.isNaN(elapsedMs) || elapsedMs < 0) return
+    const elapsedMinutes = elapsedMs / 60_000
+    const result = checkBudget(run.budget, elapsedMinutes, 'maxRuntimeMinutes', run.budgetWarnings ?? [])
+    if (result === undefined) return
+    if (result.exceeded) {
+      await this.applyBudgetExceeded(run, result)
+    } else if (result.warning) {
+      await this.recordBudgetWarning(run, result)
+    }
+  }
+
+  /** Append the key to `run.budgetWarnings` (dedup) + a `run.budget.warning` event. */
+  private async recordBudgetWarning(run: ProjectRunRecord, result: BudgetCheckResult): Promise<void> {
+    const tables = this.tables
+    if (tables === undefined) return
+    const pct = Math.round(result.ratio * 100)
+    await tables.runs.update(run.id, current => ({
+      ...current,
+      budgetWarnings: [...(current.budgetWarnings ?? []), result.key],
+      updatedAt: this.clock(),
+      version: current.version + 1,
+    }))
+    await this.appendRunEvent({
+      runId: run.id,
+      projectId: run.projectId,
+      type: 'run.budget.warning',
+      title: `Budget warning: ${result.key}`,
+      detail: `${result.key} at ${pct}% of ${result.limit}`,
+      at: this.clock(),
+    })
+  }
+
+  /**
+   * Exceeded budget (spec §5.3): append the key to `budgetWarnings`, a
+   * `run.budget.exceeded` event, then pause the run with a `resultSummary`
+   * explaining why execution stopped (the state machine accepts
+   * `resultSummary` on `paused`).
+   */
+  private async applyBudgetExceeded(run: ProjectRunRecord, result: BudgetCheckResult): Promise<void> {
+    const tables = this.tables
+    if (tables === undefined) return
+    const pct = Math.round(result.ratio * 100)
+    await tables.runs.update(run.id, current => ({
+      ...current,
+      budgetWarnings: [...(current.budgetWarnings ?? []), result.key],
+      updatedAt: this.clock(),
+      version: current.version + 1,
+    }))
+    await this.appendRunEvent({
+      runId: run.id,
+      projectId: run.projectId,
+      type: 'run.budget.exceeded',
+      title: `Budget exceeded: ${result.key}`,
+      detail: `${result.key} at ${pct}% of ${result.limit}`,
+      at: this.clock(),
+    })
+    const summary = `Budget limit reached: ${result.key} (${result.usage} of ${result.limit})`
+    try {
+      await this.runService.transitionRun(run.id, 'paused', { resultSummary: summary })
+    } catch (error) {
+      // Guard miss (the run moved concurrently) = logged no-op; the warning +
+      // exceeded events already record the budget state.
+      this.ctx.logger.warn('dsh-projects: budget pause failed for run %s: %s', run.id, errorMessage(error))
+    }
   }
 
   /** The run's tasks in deterministic (createdAt, id) order. */

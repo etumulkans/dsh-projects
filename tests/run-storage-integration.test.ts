@@ -22,6 +22,7 @@ import type {
   CoordinatorDriverInput,
   CoordinatorDriverResult,
 } from '../src/coordinator/session-driver.ts'
+import { ApprovalService } from '../src/approvals/approval-service.ts'
 import { RunPlanService } from '../src/plans/plan-service.ts'
 import type { PlanStatusChangedEvent } from '../src/plans/plan-service.ts'
 import { dshProjectsDomainSpec } from '../src/runs/spec.ts'
@@ -234,14 +235,114 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    // Phase 4 adds the `tasks` table and Phase 6 the `memory` table (empty
-    // here — no tasks or memories in this leg); every declared table is
-    // created on domain open.
-    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'run_events', 'runs', 'tasks'])
+    // Phase 4 adds the `tasks` table, Phase 6 the `memory` table, and Phase 7
+    // the `project_approvals` table (empty here — no approvals in this leg);
+    // every declared table is created on domain open.
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'run_events', 'runs', 'tasks'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(2)
     // 10 boot-1 events + 3 boot-2 events (resume, finalize, completed)
     expect(Object.keys(medium.tables.run_events ?? {})).toHaveLength(13)
+
+    dispose()
+  })
+
+  it('persists Phase 7 approval mode, budget, warnings, and approvals across a domain reopen', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projects-run-it-'))
+    temporaryRoots.push(root)
+    const { ctx, facility, dispose } = await boot(root)
+    const clock = () => new Date(Date.UTC(2026, 7, 14, 4, 0, 0)).toISOString()
+
+    // --- boot 1: create a run with an approval mode + budget, request a
+    // plan approval (via the onPlanApproval hook), and record a budget warning ---
+    const first = new ProjectRunService(ctx, catalogFixture(), clock)
+    await first.start()
+    const firstApprovals = new ApprovalService(ctx, catalogFixture(), first)
+    firstApprovals.start()
+    const firstPlans = new RunPlanService(ctx, first, clock, {
+      onPlanApproval: async event => {
+        if (event.action === 'requested') {
+          await firstApprovals.requestApproval({
+            runId: event.runId,
+            type: 'plan',
+            summary: event.summary,
+            payload: { planId: event.planId, version: event.version },
+          })
+          return
+        }
+        const pending = firstApprovals.pendingFor(event.runId, 'plan')
+        if (pending === undefined) return
+        await firstApprovals.resolveApproval(pending.id, event.action, {
+          expectedVersion: pending.version,
+          resolvedBy: 'plan-ui',
+        })
+      },
+    })
+    firstPlans.start()
+    const run = await first.createRun(
+      {
+        goal: 'Phase 7: approval + budget survive a restart',
+        sourceRef: 'IT-7',
+        approvalMode: 'plan',
+        budget: { maxTotalTokens: 5000, maxRuntimeMinutes: 60 },
+      },
+      { mode: 'project', projectId: PROJECT_ID },
+    )
+    await first.transitionRun(run.id, 'planning')
+    // Record a budget warning directly (the checks run in the task service;
+    // here we exercise the persistence surface).
+    await first.domain().table('runs').update(run.id, current => ({
+      ...current,
+      budgetWarnings: ['maxTotalTokens'],
+      version: current.version + 1,
+    }))
+    const planV1 = await firstPlans.createPlan({
+      runId: run.id,
+      pattern: 'supervisor',
+      rationale: 'coordinate the work',
+      tasks: [{ title: 'task', description: 'do it' }],
+    })
+    await firstPlans.transitionPlan(planV1.id, 'awaiting-approval')
+    firstPlans.stop()
+    firstApprovals.stop()
+    await first.stop()
+    await facility.closeAll()
+
+    // --- boot 2: reopen; the approval mode, budget, warnings, and the
+    // pending plan approval must all come back validated ---
+    const second = new ProjectRunService(ctx, catalogFixture(), clock)
+    await second.start()
+    try {
+      const detail = await second.runDetail(run.id)
+      expect(detail.run).toMatchObject({
+        phase: 'planning',
+        approvalMode: 'plan',
+        budget: { maxTotalTokens: 5000, maxRuntimeMinutes: 60 },
+        budgetWarnings: ['maxTotalTokens'],
+      })
+
+      // The approval record survives in the shared domain table.
+      const approvals = second.domain().table('project_approvals')
+      const rows = [...approvals.entries()].map(([, record]) => record)
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({
+        runId: run.id,
+        type: 'plan',
+        status: 'pending',
+        payload: { planId: planV1.id, version: 1 },
+      })
+    } finally {
+      await second.stop()
+    }
+
+    // The medium carries the approvals table with the one pending record.
+    const entries = await readdir(root, { recursive: true })
+    const mediumFile = entries.find(entry => String(entry).endsWith('.json') && String(entry).includes('dsh_projects'))
+    expect(mediumFile).toBeDefined()
+    const medium = JSON.parse(await readFile(join(root, String(mediumFile)), 'utf8')) as {
+      tables: Record<string, Record<string, unknown>>
+    }
+    expect(Object.keys(medium.tables.project_approvals ?? {})).toHaveLength(1)
 
     dispose()
   })
@@ -336,7 +437,7 @@ describe('ProjectRunService against real JSON storage', () => {
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
     // Phase 4 adds the `tasks` table to the domain (empty here — no tasks in
     // this leg); every declared table is created on domain open.
-    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'run_events', 'runs', 'tasks'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(1)
     // 7 boot-1 events + 2 boot-2 events (approve, phase change to executing)
@@ -491,7 +592,7 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'run_events', 'runs', 'tasks'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.tasks ?? {})).toHaveLength(2)
@@ -616,7 +717,7 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'run_events', 'runs', 'tasks'])
     const persistedTasks = Object.values(medium.tables.tasks ?? {})
     expect(persistedTasks).toHaveLength(2)
     const persistedTask = persistedTasks[0] as Record<string, unknown>

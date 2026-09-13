@@ -1,4 +1,4 @@
-/** Harness storage-domain declaration for DSH Projects Run state (Phase 1) + Run Plans (Phase 2) + Tasks (Phase 4). */
+/** Harness storage-domain declaration for DSH Projects Run state (Phase 1) + Run Plans (Phase 2) + Tasks (Phase 4) + Approvals (Phase 7). */
 
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { z } from 'zod'
@@ -10,7 +10,9 @@ import type { ProjectTaskRecord } from '../tasks/types.ts'
 import type { TaskId } from '../tasks/types.ts'
 import { projectMemoryRecordSchema } from '../memory/spec.ts'
 import type { MemoryId, ProjectMemoryRecord } from '../memory/types.ts'
-import type { ProjectRunEventRecord, ProjectRunRecord, RunEventId, RunId } from './types.ts'
+import { projectApprovalRecordSchema } from '../approvals/spec.ts'
+import type { ApprovalId, ApprovalRequestRecord } from '../approvals/types.ts'
+import type { ProjectRunEventRecord, ProjectRunRecord, RunBudget, RunEventId, RunId } from './types.ts'
 
 // Re-exported for existing importers (the schema lives in `tasks/spec.ts` so
 // the runs ↔ tasks spec import edge stays one-way).
@@ -19,6 +21,24 @@ export { tokenUsageSchema }
 const id = z.uuid()
 const nonBlank = z.string().trim().min(1)
 const timestamp = z.string().refine(value => Number.isFinite(Date.parse(value)), 'expected an ISO timestamp')
+
+/**
+ * Additive (Phase 7): the run's budget limits (master spec §30, spec §3.2).
+ * All keys optional; a key absent (or the object itself absent) is unlimited
+ * for that key. `maxCost` is declared but unenforceable until a cost source
+ * exists (spec §5.5) — a plain non-negative number (costs are fractional).
+ */
+export const runBudgetSchema = z.object({
+  maxRuntimeMinutes: z.number().int().min(1).max(100_000).optional(),
+  maxTotalTokens: z.number().int().min(1).optional(),
+  maxInputTokens: z.number().int().min(1).optional(),
+  maxOutputTokens: z.number().int().min(1).optional(),
+  maxAgents: z.number().int().min(1).max(50).optional(),
+  maxConcurrentAgents: z.number().int().min(1).max(50).optional(),
+  maxReplans: z.number().int().min(1).optional(),
+  maxRetriesPerTask: z.number().int().min(1).optional(),
+  maxCost: z.number().min(0).optional(),
+}).strict() as z.ZodType<RunBudget>
 
 export const projectRunRecordSchema = z.object({
   id,
@@ -53,6 +73,10 @@ export const projectRunRecordSchema = z.object({
   // are merged into the integration branch (spec §3.2).
   integrationBranch: nonBlank.optional(),
   integrationHead: nonBlank.optional(),
+  // Additive (Phase 7): approval mode + budget enforcement (master spec §18, §30).
+  approvalMode: z.enum(['manual', 'plan', 'guarded', 'autonomous']).optional(),
+  budget: runBudgetSchema.optional(),
+  budgetWarnings: z.array(z.string()).optional(),
   createdAt: timestamp,
   updatedAt: timestamp,
   phaseChangedAt: timestamp,
@@ -76,6 +100,10 @@ export const RUN_EVENT_TYPES = [
   'run.integration.started', 'run.integration.completed', 'run.integration.failed',
   // Additive (Phase 6): memory distillation of a finished run (spec §3.3).
   'run.memory.distilled', 'run.memory.distillation.failed',
+  // Additive (Phase 7): the approval-object projection (spec §3.3).
+  'run.approval.requested', 'run.approval.resolved',
+  // Additive (Phase 7): budget enforcement (spec §5.2).
+  'run.budget.warning', 'run.budget.exceeded',
 ] as const satisfies readonly ProjectRunEventRecord['type'][]
 
 export const projectRunEventRecordSchema = z.object({
@@ -104,5 +132,7 @@ export const dshProjectsDomainSpec = defineDomain({
     tasks: domainTable<TaskId, ProjectTaskRecord>(projectTaskRecordSchema),
     // Additive (Phase 6): durable per-project knowledge (spec §3.1).
     memory: domainTable<MemoryId, ProjectMemoryRecord>(projectMemoryRecordSchema),
+    // Additive (Phase 7): durable approval requests (master spec §19, spec §3.1).
+    project_approvals: domainTable<ApprovalId, ApprovalRequestRecord>(projectApprovalRecordSchema),
   },
 })

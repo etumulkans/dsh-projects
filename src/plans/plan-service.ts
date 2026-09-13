@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { DomainError, type KvTable } from '@deepseek-ai/dsh-storage-domain'
+import type { PlanApprovalEvent } from '../approvals/types.ts'
 import type { ProjectRunService } from '../runs/run-service.ts'
 import { isTerminalRunPhase } from '../runs/state-machine.ts'
 import type { ProjectRunEventRecord, ProjectRunRecord } from '../runs/types.ts'
@@ -86,9 +87,17 @@ interface PlanTables {
  * Phase 3 optional hooks. `onPlanStatus` is awaited after a plan status
  * transition has fully succeeded (plan update, built-in run coupling, event
  * append, Cordis emit); omitting it preserves the Phase 2 behavior.
+ *
+ * Phase 7: `onPlanApproval` fires at the three existing plan-approval
+ * transition points (spec §4.4) — `awaiting-approval` → `requested`, `active`
+ * → `approved`, `draft` (from `awaiting-approval`) → `rejected`. The plan
+ * flow itself is unchanged; the hook only adds the persisted approval object
+ * behind it. A plan that goes `draft → active` directly fires `approved` with
+ * no pending object to resolve (the wiring's `pendingFor` returns undefined).
  */
 export interface RunPlanServiceHooks {
   readonly onPlanStatus?: (event: PlanStatusChangedEvent) => Promise<void>
+  readonly onPlanApproval?: (event: PlanApprovalEvent) => Promise<void>
 }
 
 /**
@@ -235,6 +244,16 @@ export class RunPlanService {
     const replanReason = input.replanReason?.trim()
     if (replanRequired && (replanReason === undefined || replanReason === '')) {
       throw new DashboardDomainError('plan.supersedeReasonMissing', `this run already has plan v${version}; creating v${version + 1} requires a replan reason`)
+    }
+    // Phase 7 (spec §5.1): the replan budget. `version` is the existing plan
+    // chain count; creating v(version+1) is the (version+1)th plan, so a chain
+    // already at `maxReplans` refuses the replan.
+    const maxReplans = run.budget?.maxReplans
+    if (replanRequired && maxReplans !== undefined && version >= maxReplans) {
+      throw new DashboardDomainError('plan.replanBudgetExceeded', `the run's replan budget is exhausted (${version} existing plans, max ${maxReplans})`, {
+        count: version,
+        max: maxReplans,
+      })
     }
     const at = this.clock()
     const record: RunPlanRecord = {
@@ -418,6 +437,7 @@ export class RunPlanService {
           this.ctx.emit('dsh-projects/run/replanned', statusEvent)
         }
         this.ctx.emit('dsh-projects/plan/approved', statusEvent)
+        await this.firePlanApproval('approved', next, `Plan v${next.version} approved`)
         return statusEvent
       }
       case 'superseded': {
@@ -459,6 +479,7 @@ export class RunPlanService {
           at,
         })
         this.ctx.emit('dsh-projects/plan/approval-requested', statusEvent)
+        await this.firePlanApproval('requested', next, `Plan v${next.version} approval requested`)
         return statusEvent
       }
       case 'draft': {
@@ -470,9 +491,27 @@ export class RunPlanService {
           at,
         })
         this.ctx.emit('dsh-projects/plan/rejected', statusEvent)
+        // Only a rejection (from awaiting-approval) is an approval event; a
+        // plan created directly as draft is not.
+        if (before.status === 'awaiting-approval') {
+          await this.firePlanApproval('rejected', next, `Plan v${next.version} rejected`)
+        }
         return statusEvent
       }
     }
+  }
+
+  /** Phase 7: fire the onPlanApproval hook (a hook failure never undoes the plan transition). */
+  private async firePlanApproval(action: PlanApprovalEvent['action'], plan: RunPlanRecord, summary: string): Promise<void> {
+    const hook = this.hooks.onPlanApproval
+    if (hook === undefined) return
+    await hook({
+      runId: plan.runId,
+      planId: plan.id,
+      version: plan.version,
+      action,
+      summary,
+    })
   }
 
   /** Append one high-level event on the run's per-run seq (same stream as run events). */

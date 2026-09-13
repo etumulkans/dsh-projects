@@ -1,8 +1,27 @@
 /** Durable Project Run records and lossless Host-to-client projections (Phase 1). */
 
+import type { ApprovalMode, ApprovalRequestRecord } from '../approvals/types.ts'
 import type { ProjectId } from '../catalog/types.ts'
 import type { TokenTotals } from '../runtime/types.ts'
 import type { ProjectTaskView, TaskCountsView, TaskWorkerKindView } from '../tasks/types.ts'
+
+/**
+ * Additive (Phase 7): the run's budget limits (master spec §30). All keys
+ * optional; a key absent (or `budget` itself absent) is unlimited for that
+ * key. `maxCost` is declared but unenforceable until a cost source exists
+ * (spec §5.5).
+ */
+export interface RunBudget {
+  readonly maxRuntimeMinutes?: number
+  readonly maxTotalTokens?: number
+  readonly maxInputTokens?: number
+  readonly maxOutputTokens?: number
+  readonly maxAgents?: number
+  readonly maxConcurrentAgents?: number
+  readonly maxReplans?: number
+  readonly maxRetriesPerTask?: number
+  readonly maxCost?: number
+}
 
 export type RunId = string
 export type RunEventId = string
@@ -48,6 +67,12 @@ export interface ProjectRunRecord {
   readonly integrationBranch?: string
   /** Additive (Phase 5): the integrated branch tip at integration completion (full SHA). */
   readonly integrationHead?: string
+  /** Additive (Phase 7): the approval mode governing this run (config default when absent). */
+  readonly approvalMode?: ApprovalMode
+  /** Additive (Phase 7): the run's budget limits. Absent or key-absent = unlimited for that key. */
+  readonly budget?: RunBudget
+  /** Additive (Phase 7): budget keys that already emitted their 80% warning (one warning per key per run). */
+  readonly budgetWarnings?: readonly string[]
   readonly createdAt: string
   readonly updatedAt: string
   readonly phaseChangedAt: string
@@ -86,6 +111,12 @@ export type ProjectRunEventType =
   // Additive (Phase 6): memory distillation of a finished run (spec §3.3).
   | 'run.memory.distilled'
   | 'run.memory.distillation.failed'
+  // Additive (Phase 7): the approval-object projection (spec §3.3).
+  | 'run.approval.requested'
+  | 'run.approval.resolved'
+  // Additive (Phase 7): budget enforcement (spec §5.2).
+  | 'run.budget.warning'
+  | 'run.budget.exceeded'
 
 /** High-level Run event; detailed agent activity stays in Harness session logs. */
 export interface ProjectRunEventRecord {
@@ -124,6 +155,12 @@ export interface ProjectRunView {
   readonly integrationBranch?: string
   /** Additive (Phase 5): the integrated branch tip at integration completion. */
   readonly integrationHead?: string
+  /** Additive (Phase 7): the approval mode governing this run. */
+  readonly approvalMode?: ApprovalMode
+  /** Additive (Phase 7): the run's budget limits (absent = unlimited). */
+  readonly budget?: RunBudget
+  /** Additive (Phase 7): budget keys that already emitted their 80% warning. */
+  readonly budgetWarnings?: readonly string[]
   /** Additive (Phase 4): per-status task counts for this run, when the Host has a task service. */
   readonly taskCounts?: TaskCountsView
   readonly createdAt: string
@@ -159,6 +196,8 @@ export interface RunDetailView {
   readonly truncated: boolean
   /** Additive (Phase 4): the run's tasks in plan order; absent when the Host has no task service. */
   readonly tasks?: readonly ProjectTaskView[]
+  /** Additive (Phase 7): the run's approval objects (newest first); absent when the Host has no approval service. */
+  readonly approvals?: readonly ApprovalRequestRecord[]
 }
 
 export interface CreateRunInput {
@@ -167,4 +206,8 @@ export interface CreateRunInput {
   readonly goal: string
   readonly source?: ProjectRunSource
   readonly sourceRef?: string
+  /** Additive (Phase 7): per-run approval mode override (config default when absent). */
+  readonly approvalMode?: ApprovalMode
+  /** Additive (Phase 7): the run's budget limits (absent = unlimited). */
+  readonly budget?: RunBudget
 }

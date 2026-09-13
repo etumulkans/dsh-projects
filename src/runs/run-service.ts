@@ -3,11 +3,12 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { DomainError, type Domain, type KvTable } from '@deepseek-ai/dsh-storage-domain'
+import type { ApprovalMode } from '../approvals/types.ts'
 import type { ProjectCatalog } from '../catalog/catalog.ts'
 import type { ProjectCatalogSelection, ProjectId } from '../catalog/types.ts'
 import { DashboardDomainError } from '../runtime/errors.ts'
 import { isTerminalRunPhase, RunTransitionError, transitionRun, type RunTransitionContext } from './state-machine.ts'
-import { dshProjectsDomainSpec } from './spec.ts'
+import { dshProjectsDomainSpec, runBudgetSchema } from './spec.ts'
 import type {
   CreateRunInput,
   ProjectRunEventRecord,
@@ -16,6 +17,7 @@ import type {
   ProjectRunRecord,
   ProjectRunView,
   ProjectRunSummary,
+  RunBudget,
   RunDetailView,
   RunEventId,
   RunId,
@@ -69,7 +71,7 @@ export interface TransitionRunOptions {
   readonly expectedVersion?: number
   /** Carried onto the record when entering `failed`. */
   readonly error?: string
-  /** Carried onto the record when entering `succeeded`. */
+  /** Carried onto the record when entering `succeeded` (and, additive Phase 7, `paused` — the budget "why stopped" explanation, spec §5.3). */
   readonly resultSummary?: string
 }
 
@@ -88,6 +90,8 @@ export class ProjectRunService {
     private readonly ctx: Context,
     private readonly catalog: ProjectCatalog,
     private readonly clock: () => string = () => new Date().toISOString(),
+    /** Additive (Phase 7, spec §6.1): the conservative config default stamped on new runs when the input does not override it. */
+    private readonly defaultApprovalMode?: ApprovalMode,
   ) {}
 
   /** Open the `dsh_projects` domain; all records become readable. */
@@ -142,6 +146,7 @@ export class ProjectRunService {
       throw new DashboardDomainError('run.projectUnknown', `unknown project ${projectId}`, { projectId })
     }
     const at = this.clock()
+    const approvalMode = input.approvalMode ?? this.defaultApprovalMode
     const record: ProjectRunRecord = {
       id: randomUUID(),
       projectId,
@@ -149,6 +154,10 @@ export class ProjectRunService {
       source: input.source ?? 'manual',
       ...(input.sourceRef !== undefined ? { sourceRef: input.sourceRef } : {}),
       phase: 'created',
+      // Additive (Phase 7): the approval mode (input override, else the
+      // config default) and the budget limits (absent = unlimited).
+      ...(approvalMode === undefined ? {} : { approvalMode }),
+      ...(input.budget === undefined ? {} : { budget: input.budget }),
       createdAt: at,
       updatedAt: at,
       phaseChangedAt: at,
@@ -295,6 +304,74 @@ export class ProjectRunService {
         at: context.now,
       })
     }
+    return next
+  }
+
+  /**
+   * Additive (Phase 7, spec §5.4): replace the run's budget wholesale. Only
+   * legal while the run is `paused` or `blocked` (the phases where a raise
+   * makes sense). Keys removed or changed are cleared from `budgetWarnings`
+   * so the 80% of the new limit can fire once more.
+   */
+  async setRunBudget(runId: RunId, budget: RunBudget, expectedVersion?: number): Promise<ProjectRunRecord> {
+    const runs = this.requireStarted()
+    const parsed = runBudgetSchema.safeParse(budget)
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0]
+      const key = issue !== undefined && typeof issue.path[0] === 'string' ? issue.path[0] : 'budget'
+      const reason = issue !== undefined ? issue.message : 'invalid budget'
+      throw new DashboardDomainError('run.budgetInvalid', `invalid Run budget: ${reason}`, { key, reason })
+    }
+    const from = runs.get(runId)
+    if (from === undefined) {
+      throw new DashboardDomainError('run.unknown', `unknown Run ${runId}`, { runId })
+    }
+    if (from.phase !== 'paused' && from.phase !== 'blocked') {
+      throw new DashboardDomainError('run.budgetPhaseInvalid', `Run ${runId} is ${from.phase}; budgets can only be raised while paused or blocked`, {
+        runId,
+        phase: from.phase,
+      })
+    }
+    const at = this.clock()
+    let next: ProjectRunRecord
+    try {
+      next = await runs.update(runId, current => {
+        if (expectedVersion !== undefined && current.version !== expectedVersion) {
+          throw new DashboardDomainError(
+            'run.versionConflict',
+            `Run ${runId} changed concurrently (expected version ${expectedVersion}, found ${current.version})`,
+            { expectedVersion, actualVersion: current.version },
+          )
+        }
+        const oldBudget = current.budget
+        const warned = current.budgetWarnings ?? []
+        const kept = warned.filter(key => {
+          const oldLimit = oldBudget === undefined ? undefined : (oldBudget as Record<string, number | undefined>)[key]
+          const newLimit = (budget as Record<string, number | undefined>)[key]
+          // A key removed from the budget can never warn again; a key whose
+          // limit is unchanged keeps its warning (no re-fire).
+          if (oldLimit === undefined || newLimit === undefined) return false
+          return oldLimit === newLimit
+        })
+        // Destructure the old warnings out so a raised budget can clear them
+        // (exactOptionalPropertyTypes: no `undefined` assignment).
+        const { budgetWarnings: _dropped, ...rest } = current
+        return {
+          ...rest,
+          budget,
+          ...(kept.length > 0 ? { budgetWarnings: kept } : {}),
+          updatedAt: at,
+          version: current.version + 1,
+        }
+      })
+    } catch (error) {
+      if (error instanceof DomainError && error.code === 'missing-key') {
+        throw new DashboardDomainError('run.unknown', `unknown Run ${runId}`, { runId })
+      }
+      throw error
+    }
+    // No dedicated event (spec §3.3): the record itself (budget + version
+    // bump) is the audit trail.
     return next
   }
 

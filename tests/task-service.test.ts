@@ -14,9 +14,12 @@ import {
 } from '../src/memory/distillation.ts'
 import { ProjectMemoryService } from '../src/memory/memory-service.ts'
 import { RunPlanService } from '../src/plans/plan-service.ts'
+import { ApprovalService } from '../src/approvals/approval-service.ts'
 import { dshProjectsDomainSpec } from '../src/runs/spec.ts'
 import { ProjectRunService } from '../src/runs/run-service.ts'
+import type { RunBudget } from '../src/runs/types.ts'
 import { DashboardDomainError } from '../src/runtime/errors.ts'
+import type { TokenTotals } from '../src/runtime/types.ts'
 import type { ProjectTaskRecord } from '../src/tasks/types.ts'
 import { ProjectTaskService, type ProjectTaskServiceHooks } from '../src/tasks/task-service.ts'
 import {
@@ -315,6 +318,8 @@ interface Fixture {
   catalog: ProjectCatalog
   /** Phase 6: the fixture's memory service, when `overrides.memoryFactory` was given. */
   memory?: ProjectMemoryService | undefined
+  /** Phase 7: the fixture's approval service, when `overrides.withApproval` was given. */
+  approvalService?: ApprovalService | undefined
 }
 
 async function fixture(overrides: {
@@ -331,6 +336,10 @@ async function fixture(overrides: {
   readonly memoryFactory?: (ctx: Context, catalog: ProjectCatalog, runService: ProjectRunService) => ProjectMemoryService
   /** Phase 6: service hooks (e.g. onRunSucceeded for fire-and-forget distillation). */
   readonly hooks?: ProjectTaskServiceHooks
+  /** Phase 7: build an approval service for the merge gate (absent = no merge gate). */
+  readonly withApproval?: boolean
+  /** Phase 7: the run's budget, stamped directly on the record after creation. */
+  readonly budget?: RunBudget
 } = {}): Promise<Fixture> {
   const storage = new MemoryStorage()
   const emit = vi.fn()
@@ -377,6 +386,20 @@ async function fixture(overrides: {
   }
   const memory = overrides.memoryFactory === undefined ? undefined : overrides.memoryFactory(ctx, catalog, runService)
   if (memory !== undefined) memory.start()
+  const approvalService = overrides.withApproval === true ? new ApprovalService(ctx, catalog, runService, {
+    // Mirror the composition hook (src/index.ts): a resolved merge approval
+    // moves the run off the gate — approved → integrating, rejected → blocked.
+    onApprovalResolved: async record => {
+      if (record.type !== 'merge') return
+      const target = record.status === 'approved' ? 'integrating' : 'blocked'
+      try {
+        await runService.transitionRun(record.runId, target)
+      } catch {
+        /* guard miss = logged no-op, matching the composition hook */
+      }
+    },
+  }) : undefined
+  if (approvalService !== undefined) approvalService.start()
   const taskService = new ProjectTaskService(
     ctx,
     catalog,
@@ -388,6 +411,7 @@ async function fixture(overrides: {
     overrides.retryClock ?? (() => Date.now()),
     memory,
     overrides.hooks,
+    approvalService,
   )
   taskService.start()
   const planService = new RunPlanService(ctx, runService, clock, {
@@ -402,7 +426,14 @@ async function fixture(overrides: {
       version: current.version + 1,
     }))
   }
-  return { ctx, runService, planService, taskService, held, emit, runId: run.id, catalog, memory }
+  if (overrides.budget !== undefined) {
+    await runService.domain().table('runs').update(run.id, current => ({
+      ...current,
+      budget: overrides.budget,
+      version: current.version + 1,
+    }))
+  }
+  return { ctx, runService, planService, taskService, held, emit, runId: run.id, catalog, memory, approvalService }
 }
 
 describe('ProjectTaskService (spec §7)', () => {
@@ -1385,6 +1416,195 @@ describe('ProjectTaskService Phase 6 project memory (spec §6.3, §7.2)', () => 
       fx.held.release(secondStart.taskId, { kind: 'succeeded', summary: 'run 2 done' })
       await waitFor(() => fx.taskService.taskList(run2.id).every(task => task.status === 'succeeded'), 'run 2 task succeeded')
     } finally {
+      fx.planService.stop()
+      fx.taskService.stop()
+      await fx.runService.stop()
+    }
+  }, 30_000)
+})
+
+function tokens(total: number): TokenTotals {
+  return { input: Math.floor(total * 0.6), output: Math.floor(total * 0.4), cacheRead: 0, cacheWrite: 0, reasoning: 0, total }
+}
+
+/** A plan of `count` independent tasks (no dependencies) on the fixture run. */
+async function independentPlan(fx: Fixture, count: number) {
+  const tasks = Array.from({ length: count }, (_, index) => ({ title: `task ${index + 1}`, description: `d${index + 1}` }))
+  const plan = await fx.planService.createPlan({ runId: fx.runId, pattern: 'direct', rationale: 'budget test', tasks })
+  await fx.planService.transitionPlan(plan.id, 'active')
+  return plan
+}
+
+describe('ProjectTaskService Phase 7 budgets + merge gate (spec §4.5, §5)', () => {
+  it('caps the scheduler on the budget concurrency keys (silent)', async () => {
+    // run allows 5 concurrent, budget caps to 2 → only 2 of 3 start.
+    const fx = await fixture({ maxConcurrentAgents: 5, budget: { maxConcurrentAgents: 2 } })
+    try {
+      await independentPlan(fx, 3)
+      await waitFor(() => fx.held.starts.length >= 2, 'two tasks started under the cap')
+      // The third stays ready (cap 2), and no budget event was emitted.
+      expect(fx.held.starts).toHaveLength(2)
+      expect(fx.taskService.taskCounts(fx.runId)).toMatchObject({ running: 2, ready: 1 })
+      // The concurrency cap is silent: no budget event is recorded.
+      const detail = await fx.runService.runDetail(fx.runId)
+      expect(detail.events.map(event => event.type)).not.toContain('run.budget.warning')
+      expect(detail.events.map(event => event.type)).not.toContain('run.budget.exceeded')
+      // Releasing one frees a slot → the third starts.
+      fx.held.release(fx.held.starts[0]!.taskId, { kind: 'succeeded', summary: 'one' })
+      await waitFor(() => fx.held.starts.length >= 3, 'third task started after a slot freed')
+      expect(fx.held.starts).toHaveLength(3)
+    } finally {
+      fx.planService.stop()
+      fx.taskService.stop()
+      await fx.runService.stop()
+    }
+  }, 20_000)
+
+  it('also caps on the maxAgents key', async () => {
+    const fx = await fixture({ maxConcurrentAgents: 5, budget: { maxAgents: 1 } })
+    try {
+      await independentPlan(fx, 3)
+      await waitFor(() => fx.held.starts.length >= 1, 'one task started')
+      expect(fx.held.starts).toHaveLength(1)
+      expect(fx.taskService.taskCounts(fx.runId)).toMatchObject({ running: 1, ready: 2 })
+    } finally {
+      fx.planService.stop()
+      fx.taskService.stop()
+      await fx.runService.stop()
+    }
+  }, 20_000)
+
+  it('pauses the run when a token budget is exceeded, with a result summary', async () => {
+    const fx = await fixture({ budget: { maxTotalTokens: 100 } })
+    try {
+      await independentPlan(fx, 1)
+      const start = await waitFor(() => fx.held.starts.at(-1), 'task start')
+      fx.held.release(start!.taskId, { kind: 'succeeded', summary: 'big', tokenUsage: tokens(150) })
+      const detail = await waitFor(async () => {
+        const record = await fx.runService.runDetail(fx.runId)
+        return record.run.phase === 'paused' ? record : undefined
+      }, 'run paused on token budget')
+      expect(detail.run.tokenUsage?.total).toBe(150)
+      expect(detail.run.budgetWarnings).toEqual(['maxTotalTokens'])
+      expect(detail.run.resultSummary).toMatch(/maxTotalTokens/)
+      expect(detail.events.map(event => event.type)).toContain('run.budget.exceeded')
+    } finally {
+      fx.planService.stop()
+      fx.taskService.stop()
+      await fx.runService.stop()
+    }
+  }, 20_000)
+
+  it('warns once at 80% of a token budget without pausing', async () => {
+    const fx = await fixture({ budget: { maxTotalTokens: 1000 } })
+    try {
+      await independentPlan(fx, 1)
+      const start = await waitFor(() => fx.held.starts.at(-1), 'task start')
+      fx.held.release(start!.taskId, { kind: 'succeeded', summary: 'mid', tokenUsage: tokens(850) })
+      await waitFor(() => fx.taskService.taskList(fx.runId).every(task => task.status === 'succeeded'), 'task succeeded')
+      const detail = await fx.runService.runDetail(fx.runId)
+      // The 80% warning does not pause the run (it kept executing/finalizing).
+      expect(detail.run.phase).not.toBe('paused')
+      expect(detail.run.tokenUsage?.total).toBe(850)
+      expect(detail.run.budgetWarnings).toEqual(['maxTotalTokens'])
+      // The 80% warning is a persisted run event, emitted exactly once per key.
+      const warnings = detail.events.filter(event => event.type === 'run.budget.warning')
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]!.title).toMatch(/maxTotalTokens/)
+    } finally {
+      fx.planService.stop()
+      fx.taskService.stop()
+      await fx.runService.stop()
+    }
+  }, 20_000)
+
+  it('pauses the run when the runtime budget is exceeded', async () => {
+    // The run started at NOW; the retry clock is 2 minutes later and the budget is 1 minute.
+    const fx = await fixture({ budget: { maxRuntimeMinutes: 1 }, retryClock: () => Date.parse(NOW) + 2 * 60_000 })
+    try {
+      await independentPlan(fx, 1)
+      await waitFor(() => fx.held.starts.at(-1), 'task start')
+      const detail = await waitFor(async () => {
+        const record = await fx.runService.runDetail(fx.runId)
+        return record.run.phase === 'paused' ? record : undefined
+      }, 'run paused on runtime budget')
+      expect(detail.run.budgetWarnings).toEqual(['maxRuntimeMinutes'])
+      expect(detail.run.resultSummary).toMatch(/maxRuntimeMinutes/)
+    } finally {
+      fx.planService.stop()
+      fx.taskService.stop()
+      await fx.runService.stop()
+    }
+  }, 20_000)
+
+  it('refuses a retry once the run budget maxRetriesPerTask is exhausted', async () => {
+    // maxRetriesPerTask 0 = no manual retries allowed. Exhaust the task's
+    // automatic attempt budget (default 3) so it settles `failed`, then the
+    // manual retry is refused by the run's retry budget.
+    const fx = await fixture({ budget: { maxRetriesPerTask: 0 } })
+    try {
+      await independentPlan(fx, 1)
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const start = await waitFor(() => fx.held.starts.at(-1), `task attempt ${attempt} start`)
+        fx.held.release(start!.taskId, { kind: 'failed', summary: `boom ${attempt}` })
+        // Wait for the automatic retry to re-start (or the task to settle failed).
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
+      await waitFor(() => fx.taskService.taskList(fx.runId).some(task => task.status === 'failed'), 'task failed')
+      const task = fx.taskService.taskList(fx.runId)[0]!
+      expect(task.status).toBe('failed')
+      await expect(fx.taskService.taskRetry(task.id)).rejects.toMatchObject({
+        dashboardCode: 'task.retryBudgetExceeded',
+        params: expect.objectContaining({ max: 0 }),
+      })
+      // The task stays failed and the run is unaffected.
+      expect(fx.taskService.taskList(fx.runId)[0]!.status).toBe('failed')
+    } finally {
+      fx.planService.stop()
+      fx.taskService.stop()
+      await fx.runService.stop()
+    }
+  }, 20_000)
+
+  it('gates the merge on approval when the mode requires it', async () => {
+    // A real git repo + worktree manager so the run targets `integrating`
+    // (the merge gate lives on the `executing → integrating` edge). A writing
+    // worker produces a real change so the task's worktree commit succeeds.
+    const repo = await gitRepository()
+    const invocations: WorkerInvocation[] = []
+    const fx = await fixture({
+      withApproval: true,
+      worker: writingWorker(invocations, 50),
+      worktreeManager: new TaskWorktreeManager(),
+      workspaceSource: { strategy: 'worktree', projectRoot: repo, repositoryRoot: repo },
+    })
+    const approvalService = fx.approvalService!
+    // Stamp approvalMode 'plan' (requires merge approval) onto the run.
+    await fx.runService.domain().table('runs').update(fx.runId, current => ({
+      ...current,
+      approvalMode: 'plan',
+      version: current.version + 1,
+    }))
+    try {
+      await independentPlan(fx, 1)
+      await waitFor(() => invocations.length >= 1, 'task executed')
+      // All succeeded → detectAllSucceeded → merge gate → awaiting_approval.
+      await waitFor(async () => {
+        const record = await fx.runService.runDetail(fx.runId)
+        return record.run.phase === 'awaiting_approval' ? record : undefined
+      }, 'run awaiting merge approval')
+      const pending = approvalService.pendingFor(fx.runId, 'merge')
+      expect(pending).toBeDefined()
+      expect(pending!.type).toBe('merge')
+      // Approving resumes directly into integrating (the new edge).
+      await approvalService.resolveApproval(pending!.id, 'approved')
+      const resumed = await waitFor(async () => {
+        const record = await fx.runService.runDetail(fx.runId)
+        return record.run.phase === 'integrating' ? record : undefined
+      }, 'run integrating after approval')
+      expect(resumed.run.phase).toBe('integrating')
+    } finally {
+      approvalService.stop()
       fx.planService.stop()
       fx.taskService.stop()
       await fx.runService.stop()

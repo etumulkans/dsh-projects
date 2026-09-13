@@ -706,6 +706,36 @@ export const DASHBOARD_STYLES = String.raw`
 .dshd-integration-phase { font-size: 10px; color: #52617a; }
 .dshd-integration-failure { margin: 0; width: 100%; font-size: 10px; color: #c52b3a; line-height: 1.5; overflow-wrap: anywhere; }
 .dshd-integration-nogit { padding: 8px 11px; border: 1px solid #dde4ee; border-radius: 6px; background: #f7f9fc; color: #52617a; font-size: 11px; margin-bottom: 10px; }
+.dshd-approval-mode-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border: 1px solid #d9ccf2; border-radius: 999px; background: #f5f1fe; color: #5b3fc4; font-size: 10px; white-space: nowrap; }
+.dshd-approval-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.dshd-approval-row { display: flex; align-items: flex-start; gap: 10px; border: 1px solid #dde4ee; border-radius: 8px; padding: 10px 12px; background: #fff; }
+.dshd-approval-row-pending { border-color: #f0d9a8; background: #fffaf0; }
+.dshd-approval-row-approved { border-color: #bfe6cd; background: #f4fbf6; }
+.dshd-approval-row-rejected { border-color: #f0c2c7; background: #fff5f6; }
+.dshd-approval-row-expired { border-color: #dde4ee; background: #f7f9fc; opacity: 0.8; }
+.dshd-approval-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.dshd-approval-main strong { font-size: 11px; font-weight: 600; color: #1d2b43; overflow-wrap: anywhere; }
+.dshd-approval-status { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 10px; font-weight: 560; white-space: nowrap; width: fit-content; }
+.dshd-approval-status-pending { background: #fff6e6; color: #9a6b00; }
+.dshd-approval-status-approved { background: #eefaf1; color: #1d7a3c; }
+.dshd-approval-status-rejected { background: #fff2f4; color: #c52b3a; }
+.dshd-approval-status-expired { background: #eef1f6; color: #52617a; }
+.dshd-approval-type { display: inline-flex; align-items: center; padding: 1px 7px; border: 1px solid #ccd5e3; border-radius: 999px; background: #f4f7fc; color: #4a5a75; font-size: 10px; width: fit-content; }
+.dshd-approval-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 10px; color: #65738b; }
+.dshd-approval-actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+.dshd-approval-actions button { white-space: nowrap; }
+.dshd-budget-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.dshd-budget-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 11px; }
+.dshd-budget-label { color: #42506a; display: inline-flex; align-items: center; gap: 6px; }
+.dshd-budget-warning { color: #9a6b00; font-size: 11px; }
+.dshd-budget-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; color: #1d2b43; white-space: nowrap; }
+.dshd-newrun-dialog { width: min(560px, 100%); }
+.dshd-newrun-dialog select { width: 100%; height: 38px; padding: 0 10px; border: 1px solid #cfd7e4; border-radius: 6px; background: #fff; font: inherit; font-size: 12px; }
+.dshd-budget-fields { border: 1px solid #d7deea; border-radius: 8px; padding: 10px 12px; margin: 12px 0 0; background: #fff; }
+.dshd-budget-fields legend { padding: 0 6px; font-size: 11px; font-weight: 600; color: #1d2b43; }
+.dshd-budget-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; }
+.dshd-budget-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #42506a; }
+.dshd-budget-grid input { height: 34px; padding: 0 10px; border: 1px solid #cfd7e4; border-radius: 6px; background: #fff; font: inherit; font-size: 12px; width: 100%; }
 .dshd-plan-dialog { width: min(640px, 100%); }
 .dshd-plan-dialog select { width: 100%; height: 38px; padding: 0 10px; border: 1px solid #cfd7e4; border-radius: 6px; background: #fff; font: inherit; font-size: 12px; }
 .dshd-plan-task-editor { border: 1px solid #d7deea; border-radius: 8px; padding: 10px 11px; display: flex; flex-direction: column; gap: 8px; background: #fff; }

@@ -53,6 +53,7 @@ describe('DashboardRuntimeCoordinator', () => {
           maxConcurrentAgents: 3,
           maxTurns: 20,
           maxRetryBackoffMs: 300_000,
+          approvalMode: 'plan',
         },
         agentProfile: { id: 'default', permissionPreset: 'workspace-write', workerHost: 'test-host' },
       },

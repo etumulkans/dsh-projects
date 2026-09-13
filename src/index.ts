@@ -29,6 +29,8 @@ import { CoordinatorService } from './coordinator/coordinator-service.ts'
 import { PlanRunCoupler } from './coordinator/coupling.ts'
 import { RunPlanService } from './plans/plan-service.ts'
 import { ProjectRunService } from './runs/run-service.ts'
+import { ApprovalService } from './approvals/approval-service.ts'
+import type { PlanApprovalEvent } from './approvals/types.ts'
 import { HarnessMemoryDistillationDriver } from './memory/distillation.ts'
 import { ProjectMemoryService } from './memory/memory-service.ts'
 import { LocalTaskWorker } from './tasks/local-adapter.ts'
@@ -87,7 +89,8 @@ export function apply(ctx: Context, config: PluginConfig): void {
     currentProject: config.currentProject,
     discoveryRoots: config.discovery.roots,
   })
-  const runService = new ProjectRunService(ctx, catalog)
+  // Phase 7 (spec §6.1): stamp the config default approval mode on new runs.
+  const runService = new ProjectRunService(ctx, catalog, undefined, config.policyDefaults.approvalMode)
   // Phase 2: Run Plans borrow the shared dsh_projects domain from the Run
   // service (one open per domain name); it starts/stops just inside it.
   // Phase 3: the guarded run-phase coupling observes every plan status change.
@@ -100,6 +103,11 @@ export function apply(ctx: Context, config: PluginConfig): void {
   // Phase 6 (spec §6/§8): Project Memory borrows the shared domain tables and
   // distills succeeded runs through the Harness session driver.
   const memoryService = new ProjectMemoryService(ctx, catalog, runService, new HarnessMemoryDistillationDriver(ctx))
+  // Phase 7 (spec §4): the Approval service borrows the shared domain (the
+  // memory-service pattern); the merge gate + plan trigger sites resolve
+  // through it. `onApprovalResolved` is not wired to a side effect here — the
+  // resolution is durable and surfaced through the run event stream.
+  const approvalService = new ApprovalService(ctx, catalog, runService)
   const taskService = new ProjectTaskService(
     ctx,
     catalog,
@@ -112,12 +120,35 @@ export function apply(ctx: Context, config: PluginConfig): void {
     memoryService,
     // Spec §6.3: fire-and-forget distillation after a run reaches succeeded.
     { onRunSucceeded: run => { void memoryService.distillRun(run) } },
+    approvalService,
   )
   const coupler = new PlanRunCoupler(ctx, runService)
   const planService = new RunPlanService(ctx, runService, undefined, {
     onPlanStatus: async event => {
       await coupler.handle(event)
       await taskService.handlePlanStatus(event)
+    },
+    // Phase 7 (spec §4.4): mirror the three plan-approval transition points
+    // onto the approval-object store. `requested` opens a pending object;
+    // `approved`/`rejected` resolve the pending object (direct activation has
+    // no pending object and is a no-op). A hook failure never undoes the plan
+    // transition (the plan service guards the hook).
+    onPlanApproval: async (event: PlanApprovalEvent) => {
+      if (event.action === 'requested') {
+        await approvalService.requestApproval({
+          runId: event.runId,
+          type: 'plan',
+          summary: event.summary,
+          payload: { planId: event.planId, version: event.version },
+        })
+        return
+      }
+      const pending = approvalService.pendingFor(event.runId, 'plan')
+      if (pending === undefined) return
+      await approvalService.resolveApproval(pending.id, event.action, {
+        expectedVersion: pending.version,
+        resolvedBy: 'plan-ui',
+      })
     },
   })
   const coordinator = new CoordinatorService(ctx, catalog, runService, planService, agentProfile, undefined, undefined, memoryService)
@@ -175,6 +206,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
     if (disposed) return
     await runService.start()
     memoryService.start()
+    approvalService.start()
     planService.start()
     coordinator.start()
     taskService.start()
@@ -183,7 +215,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
   ctx.connection.rpc.handle(
     '/dsh-dashboard',
-    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup, runService, planService, coordinator, taskService, memoryService),
+    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup, runService, planService, coordinator, taskService, memoryService, approvalService),
     { authority: 'trusted-host' },
   )
 
@@ -199,6 +231,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
       coordinator.stop()
       planService.stop()
       memoryService.stop()
+      approvalService.stop()
       await runService.stop()
       await catalog.stop()
     }
