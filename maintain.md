@@ -1,5 +1,93 @@
 # Maintenance Log — DSH Projects
 
+## Cycle 5 (post v0.12.0 deploy) — 2026-09-14
+
+**Status: no incidents.** Phase 6 (Project Memory) released as v0.12.0
+(release commit `fccfaba`, build `ef5ed66`, test report `c95774f`, spec
+`3a03aab`, intent `a282a66`). Shipped directly on local `main` with no fork
+PR (the user drove the loop gate-by-gate in-session; `main` is now 16
+commits ahead of `origin/main`). A release marker branch
+`dsh-projects-phase-6` (at `fccfaba`) is created for consistency with the
+Phase 3/4/5 markers.
+
+**Session-interruption note (non-incident):** the session driving the Build
+stage was interrupted mid-step-7 (UI) and resumed later. On resume the
+uncommitted UI work (locales, controller port, Memory tab, styles) was
+re-verified: one import fix (`CLIENT_MEMORY_KINDS` is a value, not a type),
+then `tsc` clean, the new `dashboard-memory` suite green (10/10), step 8
+wiring, and the full suite. No work was lost.
+
+### Post-deploy verification
+
+- `pnpm run typecheck` — clean
+- `pnpm run build` — clean (dual tsdown: client 404.97 kB / host 378.10 kB)
+- `pnpm exec vitest run` — 425 passed / 3 failed (428 total); the 3 failures
+  are the pre-existing, documented macOS tmpdir environment failures in
+  `tests/project-catalog.test.ts` (`/var/folders` vs `/private/var/folders`
+  realpath mismatch), present since Phase 3 and unrelated to Phase 6. All 89
+  new Phase 6 tests are green (see `test-report.md`): memory-retrieval (23),
+  memory-service (39), task-adapters (22, +4), coordinator-service (18, +2),
+  task-service (24, +4, incl. the Run #1 → Run #2 end-to-end), rpc-handler
+  (40, +6), dashboard-memory (10), client-memory-isolation (1),
+  run-storage-integration (5, table set now `['memory', 'plans',
+  'run_events', 'runs', 'tasks']`).
+- Working tree clean; `dsh_projects` storage domain remains at format version
+  0 (Phase 6 is additive — one `memory` table, two run event types
+  `run.memory.distilled` / `run.memory.distillation.failed`, no migration
+  needed for installed instances).
+- Invariant checks: the new client-isolation scan
+  (`tests/client-memory-isolation.test.ts`) proves `src/client/**` never
+  imports `src/memory/**` — the client carries its own mirror types
+  (`CLIENT_MEMORY_KINDS` & friends in `controller.ts`) and talks to the
+  service only through the typed `DashboardDataPort`; the task-adapters
+  import-isolation scan still passes; distillation stays fire-and-forget
+  (never thrown into the pipeline — `task-service` hook-throw case).
+
+### Test-stage findings (fixed during the build, recorded in test-report §3)
+
+1. **`decodeDashboardError` envelope field is `params`, not `args`.** The
+   first RPC assertions read `args` from the decoded envelope;
+   `src/runtime/errors.ts` decodes to `{ dashboardCode, fallbackMessage,
+   params }`. Fixed to `params: expect.objectContaining(…)` (matching the
+   existing `run.versionConflict` precedent).
+2. **Client load-callback identity.** The Memory tab's on-demand fetch
+   re-dispatched on every surface render (fresh inline-arrow identity); the
+   load effect now tracks the callback in a ref and re-fetches only on real
+   input changes.
+3. **`getByText` multiplicity in the inspector.** The source-run link opens
+   the RunInspector, which renders the goal in three places — the assertion
+   uses `getAllByText(…).length > 0`.
+4. **`exactOptionalPropertyTypes` in test fixtures.** `Partial<MemoryEntryView>`
+   overrides must not assign `undefined` to optional fields — fixtures use
+   conditional spreads.
+
+### Known issues (tracked, non-blocking)
+
+1. **`project-catalog.test.ts` × 3** — macOS sandbox realpath mismatch
+   (`/var/folders` vs `/private/var/folders`). Fails identically before and
+   after every Phase 6 commit; not a regression.
+2. **Running GUI lags the repo** — the dashboard at http://127.0.0.1:3080
+   still serves a pre-Phase-1 build; the Phase 6 UI (Memory 项目记忆 tab) is
+   only visible after the plugin is reinstalled/restarted against this
+   checkout's v0.12.0 build output.
+3. **Phase 6 work is local-only** — `main` is 16 commits ahead of
+   `origin/main`; no fork PR was opened this cycle. `dsh-projects-phase-6`
+   (at `fccfaba`) is the release marker.
+
+### Follow-ups (next intent cycle)
+
+- Reinstall/restart the GUI plugin against the v0.12.0 build so the running
+  dashboard serves the Phase 6 UI (the Memory tab: search, kind chips,
+  pin/edit/archive/mark-obsolete, manual create, supersession notices).
+- Decide whether to fix the `project-catalog.test.ts` tmpdir expectations
+  (normalize `realpath` in the assertions) or keep them documented.
+- Optionally push `main` / open a fork PR for the Phase 5+6 work (16 commits
+  ahead of `origin/main`) so it lands via review; the in-session gate
+  approval substituted for it this cycle.
+- Phase 7 scope (per `DSH_PROJECTS_SPEC.md` and Phase 6 spec §14 non-goals):
+  to be drafted as the next `intent.md` when this maintain loop hands back to
+  intent.
+
 ## Cycle 4 (post v0.11.0 deploy) — 2026-09-13
 
 **Status: no incidents.** Phase 5 (Git isolation + integration + run
