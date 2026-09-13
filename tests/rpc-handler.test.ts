@@ -102,12 +102,13 @@ describe('Dashboard RPC project switching', () => {
   })
 })
 
-function fakeRunService(overrides: Partial<Record<'createRun' | 'listForSnapshot' | 'runDetail' | 'transitionRun', unknown>> = {}) {
+function fakeRunService(overrides: Partial<Record<'createRun' | 'listForSnapshot' | 'runDetail' | 'transitionRun' | 'setRunBudget', unknown>> = {}) {
   return {
     createRun: vi.fn(async () => ({})),
     listForSnapshot: vi.fn(async () => ({ runs: [], total: 0 })),
     runDetail: vi.fn(async () => ({ run: {}, events: [], truncated: false })),
     transitionRun: vi.fn(async () => ({})),
+    setRunBudget: vi.fn(async () => ({})),
     ...overrides,
   } as unknown as ProjectRunService
 }

@@ -1,107 +1,92 @@
-# Test Report — Phase 6: Project Memory
+# Test Report — Phase 7: Approvals + budgets
 
-Test-stage artifact for the Phase 6 diff (build commit `ef5ed66`,
-intent `a282a66`, spec `3a03aab` — §12 test plan + §13 acceptance
-criteria). Verified on local `main` @ `ef5ed66`, 2026-09-14.
+Test-stage artifact for the Phase 7 diff (build commit `7c6db58`,
+intent `d30a7da`, spec `321821d` — §9 test plan + §10 acceptance
+criteria). Verified on local `main` @ `7c6db58`, 2026-09-14.
 
 ## 1. Test inventory
 
-| File | Cases | Scope (spec §12) |
+| File | Cases | Scope (spec §9) |
 | --- | --- | --- |
-| `tests/memory-retrieval.test.ts` (new, pure strategy over in-memory records) | 23 | §12.1 retrieval: the exact score `(3·\|Q∩title\| + 2·\|Q∩tags\| + 1·\|Q∩body\|) / (3·\|Q\|)` with hand-computed expectations; pinned entries always first (pinned order stable, never demoted); zero-score entries filtered out when a query is present (spec §5) and returned unfiltered without one; kind filter, `includeArchived` (superseded excluded even with the flag — spec §5), `limit` (default 50, explicit, larger than the pool); the deterministic full ordering pinned → score desc → updatedAt desc → id asc (ties broken on every level); empty pool / empty query edge cases; the strategy seam accepts a fake implementation. |
-| `tests/memory-service.test.ts` (new, in-memory domain + fake driver + fake clock) | 39 | §12.2–§12.3 service: `list` pool semantics (active; +archived only with the flag; superseded never listed; `counts` = kind counts over all active entries, zero-filled for every kind); `create` bounds (title ≤ 200, body ≤ 12 000, tags ≤ 20 × 40, confidence ∈ [0,1] — each violation → `memory.invalidCandidate` with the exact `reason` param; unknown kind/status rejected); secret scrubbing (api-key/token/password/secret `:=` patterns, `AKIA…`, PEM private keys, `Bearer …` — scrubbed from title/body/tags, candidate dropped when nothing survives); dedup containment ≥ 0.6 (old → `superseded` + `supersedes` link, new → active, smallest id wins ties, distinct facts both stay active, never deleted); `update` (≥ 1 patch field required, CAS `expectedVersion` mismatch → `memory.staleVersion` with `expectedVersion`/`actualVersion` params, `superseded` → `memory.immutable`, archived updatable); `setStatus` (legal moves active ↔ archived, active → superseded; anything from superseded → `memory.immutable`; same-status no-op → `memory.invalidStatus`); `distillRun` (driver candidates persisted with run/task/session provenance, zero candidates → zero entries **and no event**, `run.memory.distilled` only when > 0 with the `${persisted} entries persisted (${superseded} superseded)` detail, driver failure → `run.memory.distillation.failed` + warn, **never thrown into the pipeline**; no driver → no auto entries, no error); `start()` borrows the four shared tables (double start throws; missing key on update → `memory.unknown`). |
-| `tests/task-adapters.test.ts` (extended) | 22 (18 + **4 new**) | §12.4 injection: the local and team adapters inject the budgeted packet section `Project memory (durable knowledge from earlier runs — verify before relying on it):\n<packet>` before the report contract when `memoryContext` is present; **byte-identical prompts** when the packet is `undefined` (the no-active-memory case); the packet is the exact `buildMemoryPacket` output (header + `PINNED:` + per-kind upper-cased sections + `- title: body` lines with 300-char `…` truncation). |
-| `tests/coordinator-service.test.ts` (extended) | 18 (16 + **2 new**) | §12.4 coordinator injection: the first-turn prompt appends `\n\n` + the packet (query = `run.goal`) when active memory exists; byte-identical prompt when the memory service is absent or the pool is empty. |
-| `tests/task-service.test.ts` (extended) | 24 (20 + **4 new**) | §12.5 lifecycle + end-to-end: (1) `onRunSucceeded` fires **once** with the fresh post-transition run record; (2) the fire-and-forget `distillRun` hook never blocks or fails the pipeline (hook throws → run still succeeds, no event leak into the run stream); (3) **Run #1 → Run #2**: run 1's distillation persists an entry, run 2's worker inputs carry the packet built from run 1's memory (query = task title + description), while run 2's own distillation is isolated; (4) the task query is exactly `${task.title} ${task.description}`. |
-| `tests/rpc-handler.test.ts` (extended) | 40 (34 + **6 new**) | §12.6 RPC: `memoryList` (default pool, query/kinds/includeArchived pass-through, structured not-mounted failure when the service param is absent — `bad-request` + "the Project Memory service is not mounted"), `memoryCreate` (valid → entry, invalid candidate → `memory.invalidCandidate` with `params: { reason: 'body-too-long' }` decoded through `decodeDashboardError`), `memoryUpdate` (CAS mismatch → `memory.staleVersion` with `params: { expectedVersion: 1, actualVersion: 3 }`; immutable → `memory.immutable`), `memorySetStatus` (legal move, illegal move → `memory.invalidStatus`). |
-| `tests/dashboard-memory.test.tsx` (new, jsdom, `renderDashboard` harness pattern) | 10 | §12.7 UI: the tab renders between 项目 and 配置 (zh) and as **Project Memory** (en, `DashboardI18nProvider`); opening the tab dispatches `memoryList` for the first project exactly once (`{ projectId }` only — no invented params); the no-projects state renders without dispatching; the structured not-mounted failure renders the 项目记忆服务不可用。 banner (never a swallowed promise); the empty state; entry rows render kind label (架构), title, tags, status (生效), the `取代 {id}` relation, the `aria-pressed` kind chip with its count, and the 来源运行 link which opens the existing RunInspector (the run's goal appears); pin → `memoryUpdate { id, expectedVersion, pinned: true }`; archive → `memorySetStatus { …, status: 'archived' }`; mark-obsolete → `status: 'superseded'` and superseded rows carry **no** action buttons; manual create → `memoryCreate` with the parsed comma-separated tags and the `已取代既有记忆：{id}` supersession notice from the payload's `supersededId`. |
-| `tests/client-memory-isolation.test.ts` (new, source scan) | 1 | spec §4 invariant: no file under `src/client/**` imports `src/memory/**` (the client carries its own mirror types in `controller.ts` and talks to the service only through the typed port). |
-| `tests/run-storage-integration.test.ts` (extended; real JSON domain) | 5 (unchanged count, assertions extended) | §12.8 storage: every medium assertion now expects the table set exactly `['memory', 'plans', 'run_events', 'runs', 'tasks']` — the `memory` table is created empty on domain open; unit `dsh_projects` stays at format version **0** (additive, no migration); runs/plans/tasks/events reopen assertions unchanged and green. |
+| `tests/approval-service.test.ts` (new, in-memory domain + real `ApprovalService`) | 21 | §9.1 the service: the **policy table** (all 4 modes × the 2 stages — `manual`/`plan`: plan+merge gated; `guarded`/`autonomous`: merge only); **request** (a pending object persists with the `run.approval.requested` event + Cordis event; idempotent re-request returns the existing pending — one per `(run, type)`; a terminal object is superseded by a new pending, the old retained — never deleted; `summary` bounds 1..500; `payload` stored as-is); **resolve** (CAS `approval.staleVersion` on mismatch with `expectedVersion`/`actualVersion`; `resolvedBy` default `'dashboard'`; `resolvedAt` set; `run.approval.resolved` event; resolving a terminal object → `approval.invalidStatus`); **expire** (pending → `expired`, the only path; terminal → `approval.invalidStatus`; no TTL — the object stays `pending` across a clock advance); the **plan hook** (`onApprovalResolved` fires on resolve + expire, the plan service's own `plan.approval.*` events unchanged); `listApprovals` newest-first + run/project filters; `pendingFor` lookup. |
+| `tests/budget-enforcement.test.ts` (new, in-memory domain + real services + fake clock) | 15 | §9.2 budgets: the **80% warning** (a token usage crossing 80% → `run.budget.warning` with `<key> at <pct>% of <limit>` + the key added to `run.budgetWarnings`; a second crossing → no second event, once per key; a different key → its own warning); the **limit** (usage ≥ 100% → the run moves `paused` with `suspendedFrom` + `resultSummary` `Budget limit reached: <key> (…)`, the `run.budget.exceeded` event, the scheduler tick skips the paused run); **runtime** (`maxRuntimeMinutes` crossing → the same pause at the tick check); the **scheduler cap** (`maxAgents`/`maxConcurrentAgents` cap the ready-task pick — no pause, no event); the **retry budget** (`taskRetry` at `attempt >= maxRetriesPerTask` → `task.retryBudgetExceeded`, the task stays `failed`; below → the retry proceeds); the **replan budget** (`createPlan` with `supersedesPlanId` when the chain ≥ `maxReplans` → `plan.replanBudgetExceeded`); **unset = unlimited** (an absent key → no check, no event); the **budget patch** (`runSetBudget` on a `paused` run replaces the budget + clears the raised key from `budgetWarnings`; a non-`paused`/`blocked` run → `run.budgetPhaseInvalid`; an invalid budget → `run.budgetInvalid` with `{ key, reason }`); `maxCost` validated at creation with no check site. |
+| `tests/task-service.test.ts` (extended) | 31 (24 + **7 new**) | §9.3 the **merge gate** end-to-end: `detectAllSucceeded` with `requiresApproval(mode, 'merge')` true → the approval is requested + the run moves `executing → awaiting_approval` (the pipeline does not run); `false` → today's behavior (`integrating`, the pipeline runs); the **resume** path (approval `approved` → `awaiting_approval → integrating` → the next tick runs the pipeline); the **reject** path (`awaiting_approval → blocked`); the budget pause + `runSetBudget` resume round-trip through the real task scheduler. |
+| `tests/plan-service.test.ts` (extended) | 16 (14 + **2 new**) | §9.4 the **plan trigger site**: the plan service's `onApproval` fires at the three transition points (requested/approved/rejected) creating + resolving the run approval object; the `plan.approval.*` events are unchanged; the replan-budget rejection surfaces through the plan service. |
+| `tests/rpc-handler.test.ts` (extended) | 48 (40 + **8 new**) | §9.5 the RPC surface: `approvalRequest` / `approvalResolve` / `approvalExpire` / `approvalList` dispatch with validation (missing `id` → `bad-request`); `runSetBudget` dispatches a validated budget with optional CAS (`expectedVersion`); the extended `createRun` carries `approvalMode` + `budget`; the extended `runDetail` projection carries `approvals` + `budget` + `budgetWarnings`. |
+| `tests/dashboard-approvals.test.tsx` (new, jsdom) | 9 | §9.6 the UI (zh/en parity): the **Approvals section** renders a pending merge approval (status/type/summary) and **Approve**/**Reject** dispatch `onResolveApproval(id, decision, version)` with the success notice; the empty state; the **Budget panel** renders limits + `used / limit` usage + the 80% `⚠` marker, hidden when the run has no budget; the **New Run dialog** carries the approval-mode select + the nine budget fields and submits `{ goal, approvalMode, budget }` (omitting them when empty); the same sections render in English. |
+| `tests/run-storage-integration.test.ts` (extended) | 6 (5 + **1 new**) | §9.7 the **store**: `project_approvals` is a declared table (the set grows by exactly one); records validate against the strict schema; `version` bumps on every accepted mutation; a pending approval + the run's `approvalMode`/`budget`/`budgetWarnings` fields survive a real JSON domain reopen (browser refresh / process restart do not lose a pending approval). |
+| `tests/client-approvals-isolation.test.ts` (new) | 1 | §9.8 the client never imports the node-side approval/budget modules — the client bundle resolves without them (the §8 isolation invariant). |
+| `tests/run-state-machine.test.ts` (updated) | 12 | §9.1 the **state machine**: the full transition table now asserts the two additive Phase 7 edges — `awaiting_approval → integrating` (an approved merge resumes directly into the integration step) and `executing → awaiting_approval` (the merge gate); all pre-existing edges + the `succeeded` `resultSummary` behavior unchanged. |
 
-**Regression:** every existing suite re-ran in the full run — Phase 5
-(`git-workspace` 21, `integration-strategy` 7, `workspace-manager` 3,
-`dashboard-tasks-interactions` 8), Phase 4 (`task-state-machine` 12,
-`task-scheduler` 16, `plan-service` 14, `plan-state-machine` 10,
-`dashboard-plans-interactions` 7), Phase 3 (`coordinator-policy` 4,
-`runtime-coordinator` 1), Phase 2/1 (`run-service` 11, `run-state-machine`
-12), and the shared suites (`orchestrator` 9, `scheduling` 3,
-`workflow-parser` 17, all dashboard i18n/ux/render suites,
-`global-dashboard` 4, provider/source/timeline/path-safety suites). The
-client still imports only type/contract modules
-(`catalog/types`, `plans/types`, `runs/types`, `tasks/types`,
-`runtime/*`, `task-source`) — the new scan proves `src/memory/**` is
-never imported by the Web bundle.
+**Total: 492 tests — 489 passed / 3 failed** (the 3 are the documented
+pre-existing `project-catalog` macOS failures, §4). **64 new Phase 7 tests**
+(46 in the four new files + 18 added to the five extended suites), all green.
 
-## 2. Acceptance criteria (spec §13)
+## 2. Acceptance criteria (spec §10) — all verified
 
-1. **Store** — PASS. `memory` is a declared table of `dsh_projects`
-   (v0, no migration): `run-storage-integration` asserts the table set
-   grows by exactly one table at format version 0; `memory-service`
-   covers the strict schema bounds, CAS `version` bumps
-   (`memory.staleVersion` on mismatch), and retention (superseded/archived
-   retained, never deleted — dedup and status tests).
-2. **Write policy** — PASS. `memory-service` distillation cases: only
-   driver-validated candidates persist (secret scrubbing drops tainted
-   candidates; zero candidates → zero entries **and no event**; no driver
-   → no auto entries, no error spam); manual `create` is the only other
-   write path (RPC + UI suites).
-3. **Dedup/supersession** — PASS. `memory-service` dedup (containment
-   ≥ 0.6 → old `superseded` + `supersedes` link, smallest-id tie-break,
-   distinct facts both active); archive hides from retrieval
-   (`memory-retrieval` includeArchived cases); the audit trail survives
-   reopen (`run-storage-integration` table + record assertions).
-4. **Retrieval** — PASS. `memory-retrieval` (23 cases): pinned first,
-   filters respected, exact score ordering, `limit` honored, empty pool →
-   empty result, fake strategy through the seam.
-5. **Budget + injection** — PASS. `memory-service` packet builder cases
-   (maxEntries + section char budgets, `undefined` when empty);
-   `task-adapters` (+4) and `coordinator-service` (+2) prove the injected
-   prompts and byte-identity without memory; `task-service` case 3 is the
-   **Run #1 → Run #2** end-to-end (run 2's worker inputs carry run 1's
-   distilled memory).
-6. **UI** — PASS. `dashboard-memory` (10 cases): search/kind counts/tags/
-   status/supersession view/source-run link/pin/edit/archive/
-   mark-obsolete/manual create, every action dispatching a real RPC with
-   surfaced errors (the structured unavailable banner, the supersession
-   notice); zh/en parity compile-enforced (both locale maps are the same
-   record type — `tsc` green).
-7. **Storage** — PASS. `run-storage-integration`: entries + statuses +
-   `supersedes` persist through a real JSON reopen (zod-validated), table
-   set grows by exactly one, domain stays v0.
-8. **Repo green** — PASS. `pnpm run typecheck` ✅, `pnpm run build` ✅
-   (client 404.97 kB / host 378.10 kB), `pnpm exec vitest run`:
-   **425 passed / 3 failed of 428** — the 3 failures are the documented
-   pre-existing `project-catalog.test.ts` environment failures (macOS
-   `/var/folders/…` vs realpath'd `/private/var/folders/…`, present since
-   Phase 3; fix-vs-document parked in `maintain.md`), unrelated to
-   Phase 6.
+1. **Store** — `project_approvals` is a declared `dsh_projects` table (v0, no
+   migration); strict-schema validation; `version` bumps on every accepted
+   mutation; approvals + the run's budget/approval fields survive a real JSON
+   domain reopen; the table set grows by exactly one. →
+   `run-storage-integration.test.ts` + `approval-service.test.ts`.
+2. **Policy** — the four modes behave per §4.2 (the pure `requiresApproval`
+   table); the conservative default is `plan` (the config default); the mode
+   is stored per run and visible in the UI (the mode chip); the coordinator's
+   `settle` consults the policy (the plan gate lifted for
+   guarded/autonomous). → `approval-service.test.ts` (policy table) +
+   `dashboard-approvals.test.tsx` (mode chip).
+3. **Objects** — request/resolve/expire persist + project onto the run event
+   stream (`run.approval.*`); the `plan.approval.*` events are unchanged; one
+   pending per `(run, type)` (idempotent re-request); terminal objects are
+   retained (never deleted); resolution resumes/blocks the run through the
+   state machine (the merge gate); browser refresh + process restart do not
+   lose a pending approval. → `approval-service.test.ts` +
+   `task-service.test.ts` (merge gate) + `run-storage-integration.test.ts`.
+4. **Budgets** — every declared key (except `maxCost`, which has no site) is
+   enforced in code at the named §5.1 site: the 80% warning once per key, the
+   limit → the per-key policy action (§5.3), the `resultSummary` explains why;
+   unset keys are unlimited; budgets are set at creation and raised explicitly
+   (`runSetBudget`); no key is enforced by prompt text alone. →
+   `budget-enforcement.test.ts`.
+5. **UI** — the Approvals section + Approve/Reject dispatch real RPCs with
+   surfaced errors; the Budget panel renders usage + warning markers; the New
+   Run dialog carries the budget + mode fields; the existing plan
+   approve/reject buttons are unchanged; zh/en parity compile-enforced. →
+   `dashboard-approvals.test.tsx` (jsdom, zh+en) +
+   `client-approvals-isolation.test.ts`.
+6. **Repo green** — `pnpm run typecheck` (exit 0), `pnpm run build` (exit 0 —
+   client 427.93 kB / host 407.55 kB), full `pnpm vitest run` (489/3 of 492,
+   the 3 modulo the documented pre-existing environment failures, §4).
 
-## 3. Test-stage findings (fixed before this report)
+## 3. Test-stage fixes (made while verifying)
 
-- **`decodeDashboardError` envelope field is `params`, not `args`.** The
-  first RPC assertions read `args` from the decoded envelope;
-  `src/runtime/errors.ts` decodes to `{ dashboardCode, fallbackMessage,
-  params }`. Fixed both memory assertions to `params:
-  expect.objectContaining(…)` (matching the existing `run.versionConflict`
-  precedent).
-- **Client load-callback identity.** The Memory tab's on-demand fetch
-  initially re-dispatched on every surface render because the inline
-  arrow prop gets a fresh identity; the load effect now tracks the
-  callback in a ref and re-fetches only on real input changes
-  (`projectId`, deferred query, kinds, showArchived, reload key).
-- **`getByText` multiplicity in the inspector.** The source-run link
-  opens the RunInspector, which renders the goal in three places (header
-  span, description, aria-label) — the assertion uses
-  `getAllByText(…).length > 0`.
-- **`exactOptionalPropertyTypes` in test fixtures.** `Partial<MemoryEntryView>`
-  overrides must not assign `undefined` to optional fields — fixtures use
-  conditional spreads (`...(x === undefined ? {} : { x })`).
+- **`tests/run-state-machine.test.ts`** — the hardcoded full transition table
+  predated the two additive Phase 7 edges; updated `awaiting_approval` to
+  include `integrating` and `executing` to include `awaiting_approval`
+  (spec §9.1 "the one-edge addition" + the §4.5 merge gate).
+- **`src/approvals/approval-service.ts` `listApprovals`** — the sort
+  tiebroke same-millisecond `requestedAt` on the random `id`, making
+  "newest first" non-deterministic for back-to-back requests (a full-suite
+  flake in `approval-service.test.ts`). Now reverses the insertion-ordered
+  rows before the stable sort, so same-tick records list in true creation
+  order (latest created first) independent of the id.
+- **Type errors under `exactOptionalPropertyTypes` + `noUncheckedIndexedAccess`**
+  (all in Phase 7 test files, fixed for the §10.6 typecheck gate):
+  `approval-service.test.ts` (`pendingFor(…)?.id`, `onResolved[1]?.status`),
+  `rpc-handler.test.ts` (`fakeRunService` gains the `setRunBudget` seam),
+  `task-service.test.ts` (capture `overrides.budget` in a local const so the
+  `update` closure keeps the narrowed `RunBudget`).
 
 ## 4. Known pre-existing failures (carried, documented)
 
 `tests/project-catalog.test.ts` — 3 of 6 cases fail on this host because
-`tmpdir()` yields `/var/folders/…` while the catalog canonicalizes paths
-to `/private/var/folders/…` (macOS symlink). Present since Phase 3
-(baseline then 295/3 of 298; Phase 5 baseline 336/3 of 339); the
-fix-vs-document decision is open in `maintain.md`. Unchanged by Phase 6
-(425/3 of 428 — all 89 new Phase 6 tests pass).
+`tmpdir()` yields `/var/folders/…` while the catalog canonicalizes paths to
+`/private/var/folders/…` (macOS symlink). Present since Phase 3 (baseline then
+295/3 of 298; Phase 5 336/3 of 339; Phase 6 425/3 of 428); the fix-vs-document
+decision is open in `maintain.md`. Unchanged by Phase 7 (489/3 of 492 — all
+64 new Phase 7 tests pass).
+
+`tests/integration-strategy.test.ts` — the git-worktree cases are flaky
+**under full-suite load** (temp-dir / worktree contention); they pass 7/7 in
+isolation and in the clean full-suite run that produced the §1 numbers. Not
+introduced by Phase 7 (the Phase 7 diff does not touch the merge strategy).

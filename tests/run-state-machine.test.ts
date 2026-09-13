@@ -30,8 +30,8 @@ describe('run state machine', () => {
   it('exposes the full transition table', () => {
     expect([...allowedTransitions('created')]).toEqual(['planning', 'canceled'])
     expect([...allowedTransitions('planning')]).toEqual(['awaiting_approval', 'executing', 'paused', 'blocked', 'failed', 'canceled'])
-    expect([...allowedTransitions('awaiting_approval')]).toEqual(['executing', 'planning', 'paused', 'blocked', 'failed', 'canceled'])
-    expect([...allowedTransitions('executing')]).toEqual(['integrating', 'validating', 'finalizing', 'paused', 'blocked', 'failed', 'canceled'])
+    expect([...allowedTransitions('awaiting_approval')]).toEqual(['executing', 'integrating', 'planning', 'paused', 'blocked', 'failed', 'canceled'])
+    expect([...allowedTransitions('executing')]).toEqual(['integrating', 'validating', 'finalizing', 'awaiting_approval', 'paused', 'blocked', 'failed', 'canceled'])
     expect([...allowedTransitions('integrating')]).toEqual(['validating', 'finalizing', 'paused', 'blocked', 'failed', 'canceled'])
     expect([...allowedTransitions('validating')]).toEqual(['finalizing', 'executing', 'paused', 'blocked', 'failed', 'canceled'])
     expect([...allowedTransitions('finalizing')]).toEqual(['succeeded', 'failed', 'canceled'])

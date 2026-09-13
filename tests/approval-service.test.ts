@@ -318,8 +318,8 @@ describe('ApprovalService — request / resolve / expire (spec §4.3)', () => {
       expect(all).toHaveLength(3)
       const byProject = f.service.listApprovals(undefined, f.projectId)
       expect(byProject).toHaveLength(3)
-      expect(f.service.pendingFor(runA.id, 'plan').id).toBe(a1.id)
-      expect(f.service.pendingFor(runA.id, 'merge').id).toBe(a2.id)
+      expect(f.service.pendingFor(runA.id, 'plan')?.id).toBe(a1.id)
+      expect(f.service.pendingFor(runA.id, 'merge')?.id).toBe(a2.id)
       expect(f.service.pendingFor(runA.id, 'git-push')).toBeUndefined()
       expect(b1.id).toBeDefined()
     } finally {
@@ -339,7 +339,7 @@ describe('ApprovalService — request / resolve / expire (spec §4.3)', () => {
       const record2 = await hooked.requestApproval({ runId: run.id, type: 'merge', summary: 'm' })
       await hooked.expireApproval(record2.id)
       expect(onResolved.map(r => r.id)).toEqual([record.id, record2.id])
-      expect(onResolved[1].status).toBe('expired')
+      expect(onResolved[1]?.status).toBe('expired')
       hooked.stop()
     } finally {
       await f.runService.stop()

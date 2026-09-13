@@ -287,7 +287,13 @@ export class ApprovalService {
       if (projectId !== undefined && record.projectId !== projectId) continue
       rows.push(record)
     }
-    rows.sort((left, right) => right.requestedAt.localeCompare(left.requestedAt) || right.id.localeCompare(left.id))
+    // Newest first. `requestedAt` is millisecond-resolution, so records created
+    // in the same tick tie; the table iterates in insertion (creation) order,
+    // so reversing it before the stable sort makes same-tick records list in
+    // true creation order (latest created first) without depending on the
+    // random id.
+    rows.reverse()
+    rows.sort((left, right) => right.requestedAt.localeCompare(left.requestedAt))
     return rows
   }
 

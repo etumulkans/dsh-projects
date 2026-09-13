@@ -427,9 +427,10 @@ async function fixture(overrides: {
     }))
   }
   if (overrides.budget !== undefined) {
+    const budget = overrides.budget
     await runService.domain().table('runs').update(run.id, current => ({
       ...current,
-      budget: overrides.budget,
+      budget,
       version: current.version + 1,
     }))
   }
