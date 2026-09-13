@@ -1,6 +1,6 @@
 # Intent — DSH Projects
 
-**Gate:** Intent · **Status:** Phases 0–5 delivered (v0.11.0 released; Phase 5 shipped on `main` @ `c44e054`, no fork PR this cycle) · **Spec:** `DSH_PROJECTS_SPEC.md` · **Architecture:** `docs/dsh-projects-architecture.md`
+**Gate:** Intent · **Status:** Phases 0–6 delivered (v0.12.0 released; Phase 6 shipped on `main` @ `ef5ed66`, no fork PR this cycle) · **Spec:** `DSH_PROJECTS_SPEC.md` · **Architecture:** `docs/dsh-projects-architecture.md`
 
 ## 1. What we are doing
 
@@ -32,393 +32,137 @@ The dashboard today observes and schedules *tasks* (task sources, local store, G
 | 3 | Coordinator — Lead session driving plan creation via structured output | **done (v0.9.0)** |
 | 4 | Task DAG + team execution — `ProjectTaskService`, adapters over `ctx.agentTeams`/`ctx.subagents` | **done (v0.10.0)** |
 | 5 | Git isolation + integration — per-task worktrees, `dsh/run-<id>/<task>` branches, run completion pipeline | **done (v0.11.0)** |
-| 6 | Project Memory — `memory` store, retrieval, distillation, context budget, Memory UI | **next** |
-| 7 | Approvals + budgets — `project_approvals`, budget enforcement | planned |
+| 6 | Project Memory — `memory` store, retrieval, distillation, context budget, Memory UI | **done (v0.12.0)** |
+| 7 | Approvals + budgets — approval modes, `project_approvals` table, code-enforced run budgets | **next** |
 | 8 | Artifacts + final report — `project_artifacts`, report generation | planned |
 | 9 | Triggers — TaskSource events → `ProjectTrigger` adapters | planned |
 | 10 | Recovery + hardening — startup reconciliation | planned |
 | 11 | UI polish — overview/agent/plan/memory/artifacts/automations pages | planned |
 
-## 5. Phase 2 acceptance (delivered, verified in `6118085` + `6cccc3c`)
+## 5. Phase 6 acceptance (delivered, verified in `c95774f`)
 
-- **Domain:** additive `plans` table in `dsh_projects` (format version stays 0) + optional `run.activePlanId`; strict zod schemas; single open domain shared with the run service.
-- **Lifecycle:** pure plan state machine (`draft → awaiting-approval → active → superseded/completed`), immutable content, CAS `revision` bumping only on terminal moves; replan = new version with `replanReason` + `supersedesPlanId`.
-- **Run coupling:** activation supersedes the prior active plan with the new plan's stored reason, moves `run.activePlanId`, appends `plan.*` + `run.replanned` events on the shared per-run event stream; 7 Cordis events fire.
-- **RPC (additive):** `planCreate`/`planList`/`planDetail`/`planTransition` returning records; uuid/enum/revision validation; absent-service bad-requests; `plan.*` error codes (14, incl. the documented `plan.contentInvalid` deviation).
-- **UI:** inspector Plans section (versions, status, expandable detail, per-status actions), New Plan dialog (pattern, tasks with earlier-only dependencies), Supersede dialog; zh/en parity compile-enforced.
-- **Verification:** all 7 spec §11 acceptance criteria pass; `test-report.md` committed in the test stage; storage integration proves plans + `activePlanId` survive a real JSON domain reopen.
+- **Domain:** additive `memory` table in `dsh_projects` (format version stays 0) + two run event types (`run.memory.distilled` / `run.memory.distillation.failed`); strict zod schema (15 kinds, 3 statuses, bounds, `supersedes`, provenance fields, CAS `version`).
+- **Service:** `ProjectMemoryService` — list (active pool; archived opt-in; superseded never listed; kind counts over all active), create (bounds + secret scrubbing + dedup containment ≥ 0.6 → supersession, never delete), update (≥1 patch, CAS), setStatus (legal moves only; superseded immutable); fire-and-forget `distillRun` (driver seam + Harness `dsh-memory-<uuid>` sessions; zero candidates → zero entries and no event; failure → warn + failed event, never into the pipeline).
+- **Retrieval:** pure lexical strategy behind a seam — `score = (3·|Q∩title| + 2·|Q∩tags| + 1·|Q∩body|) / (3·|Q|)`, pinned first, zero-score filter, deterministic ordering, `limit`; budgeted packet builder (coordinator/task budgets, header + pinned/kind sections, 300-char truncation, `undefined` when empty).
+- **Injection:** coordinator first-turn prompt appends the packet (query = run.goal); local/team task adapters insert the memory section (query = title + description); byte-identical prompts when there is no active memory.
+- **RPC/UI:** additive `memoryList`/`memoryCreate`/`memoryUpdate`/`memorySetStatus` (10th handler param, structured not-mounted failure); the Memory tab (项目记忆 / Project Memory) with search, kind chips + counts, show-archived, pin/edit/archive/restore/mark-obsolete, source-run link, add/edit dialogs, supersession notices; zh/en parity compile-enforced; client isolation scan proves `src/client/**` never imports `src/memory/**`.
+- **Verification:** all 8 spec §13 acceptance criteria pass; `test-report.md` committed in the test stage (425/3 of 428 — the 3 pre-existing macOS catalog failures); storage integration proves the table set is exactly `['memory','plans','run_events','runs','tasks']` at domain v0.
 
-## 6. Phase 3 acceptance (delivered, verified in `ca790fc` + `6449cb1`)
+## 6. Phase 7 intent — Approvals + budgets
 
-- **Domain:** additive optional `coordinatorSessionId` (plain `dsh-coordinator-<uuid>` string) on the run record + 3 run event types (`run.coordinator.started/completed/failed`) + 3 Cordis events; **no new tables** — the domain stays format v0 with the same medium table set.
-- **Coordinator:** `CoordinatorService` (single `coordinate()` entry, one session per attempt, in-flight guard) + pure policy module (versioned guidance/prompt with UNTRUSTED-DATA warning) + `HarnessCoordinatorDriver` mirroring `HarnessAgentRunner` (native `ctx.agents.create`, `dsh_projects_submit_plan` tool via `defineTool`, `whenIdle`/`flush`/turn-end/`dispose`) behind a fakeable `CoordinatorDriver` seam.
-- **Plans:** submissions run through the full Phase 2 `createPlan` validation (rejections go back to the agent as tool errors; only valid output persists); one submission per session; replan requires a reason; summary non-blank ≤1000 chars, persisted as the `completed` event detail (not part of the plan record).
-- **Run coupling:** awaited `onPlanStatus` hook on `RunPlanService` + `PlanRunCoupler` (guard-miss = logged no-op): direct → plan `active` + run `executing`; orchestrated → plan `awaiting-approval` + run `awaiting_approval` (existing plan UI completes approve/reject); completed-without-plan / driver failure → run `blocked` (retryable: resume → `planning` → Coordinate again).
-- **RPC/UI:** additive `runCoordinate` (uuid validation, 4 structured `coordinator.*` error codes); inspector 协调/Coordinate action (created/planning only) + Coordinator section (status, session tail, planning summary); zh/en parity compile-enforced.
-- **Verification:** all 7 spec §12 acceptance criteria pass; `test-report.md` committed in the test stage; storage integration proves session id + plans + phase + coordinator events survive a real JSON domain reopen.
+**End state (master spec §18–19, §30):** *a run only does what its approval mode allows, and it stops when it runs out of budget — both enforced in code, both visible and inspectable in the Dashboard, both surviving a restart.*
 
-## 7. Phase 4 intent — Task DAG + team execution
+Today the run state machine already has an `awaiting_approval` phase and the plan flow already emits `plan.approval.requested` / `plan.approved` / `plan.rejected` events (Phases 2–3) — but the approval itself is **ephemeral UI state**: there is no persisted approval object, no mode policy, and no budgets at all (a run can burn tokens/agents/time without limit). Phase 7 makes governance durable and code-enforced.
 
-**End state (master spec §73):** *Coordinator can execute several dependent/parallel tasks.*
+### 6.1 Approval modes (master spec §18)
 
-An **active** plan's `PlannedTask` list becomes a live **ProjectTask** DAG: dependency-gated scheduling, execution by real Harness agents behind adapters (Agent Teams when the composition mounts them, background subagents otherwise), with task/agent state, retries, and lifecycle visible in the Dashboard. No worktree isolation yet — that is Phase 5.
+A per-run (config-defaulted) `ApprovalMode` decides which stages need a human:
 
-### 7.1 Capability slice (master spec §73 Phase 4)
+```ts
+type ApprovalMode = 'manual' | 'plan' | 'guarded' | 'autonomous'
+```
 
-1. **ProjectTask domain** — additive `tasks` table in `dsh_projects` (format version stays 0; storage-domain initializes absent declared tables empty). Spec §11 record: `runId`, `title`/`description`, `role?`, `dependencies` (task ids), status `pending|ready|running|blocked|awaiting-review|succeeded|failed|canceled`, `assignedAgentId?`, `workspaceId?` (**reserved** — filled by Phase 5), `acceptanceCriteria`, `attempt`, `maxAttempts?`, `outputSummary?`, `error?`, `tokenUsage?` (only when the runtime provides usage — spec §29, never invented), timestamps, `version` (CAS on the domain write chain, same pattern as runs/plans).
-2. **Materialization** — when a plan becomes `active` (through the Phase 3 `onPlanStatus` hook), its tasks materialize 1:1 into `ProjectTask` rows, dependencies resolved from plan positions (`t1..tn`) to task ids. Superseding the active plan version retires its task set (never resurrected; the new version materializes fresh). An invalid DAG (cycle, unknown dependency) is rejected at materialization with a structured error — invalid task sets are never persisted.
-3. **DAG scheduling** — a pure scheduler module: dependency validation, cycle detection, ready calculation, concurrency limits, retry backoff — **generalizing the existing `src/orchestrator/scheduling.ts` helpers** (`failureRetryDelay`, `stateLimit`) rather than building a parallel mechanism (spec §12). A pure task state machine is the single authority (unit-tested, CAS on `version`) — the same pattern as the run and plan machines. A task is **ready only when all required dependencies succeeded**; a permanently failed dependency → dependent tasks **blocked**. Transitions are idempotent (re-entry is a rejected no-op, not a silent re-run).
-4. **Execution adapters (spec §13/§14/§31)** — a narrow worker seam (the Phase 3 `CoordinatorDriver` pattern, fakeable in tests):
-   - `TeamRuntimeAdapter` — the **only file** that may touch the experimental `ctx.agentTeams` surface (architecture doc §4). Bound at startup when the host composition mounts it; structural typing inside the adapter file — **no new package dependency** (the plugin's dependency list is unchanged; the experimental package is host-mounted, not imported).
-   - `BackgroundAgentAdapter` — thin adapter over the stable `ctx.subagents`: start / collect / list / stop / message / observe-completion (spec §14). No reimplemented process management.
-   - The MVP worker provider is the local Harness worker (spec §31); the seam keeps Docker/remote/K8s providers possible later without touching orchestration.
-   - **Honest degradation:** when neither runtime is available in the composition, task execution is *explicitly* unavailable — a structured RPC error + a UI state that says so. No fake agents, no silent no-ops (invariant 2).
-5. **Agent roles (spec §15)** — roles are plan/coordinator-selected **labels + guidance**, not hard-coded limits; role → agent-profile/model mapping is an optional additive configuration through the existing preset mechanism (no hard-coded provider or model names).
-6. **Task assignment + retries** — ready tasks are assigned to a live agent (`assignedAgentId`); `attempt` increments per execution; `maxAttempts` bounds retries with the generalized backoff; exhausted attempts → task `failed`; a concise `outputSummary` persists on success.
-7. **Agent lifecycle UI** — Runs inspector **Tasks** section: per-task status in a DAG-aware list (dependencies shown), role, attempt, output summary, error, and agent activity (session identity + turn/token projections where the runtime exposes them — spec §14/§29; never fabricated). zh/en parity compile-enforced.
-8. **RPC (additive)** — `runDetail` gains the run's tasks (additive optional field); the snapshot runs summary carries task counts; a `taskRetry` endpoint re-queues a failed task; run cancellation propagates to in-flight tasks/agents.
-9. **Run coupling** — no new run phases. An unrecoverable task failure (one that blocks the DAG) → run `blocked` (retryable via the existing resume path). **Intent-level decision (Design confirms):** when all tasks of the active plan succeed, the run stays `executing` — the run completion pipeline (`integrating → validating → finalizing → succeeded`) arrives with Phase 5's integration; Phase 4 exposes task-level terminal state and run-level aggregation.
+- **`manual`** — a human approval is required before the major execution stages (plan activation and the external-write stages below).
+- **`plan`** — the human approves the Run Plan; after approval local execution proceeds automatically; external writes still obey Harness permissions.
+- **`guarded`** — ordinary sandboxed work proceeds automatically; potentially dangerous/external actions require approval.
+- **`autonomous`** — the coordinator proceeds without plan approval, within configured permissions and budgets. Even in autonomous mode: never bypass Harness permissions, never silently elevate permissions, never merge into protected production branches by default, never expose secrets.
+- **The default is conservative** — the plugin config default is `plan` (Design finalizes `plan` vs `guarded` and where the mode is set: config default + per-run override at run/plan creation).
 
-### 7.2 Concurrency safety (shared tree, pre-Phase 5)
+Modes map onto the **existing** phase edges — no new run phases: `awaiting_approval` is where a pending approval pauses the run; approve → the run resumes into the phase it was suspended from (the existing `suspendedFrom` machinery); reject → `blocked` (or `failed` for a rejected plan, per the existing plan-rejection edge — Design decides the exact mapping and keeps it consistent with the Phase 3 coupler).
 
-Phase 4 tasks run in the project's existing working tree — no per-task worktrees until Phase 5. Therefore **the default concurrency limit is 1** (serial execution); the limit is configurable per run (spec §12) and the effective limit is visible in the UI. This bounds shared-tree risk until isolation lands.
+### 6.2 Approval objects (master spec §19)
 
-### 7.3 Non-goals (Phase 5+)
+A new additive `project_approvals` table in `dsh_projects` (format version stays 0):
 
-- No per-task worktrees/branches, one-writer-per-worktree invariant, integration worktree/strategy, Git metadata in UI (Phase 5).
-- No Project Memory (6). No `ApprovalRequest` objects, no budgets (7). No report artifacts (8). No triggers (9).
-- No startup reconciliation of orphaned tasks/agents (Phase 10) — disposal on `stop()` is in scope; cross-restart agent reconciliation is not.
-- No interactive re-planning loop from task failures (master spec §49) — a blocked run is retried or re-planned through the existing Phase 3 coordinate/replan paths.
-- No monetary cost figures (spec §29: cost = unknown unless a reliable source exists); token accounting only from native session usage.
+```ts
+interface ApprovalRequest {
+  id: string
+  projectId: string
+  runId: string
+  type: 'plan' | 'external-write' | 'git-push' | 'pull-request' | 'merge' | 'dangerous-action'
+  summary: string
+  payload?: unknown
+  status: 'pending' | 'approved' | 'rejected' | 'expired'
+  requestedAt: string
+  resolvedAt?: string
+  resolvedBy?: string
+}
+```
 
-### 7.4 Acceptance (intent level; each gate verifies its part)
+- **Persistence is the point** — approval state must survive browser refresh and process restart (real `dsh_projects` storage, zod-validated, CAS `version` like the other tables). The existing `plan.approval.*` events become the event-stream projection of the persisted object (request/approve/reject all append events; the object is the single authority for "is this approved?").
+- **One pending approval per (run, type)** — a second request for the same type while one is pending is rejected (idempotent re-request, not a duplicate).
+- **Resolution is a service method** (`approve` / `reject`, CAS on `version`, `resolvedBy` recorded) that (a) persists the status, (b) appends the run event, (c) resumes or blocks the run through the existing state machine — the same code path the plan UI already drives, now backed by the object.
+- **Which types ship in Phase 7:** `plan` (the existing plan approval, now persisted) and `merge` (the Phase 5 integration step's final merge into the project branch — the one external/dangerous stage that exists today). `git-push` / `pull-request` / `external-write` / `dangerous-action` are declared in the schema and the policy table but have **no trigger site yet** (those stages do not exist in the product yet) — the RPC and UI support them generically (invariant 2: the endpoint works for any declared type; no fake trigger sites).
+- **Expiry:** no TTL (Phase 6 non-goal, carried) — `expired` is a declared status reached only by an explicit service call (Design decides the trigger: e.g. run cancellation while pending), not by a background timer.
 
-1. Tasks materialize 1:1 from the active plan version with resolved dependencies; invalid DAGs are rejected at materialization (never persisted); a replan retires the prior task set.
-2. DAG semantics hold: ready only when all dependencies succeeded; a permanently failed dependency blocks dependents; cycle detection rejects cycles; transitions are idempotent.
-3. Ready tasks execute on real agents behind adapters (fakeable in tests); task status, `assignedAgentId`, `attempt` persist; retries respect `maxAttempts` with backoff generalized from `orchestrator/scheduling.ts`.
-4. The agent lifecycle is inspectable in the inspector (task status/role/attempt/summary/error; agent activity from real runtime data); zh/en parity.
-5. Honest degradation: composition without an agent runtime → explicit "execution unavailable" state in RPC + UI; no fake agents.
-6. Storage integration: tasks + task events survive a real JSON domain reopen; medium table set `['plans','run_events','runs','tasks']`; domain stays format v0.
-7. Repo green: typecheck, build, `pnpm vitest run` (modulo the documented pre-existing environment failures).
+### 6.3 Budgets (master spec §30)
 
-### 7.5 Test plan (intent level; Design formalizes seams)
+Additive `RunBudget` on the run record (all fields optional; unset = unlimited):
 
-Pure scheduler/DAG module (validation, cycles, ready calculation, blocking, idempotency); task state machine transition table; `ProjectTaskService` against the in-memory domain harness with the fake worker seam (materialization, scheduling, retry, cancel, restart persistence); adapter contract tests against fakes of the runtime surfaces (plus import isolation: only the adapter file touches the experimental surface); additive RPC endpoints (validation + absent-service); jsdom UI interactions (zh labels); extended storage integration (tasks survive a real JSON reopen; medium table set).
+```ts
+interface RunBudget {
+  maxRuntimeMinutes?: number
+  maxTotalTokens?: number
+  maxInputTokens?: number
+  maxOutputTokens?: number
+  maxAgents?: number
+  maxConcurrentAgents?: number   // already exists per-run; budget view unifies it
+  maxReplans?: number
+  maxRetriesPerTask?: number
+  maxCost?: number               // declared; no cost metering exists yet — enforced as "no value ⇒ unlimited", never fabricated
+}
+```
 
-## 8. Next gate
+- **Enforcement is in code, not model instructions** (master spec §30, explicit):
+  - **~80% of a budget → warning** — a run event (`run.budget.warning`, with the budget key + current/limit in the detail) emitted once per budget per run (no spam on every tick).
+  - **At the limit → stop or pause according to policy** — the Design picks the per-key action (e.g. token/runtime limits → run `paused` with `suspendedFrom`, so a human can raise the budget and resume; retry/replan limits → the specific action is refused with a structured error and the run settles `blocked`); the final report/resultSummary explains **why execution stopped** (the budget key + limit in the detail).
+  - **Where the checks live:** token/runtime checks at the points where usage is already recorded (task completion → `tokenUsage` accumulation; the scheduler tick for runtime); `maxAgents`/`maxConcurrentAgents` in the task scheduler (the concurrency knob already exists — the budget view caps it); `maxRetriesPerTask` in the retry path (the Phase 4 retry logic already counts); `maxReplans` in the plan service (replan attempts already counted via `supersedesPlanId` chains).
+- **Budgets are set at run creation** (RPC `runCreate` gains the optional budget object, validated) and **raised by an explicit transition** while paused (Design: a `runUpdate`-style budget patch endpoint or a dedicated `runSetBudget` — additive RPC either way). No silent auto-raise.
+- **No cost metering** — `maxCost` is declared and validated but there is no price feed in the product; the check is a no-op until a source exists (invariant 2: never fabricate a cost).
 
-**Design (Phase 4 — Task DAG + team execution):** formalize `spec.md` — the `tasks` table schema, the task state machine, materialization/retirement rules, the scheduler module (reuse/generalize `orchestrator/scheduling.ts`), the worker seam + `TeamRuntimeAdapter`/`BackgroundAgentAdapter` contracts and runtime availability detection, the role configuration, the additive RPC surface, the inspector Tasks section, the run-coupling decision (§7.1 item 9), and the full test plan, per the sequencing table above.
+### 6.4 UI (existing Dashboard, zh/en parity compile-enforced)
 
-## 9. Phase 5 intent — Git isolation + integration
+- **RunInspector:** an **Approvals** section — pending approval objects for the selected run (type, summary, requested time) with **Approve / Reject** buttons (dispatch the new RPCs; busy gating + structured error banner per the existing conventions); the run's `approvalMode` displayed; the existing plan approve/reject buttons now resolve the persisted `plan` approval object (same visual, durable backing).
+- **Budgets:** the run's budget + current usage (tokens, runtime, agents, retries) rendered in the inspector with a warning marker when a `run.budget.warning` fired; budget fields in the New Run dialog (optional, all empty = unlimited) — the dialog already carries the run-creation form.
+- **Runs list:** a pending-approval indicator on runs in `awaiting_approval` (the phase is already shown; the indicator names the pending type).
+- **zh/en parity** compile-enforced as in every phase (the `t` key union); new locale keys for modes, approval types/statuses, budget labels, warnings.
 
-**End state (master spec §73):** *parallel coding Agents safely produce an
-integrated branch.*
+### 6.5 RPC (additive, the established pattern)
 
-Phase 4 executes tasks in the project's existing working tree (default
-concurrency 1, §7.1 item 9). Phase 5 gives every live task its own Git
-worktree + branch (one writer per worktree), commits the task's work onto
-its branch, integrates the task branches in a dedicated integration
-worktree, and drives the run through the already-declared
-`integrating → validating → finalizing → succeeded` phases (Phase 1 state
-machine — no new run phases). Git metadata becomes inspectable in the
-Dashboard. Master spec anchors: §16 (Git workspace model), §17 (integration
-strategy), §73 Phase 5.
+- `approvalList` (per run or per project), `approvalApprove` / `approvalReject` (CAS `expectedVersion`, `resolvedBy`), `runSetBudget` (patch the budget of a run in a phase where raising is legal).
+- Absent-service structured bad-requests like Phase 6's memory endpoints; new `approval.*` + `budget.*` dashboard error codes (client `errors.ts` mapping + `decodeDashboardError` envelopes, the `params` field — not `args`).
+- `runCreate` gains the optional `budget` object (additive field; existing callers unchanged).
 
-### 9.1 Capability slices (master spec §73 Phase 5)
+### 6.6 Explicit non-goals (Phase 8+)
 
-1. **Worktree provisioning** — when a task enters `running`, a worktree is
-   provisioned from the project repository: directory
-   `<projectRoot>/worktree/run-<shortRunId>/<taskLeaf>`, branch
-   `dsh/run-<shortRunId>/<taskLeaf>` (spec §16 naming), created from the
-   run's base commit (Design: recorded at materialization). `taskLeaf` is
-   derived from the plan position (`t1…tn`) through the existing
-   `path-safety` leaf normalization — never from task text (spec §16:
-   "Never trust task text directly as a filesystem path"). The existing
-   `WorkspaceManager` + `path-safety` (containment, symlink protection) is
-   reused, not reinvented (invariant 4). The reserved `workspaceId` field
-   is filled with the real worktree identity (path + branch).
-2. **One writer per worktree** — a worktree is allocated exclusively to one
-   live task; the allocation is persisted (part of the task record) and the
-   scheduler enforces exclusivity: a task is never scheduled onto an
-   already-allocated worktree, and reallocation happens only after the
-   previous task is terminal and cleaned up. Enforced by construction +
-   tested, not by convention (spec §16 default rule).
-3. **Task commits** — a task's work is committed onto its branch before the
-   task may reach `succeeded`: the worker adapter commits on completion —
-   agent-made commits stay as-is; a dirty tree at task end is committed by
-   the adapter with a deterministic message (`dsh task <shortTaskId>:
-   <title>`) so no work is silently discarded; an empty tree (no changes)
-   is a legitimate success with no commit. The task record gains additive
-   optional Git metadata: `branch`, `baseCommit`, `headCommit?` — real
-   `git` results only, never fabricated (invariant 2).
-4. **Non-Git projects degrade honestly** — a project root that is not a Git
-   repository cannot be isolated: its tasks run in the shared working tree
-   (Phase 4 behavior), the UI states "no Git isolation" explicitly, and no
-   worktree/branch metadata is shown. No fake Git data (invariant 2).
-5. **Integration** — when all coding tasks of the active plan succeed, the
-   run moves `executing → integrating` (existing edge) and a dedicated
-   integration step (not a user-planned task; Design decides its
-   representation) runs in a dedicated worktree
-   `<projectRoot>/worktree/run-<shortRunId>/integration` (branch
-   `dsh/run-<shortRunId>/integration`, spec §16/§17): task branches are
-   applied in plan order (the MVP strategy is deterministic
-   merge-in-order; spec §17's "configurable strategy" is honored by
-   keeping the strategy behind a seam, but only the deterministic path is
-   shipped), conflicts are a structured failure with the conflicting paths
-   persisted in the event detail — never force-resolved — then validation
-   runs (spec §17). **The repository's default/protected branch is never
-   touched** (spec §17); the only output is the integrated branch.
-6. **Run completion pipeline** — the existing Phase 1 phases are wired
-   end-to-end: all tasks succeeded → `integrating`; integration succeeded →
-   `validating`; validation passed → `finalizing` (cleanup + final state
-   persisted) → `succeeded`. Integration/validation failure → run
-   `blocked` (retryable via the existing resume path — resume re-runs the
-   integration from the immutable task branches; Design sets the
-   blocked-vs-failed boundary). A dead task DAG keeps Phase 4's `blocked`.
-7. **Cleanup** — a terminal run removes its task worktrees + branches and
-   keeps the integrated branch (spec §17 output); a failed run keeps
-   worktrees + branches for inspection (retention is persisted, not
-   guessed). `stop()` removes what the process owns; cross-restart
-   reconciliation of orphaned worktrees is Phase 10 (provisioning is
-   idempotent — a same-identity worktree/branch is verified and reused —
-   so a restart can resume without corruption).
-8. **Git metadata in the UI** — task rows show branch + head-commit short
-   (only when real); the run inspector shows the integration state
-   (running/succeeded/failed + conflicting paths on failure), the
-   integrated branch name, and the cleanup state. zh/en parity
-   compile-enforced. No fabricated Git data (invariant 2).
-9. **RPC (additive)** — `runDetail` tasks carry the Git metadata (additive
-   optional fields); integration progress comes from additive run event
-   types (`run.integration.started/completed/failed` + Cordis events, the
-   Phase 3 coordinator-event pattern); no new endpoint beyond what Design
-   requires (integration re-run rides the existing run resume path).
+- No new run phases (the existing `awaiting_approval` + `suspendedFrom` machinery is reused).
+- No TTL/background expiry timers — `expired` only via explicit service calls.
+- No cost metering/price feeds (`maxCost` declared, unenforceable until a source exists).
+- No approval objects for memory writes (Phase 6 non-goal, carried — memory writes stay service-internal + manual).
+- No protected-branch policy engine — autonomous mode's "never merge into protected production branches by default" is honored by the merge approval gate (the merge always requires approval in every mode except an explicit per-run override, which the Design defines), not by branch-name parsing.
+- No triggers/automations (Phase 9), no artifact system (Phase 8), no recovery of interrupted distillation (Phase 10).
+- No `DashboardSnapshot` version change; approvals/budgets are on-demand RPC data (the runDetail pattern), not snapshot projections.
 
-### 9.2 Concurrency (real parallelism, now safe)
+### 6.7 Acceptance (intent-level; the spec formalizes §-numbered criteria)
 
-Worktrees are what make per-task parallelism safe (spec §16 premise): the
-per-run concurrency limit (Phase 4; default 1, `run.maxConcurrentAgents`)
-now governs true parallel coding agents. The default stays 1 (conservative
-on shared machines); the tests prove parallel execution at limit > 1
-(disjoint + conflicting file sets). One writer per worktree is enforced by
-allocation, not by convention.
+1. **Store** — `project_approvals` is a declared table of `dsh_projects` (v0, no migration); records validate against the strict schema; `version` bumps on every accepted mutation; approvals survive a real JSON domain reopen; the table set grows by exactly one table.
+2. **Policy** — each of the four modes behaves per §6.1 (manual: plan + merge gated; plan: plan gated, merge gated, local execution free after approval; guarded/autonomous: plan ungated, merge gated; autonomous never bypasses Harness permissions); the conservative default is the config default; the mode is stored per run and visible in the UI.
+3. **Objects** — request/approve/reject persist + project onto the run event stream (the existing `plan.approval.*` events remain the plan projection); one pending per (run, type); resolution resumes/blocks the run through the existing state machine; browser refresh and process restart do not lose a pending approval.
+4. **Budgets** — every declared budget key is enforced in code at the named site (80% warning once per key, limit → the per-key policy action, resultSummary explains why); unset keys are unlimited; budgets are set at creation and raised explicitly; no key is enforced by prompt text alone.
+5. **UI** — the Approvals section + Approve/Reject dispatch real RPCs with surfaced errors; the budget/usage panel renders; the New Run dialog carries the optional budget fields; zh/en parity compile-enforced.
+6. **Repo green** — typecheck, build, full `pnpm vitest run` (modulo the documented pre-existing environment failures).
 
-### 9.3 Non-goals (Phase 6+)
+### 6.8 Test plan (intent-level; the spec details the cases)
 
-- No automatic push/PR of the integrated branch — spec §17's "optional
-  push → optional pull request → human review" stays optional: the branch
-  is produced and shown; a human pushes/reviews from it. (Carried to a
-  later phase; no `gh`/remote coupling in this slice.)
-- No interactive conflict-resolution UI — a conflict is a structured
-  failure with persisted conflicting paths; resolution happens via the
-  resume path or a human's manual Git work on the branch.
-- No Project Memory (6). No `ApprovalRequest` objects, no budgets (7). No
-  report artifacts (8). No triggers (9).
-- No startup reconciliation of orphaned worktrees/branches (10) — `stop()`
-  removes what it owns; provisioning idempotency makes a restart safe.
-- No monetary cost figures; token accounting only from native session
-  usage (unchanged from Phase 4).
+- `tests/approval-service.test.ts` (new): the mode policy table (all 4 modes × the gated stages), request/approve/reject CAS + one-pending-per-(run,type), event projection (plan events unchanged), resume/block through the real state machine, reopen persistence.
+- `tests/budget-enforcement.test.ts` (new): per-key 80% warning (once, not per tick), limit actions (pause vs refuse), the resultSummary explanation, unset = unlimited, budget patch legality.
+- `tests/task-service.test.ts` (extended): `maxAgents` / `maxConcurrentAgents` / `maxRetriesPerTask` enforcement at the scheduler/retry sites; token accumulation triggering the warning + pause.
+- `tests/plan-service.test.ts` (extended): `maxReplans` refusal.
+- `tests/rpc-handler.test.ts` (extended): the three approval endpoints + `runSetBudget` + `runCreate` budget validation; absent-service failures; the new error codes (with `params`).
+- `tests/dashboard-approvals.test.tsx` (new, jsdom): the Approvals section renders pending objects, Approve/Reject dispatch the RPCs with busy gating + error banners, the budget panel renders usage + warning markers, the New Run dialog budget fields dispatch into `runCreate`; zh + en.
+- `tests/run-storage-integration.test.ts` (extended): the table set is exactly `['memory','plans','project_approvals','run_events','runs','tasks']` (Design finalizes the table name); approvals + budget fields survive a real JSON reopen; domain stays v0.
+- Client isolation: the new scan pattern extends to the approval types (client mirror types, no `src/approvals/**` import).
 
-### 9.4 Acceptance (intent level; each gate verifies its part)
+## 7. Next gate
 
-1. Every live task in a Git project runs in its own worktree + branch
-   (spec §16 naming); the one-writer-per-worktree invariant holds
-   (allocation exclusivity, tested); non-Git projects run in the shared
-   tree with an explicit UI notice and no Git metadata.
-2. Task work is committed onto the task branch before `succeeded` (no
-   silently discarded work; empty tree = no-commit success); Git metadata
-   (branch, base/head commits) is real or absent, never fabricated.
-3. All tasks succeeded → run `integrating` → the integrated branch is
-   produced by the deterministic merge-in-order strategy in the
-   integration worktree; a conflict is a structured failure (conflicting
-   paths persisted), never force-resolved; the default/protected branch is
-   never touched.
-4. The completion pipeline is wired end-to-end on the existing state
-   machine (no new phases): `integrating → validating → finalizing →
-   succeeded`; a failed integration leaves the run `blocked` and a resume
-   re-runs the integration from the immutable task branches.
-5. Cleanup: a terminal run removes task worktrees + branches and keeps the
-   integrated branch; a failed run keeps them for inspection; `stop()`
-   removes what it owns.
-6. UI: per-task branch + head-commit, integration state + conflicting
-   paths, integrated branch name — zh/en parity compile-enforced, no
-   fabricated Git data.
-7. Storage: Git metadata + integration events survive a real JSON domain
-   reopen; `dsh_projects` stays format version 0.
-8. Repo green: typecheck, build, `pnpm vitest run` (modulo the documented
-   pre-existing environment failures); parallel execution at concurrency
-   > 1 proven by tests.
-
-### 9.5 Test plan (intent level; Design formalizes seams)
-
-A pure Git-workspace module (branch/worktree naming normalization, leaf
-safety, allocation exclusivity) against fixture Git repositories (real
-`git` CLI in a temp repo — the existing `workspace-manager` test pattern);
-`task-service` tests extended for the worktree lifecycle (provision on
-`running`, commit on success, empty-tree success, cleanup on terminal,
-non-Git degradation); an integration-strategy module (merge-in-order over
-disjoint + overlapping changes, the conflict case with persisted paths);
-the run pipeline coupling (all-succeeded → `integrating` →
-`succeeded`; conflict → `blocked` → resume → re-integration from the
-unchanged task branches); additive RPC (validation + absent-service); jsdom
-UI interactions (zh labels for branch/integration rows, the non-Git
-notice); extended storage integration (Git metadata + integration events
-survive a real JSON reopen; medium table set unchanged).
-
-## 10. Next gate
-
-**Design (Phase 5 — Git isolation + integration):** formalize `spec.md` —
-the worktree provisioning module (naming, base commit, idempotent
-reuse), the one-writer allocation registry, the task-commit contract, the
-integration strategy module (merge-in-order, conflict detection), the
-run-completion pipeline coupling, cleanup/retention rules, the additive
-storage fields + run event types, the RPC surface, the inspector Git
-metadata section, the non-Git degradation path, and the full test plan,
-per the sequencing table above.
-
-## 11. Phase 6 intent — Project Memory
-
-**End state (master spec §73):** *Run #2 can automatically reuse knowledge
-learned in Run #1.*
-
-Phase 5 made a run's work durable in Git. Phase 6 makes a run's *knowledge*
-durable in the project: structured, persistent, searchable project memory
-that is distilled from finished runs, deduplicated and superseded (never
-blindly deleted), retrieved with a local lexical strategy under an explicit
-context budget, and injected into the next run's coordinator and task
-prompts — plus a Memory page in the Dashboard where the user manages it
-manually. Memory is NOT chat history: only reusable knowledge is persisted
-(master spec §21). Master spec anchors: §20 (memory model), §21 (write
-policy), §22 (dedup/supersession), §23 (retrieval), §24 (context budget),
-§25 (management UI), §73 Phase 6.
-
-### 11.1 Capability slices (master spec §73 Phase 6)
-
-1. **Memory store** — a new additive `memory` table in the `dsh_projects`
-   domain (declared table set grows; the domain stays format v0 — same
-   additive pattern as the Phase 4 `tasks` table, no migration). The record
-   carries the §20 shape: `kind` from the 15 declared kinds
-   (architecture, decision, convention, dependency, environment, testing,
-   deployment, operations, research, finding, known-problem, failure-pattern,
-   procedure, repository-map, user-preference), `title`/`body`, `tags`,
-   source provenance (`sourceRunId?`/`sourceTaskId?`/`sourceSessionId?`),
-   `confidence?`, `status: active | superseded | archived`, `supersedes?`,
-   `pinned?`, `createdAt`/`updatedAt`, `version` (CAS, the same optimistic
-   concurrency pattern as plans/runs/tasks).
-2. **Memory write policy (distillation)** — memory entries are created only
-   by (a) a **distillation step** at the end of a run: when a run reaches
-   `succeeded`, a distillation pass (Design: the exact trigger point and the
-   representation — the natural seam is the Phase 3 coordinator structured-
-   output channel, which already runs a real lead session for plan creation)
-   proposes *reusable knowledge* as structured candidates (kind, title,
-   body, tags, confidence, source run/task); candidates are validated
-   (known kind, non-empty body, bounded length, no raw transcript dumps)
-   before persisting with `sourceRunId`/`sourceTaskId`. Raw task output,
-   token usage, and session chatter are never persisted as memory
-   (§21 "Bad memory"). (b) **Manual notes** created from the Memory UI.
-   When no agent runtime is mounted, auto-distillation is a no-op and memory
-   is manual-only — honest degradation, no fake entries (invariant 2).
-3. **Deduplication and supersession** — on write, the service compares the
-   candidate against same-`kind` active entries (lexical overlap, Design:
-   exact scoring): a near-duplicate *supersedes* the old entry — old →
-   `superseded`, new → `active` with `supersedes` pointing at the old id —
-   keeping the audit trail; nothing is ever deleted by the system
-   (§22). Archiving (user action) hides an entry from retrieval without
-   deleting it.
-4. **Retrieval (local lexical strategy)** — a `search({ projectId, query,
-   kinds?, tags?, limit? })` interface per §23: pinned entries first, then
-   kind/tag filtering, then lexical relevance (deterministic term-based
-   scoring over title+body+tags; no external dependencies, no mandatory
-   vector DB), then recency as a tie-break. The strategy sits behind a seam
-   so semantic/vector retrieval can be added later (master spec §23:
-   "Design it so semantic/vector retrieval can be added later").
-5. **Context budget + injection** — retrieval is always bounded: config
-   carries max entries, max characters (pinned budget + retrieved budget,
-   §24). A compact context packet (PROJECT SUMMARY with per-kind sections —
-   relevant architecture / decisions / testing knowledge / known pitfalls)
-   is built from the bounded search and injected into (a) the coordinator's
-   session context and (b) task prompts, so Run #2's agents see Run #1's
-   knowledge. No packet when the project has no active memory (no
-   placeholder text, invariant 2).
-6. **Memory UI** — a Memory page in the existing Dashboard (Design: tab
-   placement; zh/en parity compile-enforced as in Phases 2–5): search,
-   filter by kind (with per-kind counts), filter by tag, inspect the source
-   Run (deep link to the existing run inspector), pin/unpin, edit, archive,
-   mark obsolete (supersession), see supersession relationships
-   (old ↔ new), and create a manual note (§25). Every control is backed by
-   a real RPC — no dead buttons (invariant 2).
-
-### 11.2 Non-goals (Phase 7+)
-
-- No semantic/vector retrieval, no embeddings, no mandatory external vector
-  database (§23 explicitly defers it; the seam exists).
-- No memory sharing across projects — memory is per-project by model.
-- No automatic expiry/TTL or background garbage collection of memory —
-  supersession + manual archiving only (audit trail preserved).
-- No approval modes for memory writes (Phase 7 approval objects apply to
-  runs/plans; memory writes are service-internal + manual).
-- No budget/cost enforcement (Phase 7) — the context budget is a retrieval
-  bound, not a spend limit.
-- No artifact system (Phase 8): memory entries are knowledge, not
-  documents; reports/artifacts remain a separate later phase.
-- No per-entry provenance graph beyond `supersedes` + the three source
-  fields (no citation network, no edit history table in this phase).
-
-### 11.3 Acceptance (intent level; each gate verifies its part)
-
-1. Store: `memory` is a declared table of `dsh_projects` (format v0, no
-   migration); records validate against the strict §20 shape; `version`
-   bumps on every accepted mutation (CAS); `superseded`/`archived` entries
-   are retained, never deleted by the system.
-2. Write policy: only distillation (real structured candidates, validated)
-   and manual notes create entries; raw output is never persisted as
-   memory; a run with no reusable knowledge produces zero entries (no
-   filler); unmounted runtime → no auto entries, no error spam.
-3. Dedup/supersession: a near-duplicate candidate in the same kind flips the
-   old entry to `superseded` and links it via `supersedes`; distinct facts
-   both stay active; archive hides from retrieval; the audit trail (old
-   entry, its status, the link) is intact after reopen.
-4. Retrieval: deterministic lexical search — pinned first, kind/tag filters
-   respected, relevance ordered, `limit` honored; empty project → empty
-   result (no fabricated entries); the strategy seam accepts a fake
-   implementation in tests.
-5. Budget + injection: the context packet respects max-entries and
-   max-characters (pinned + retrieved budgets) and is injected into the
-   coordinator context and task prompts; no packet with no active memory.
-   End-to-end: knowledge distilled from Run #1 is present in Run #2's
-   injected context (the phase's end state).
-6. UI: the Memory page renders search/kind counts/tags/source-run link/
-   pin/edit/archive/supersession view/manual create; zh/en parity
-   compile-enforced; every action dispatches a real RPC (absent-service and
-   validation errors surfaced, never swallowed).
-7. Storage: memory entries + their statuses survive a real JSON domain
-   reopen; the medium table set grows by exactly one table; domain stays
-   v0.
-8. Repo green: typecheck, build, `pnpm vitest run` (modulo the documented
-   pre-existing environment failures).
-
-### 11.4 Test plan (intent level; Design formalizes seams)
-
-Memory store/state module (record validation, CAS, status transitions,
-supersession link invariants); distillation service against a fake
-coordinator/structured-output seam (candidate validation, bad-memory
-rejection, no-runtime no-op, zero-entry runs); dedup/supersession unit
-cases (near-duplicate flip, distinct facts, idempotent rewrite); retrieval
-module (scoring determinism, pinned priority, filters, limit, empty case,
-fake-strategy seam); context-packet builder (budgets, sections, absence);
-coordinator + task-service coupling (Run #1 → Run #2 injection end-to-end on
-the in-memory domain, including the no-runtime degradation); additive RPC
-(validation + absent-service); jsdom UI interactions (zh + en: search,
-kind counts, pin, edit, archive, supersession view, manual create, source-run
-deep link); extended storage integration (memory survives a real JSON
-reopen; table set `['memory','plans','run_events','runs','tasks']`).
-
-## 12. Next gate
-
-**Design (Phase 6 — Project Memory):** formalize `spec.md` — the `memory`
-table schema + strict record spec, the memory state machine (status
-transitions, CAS, supersession rules), the distillation step (trigger point,
-candidate schema, validation, the structured-output seam), the dedup scoring
-contract, the lexical retrieval strategy + seam, the context-budget config
-+ packet builder, the injection points (coordinator context, task prompts),
-the additive RPC surface, the Memory page (placement, zh/en keys), and the
-full test plan, per §11.
+**Design (Phase 7 — Approvals + budgets):** formalize `spec.md` — the `project_approvals` table schema + strict record spec, the approval mode policy table (mode × gated stage → required/not, with the exact phase-edge mapping onto the existing state machine), the approval state machine (status transitions, CAS, one-pending rule, expiry path), the budget schema + per-key enforcement sites + the 80%/limit policy table (warning event shape, per-key limit action), the additive RPC surface (approvalList/approvalApprove/approvalReject/runSetBudget + runCreate budget field), the error codes, the UI (Approvals section, budget panel, New Run dialog fields, zh/en keys), and the full test plan, per §6.
