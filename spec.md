@@ -1,431 +1,637 @@
-# Spec — Phase 5: Git isolation + integration
+# Spec — Phase 6: Project Memory
 
-**Gate:** Design · **Intent:** `intent.md` §9 · **Master spec:** `DSH_PROJECTS_SPEC.md` §73 Phase 5, §16, §17 · **Architecture:** `docs/dsh-projects-architecture.md`
+**Gate:** Design · **Intent:** `intent.md` §11 · **Master spec:** `DSH_PROJECTS_SPEC.md` §73 Phase 6, §20–§25 · **Architecture:** `docs/dsh-projects-architecture.md`
 
 ## 1. Goal and success
 
-Phase 4 executes every live task in the project's existing working tree
-(default concurrency 1). Phase 5 gives each live task its own Git worktree +
-branch (one writer per worktree), commits the task's work onto its branch
-before the task may reach `succeeded`, integrates the task branches in a
-dedicated integration worktree with a deterministic merge-in-order strategy,
-and drives the run through the already-declared
-`integrating → validating → finalizing → succeeded` phases (Phase 1 state
-machine — no new run phases). Git metadata becomes inspectable in the
-existing Dashboard (zh/en).
+Phase 5 made a run's *work* durable in Git. Phase 6 makes a run's
+*knowledge* durable in the project: a per-project, structured, persistent,
+searchable memory store (master spec §20) that is filled only by validated
+distillation of finished runs and by manual notes (§21), deduplicated and
+superseded with an audit trail instead of deletion (§22), retrieved with a
+deterministic local lexical strategy behind a swappable seam (§23), injected
+into the next run's coordinator and task prompts under an explicit context
+budget (§24), and managed on a new Memory page in the existing Dashboard
+(§25).
 
-**Success (master spec §73 Phase 5):** *parallel coding Agents safely
-produce an integrated branch* — end-to-end, persisted, restart-surviving,
-with an explicit "no Git isolation" degradation (shared tree, real notice)
-instead of fake worktree data when the project is not a Git repository.
+**Success (master spec §73 Phase 6):** *Run #2 can automatically reuse
+knowledge learned in Run #1* — end-to-end, persisted, restart-surviving,
+with honest degradation (no agent runtime → manual-only memory, no fabricated
+entries, no error spam) instead of fake memory data.
 
 ## 2. Invariants (from `intent.md` §3)
 
-1. **Preserve the existing safe workspace strategy** — reuse
-   `src/workspace/path-safety.ts` (leaf normalization, containment, symlink
-   protection) and the existing `WorkspaceManager` Git discipline; no new
-   package dependency; Git only via `node:child_process` `execFile`.
-2. **No placeholder APIs, no fake UI data** — worktree/branch/commit fields
-   are real `git` results or absent; a non-Git project shows an explicit
-   notice; a foreign worktree occupying an expected path is refused, never
-   adopted and never deleted.
+1. **No invented APIs.** The distillation driver reuses the exact
+   `HarnessCoordinatorDriver` mechanics (`ctx.agents.create` + `setup`
+   `defineTool` + one user message + `whenIdle` + `flush` + turn-end reason +
+   `dispose`) — no new Harness surface.
+2. **No placeholder APIs, no fake UI data.** Memory entries are real
+   (distilled or manual); an empty project shows an explicit empty state; a
+   run with no reusable knowledge produces zero entries; no packet is
+   rendered when a project has no active memory.
 3. **Additive only** — the `dsh_projects` domain stays at **format version
-   0**; existing record shapes only gain optional fields;
-   `DashboardSnapshot.version` stays 2.
-4. **One writer per worktree** (master spec §16 default rule) — exclusive by
-   construction (unique per-task naming) + persisted identity + the
-   conflict guard of §4.3.
-5. **Never touch the repository's default/protected branch** (master spec
-   §17) — only `dsh/run-*` branches are created and deleted; the integration
-   output is the integrated branch, nothing more.
-6. The run state machine stays the single authority for run phases; the
-   completion pipeline reuses existing phases; no new phases.
-7. UI extends the existing `DashboardSurface` inspector; zh/en parity
-   compile-enforced.
-8. State survives a process restart (real-JSON storage integration test);
-   provisioning is idempotent so a restart can resume without corruption.
-9. Repo green: `pnpm run typecheck`, `pnpm run build`, `pnpm vitest run`
-   (modulo the documented pre-existing environment failures).
+   0** (one new declared table, two new run event types); existing record
+   shapes only gain optional fields; `DashboardSnapshot.version` stays 2.
+4. **No chat history, no raw dumps** (master spec §20/§21) — only reusable
+   knowledge persists; raw task output, usage stats, and session chatter are
+   never stored as memory; candidates containing secrets are rejected.
+5. **No blind deletion** (master spec §22) — supersession and archiving only;
+   the system never deletes a memory entry; `superseded` entries are immutable
+   (audit trail).
+6. **Deterministic retrieval** — same inputs, same output: no randomness, no
+   clock reads inside scoring, stable tie-breaks.
+7. **Budgeted injection** — the context packet always respects its entry and
+   character budgets (§24); injection is a bounded section of the existing
+   prompts, never an unbounded history dump.
+8. **Client isolation extends** — `src/client/**` never imports
+   `src/memory/**`; the UI talks to memory only through the additive RPC
+   surface (same rule as the `git-workspace.ts` isolation of Phases 4/5).
+9. UI extends the existing `DashboardSurface` (one new top-level tab); zh/en
+   parity compile-enforced.
+10. State survives a process restart (real-JSON storage integration test).
+11. Repo green: `pnpm run typecheck`, `pnpm run build`, `pnpm vitest run`
+    (modulo the documented pre-existing environment failures).
 
 ## 3. Storage (additive, domain stays v0)
 
-### 3.1 Task record — `src/tasks/types.ts` + `src/tasks/spec.ts`
-
-| Field | Type | Notes |
-| --- | --- | --- |
-| `workspaceId` | `string?` | RESERVED in Phase 4, populated in Phase 5: the canonical worktree path. Absent for non-Git projects and shared-tree runs. |
-| `branch` | `string?` | Task branch name (`dsh/run-<short>/<leaf>`); set together with `workspaceId`. |
-| `baseCommit` | `string?` | Full SHA of the repository `HEAD` at provisioning (creation only). |
-| `headCommit` | `string?` | Full SHA of the task branch after the task's commit; equal to `baseCommit` when the task produced no changes. Set on `succeeded`. |
-
-`ProjectTaskView` gains the same four optional fields (lossless projection).
-
-### 3.2 Run record — `src/runs/types.ts` + `src/runs/spec.ts`
-
-| Field | Type | Notes |
-| --- | --- | --- |
-| `integrationBranch` | `string?` | Set when integration completes (direct CAS update on the borrowed `runs` table — the Phase 3 `coordinatorSessionId` pattern). Survives to `succeeded`. |
-| `integrationHead` | `string?` | Full SHA of the integrated branch tip at integration completion. |
-
-The run view spreads the record, so both flow automatically into
-`runDetail` and the snapshot run summary.
-
-### 3.3 Run event types — additive to `RUN_EVENT_TYPES`
-
-`run.integration.started` (detail: the integration branch),
-`run.integration.completed` (detail: integrated branch + merged task
-positions), `run.integration.failed` (detail: conflicting paths or the
-error, truncated to `EVENT_DETAIL_LIMIT`).
-
-Extending the enum is additive (stored records unchanged) → the domain
-version stays 0. The medium table set is unchanged:
-`['plans', 'run_events', 'runs', 'tasks']`.
-
-## 4. Git workspace model — `src/tasks/git-workspace.ts` + `src/workspace/git.ts`
-
-### 4.1 Shared Git helper (extraction, behavior unchanged)
-
-`runGit(cwd, args, timeoutMs, signal?)` — the exact helper
-`WorkspaceManager` uses today (`execFile('git', ['-C', cwd, …])`, bounded
-output buffer, abort-aware, stderr-tailed error message) — is extracted from
-`src/workspace/manager.ts` into `src/workspace/git.ts`. The existing
-`WorkspaceManager` and the new task worktree module both import it.
-`tests/workspace-manager.test.ts` staying green is the regression proof.
-
-New constant: `GIT_OPERATION_TIMEOUT_MS = 30_000` (`src/tasks/constants.ts`).
-
-### 4.2 Naming (pure, deterministic)
-
-| Function | Result |
-| --- | --- |
-| `shortRunId(runId)` | First 8 characters of the run UUID (hex — ref-safe). |
-| `taskLeaf(planTaskId)` | `workspaceLeaf(planTaskId)` from `path-safety.ts` — always normalized; the function never trusts its input even though the schema already enforces `^t[1-9][0-9]*$`. |
-| `taskBranchName(runId, planTaskId)` | `dsh/run-<shortRunId>/<leaf>` (master spec §16). |
-| `integrationBranchName(runId)` | `dsh/run-<shortRunId>/integration`. |
-| `taskWorktreePath(projectRoot, runId, planTaskId)` | `<projectRoot>/worktree/run-<shortRunId>/<leaf>` (master spec §16 example layout). |
-| `integrationWorktreePath(projectRoot, runId)` | `<projectRoot>/worktree/run-<shortRunId>/integration`. |
-
-Every name is derived from `(projectRoot, runId, planTaskId)` — **never from
-task title/description text** (master spec §16: “Never trust task text
-directly as a filesystem path”). An 8-character short id can in principle
-collide across runs; the conflict guard of §4.3 is the backstop (a foreign
-identity at that location is refused, never adopted). The `worktree/`
-directory is untracked in the main checkout — by design (master spec §16
-layout); the harness never writes the project's `.gitignore`.
-
-### 4.3 `TaskWorktreeManager` (host module)
-
-`provisionTaskWorktree({ repositoryRoot, projectRoot, runId, planTaskId }) → { path, branch, baseCommit?, createdNow }`:
-
-1. Compute path/branch; `assertContained(projectRoot, path)`; create the
-   `worktree/run-<short>/` parent with the existing manager's discipline
-   (real directory, not a symlink, `realpath` revalidation).
-2. **Idempotent reuse (restart safety):** when the path already exists it is
-   adopted only if it is a real directory, a worktree of `repositoryRoot`
-   (common-directory equality — the `WorkspaceManager.assertGitWorktree`
-   check), and its checked-out branch equals the expected task branch. All
-   three → reuse (`createdNow: false`, no `baseCommit` returned — the
-   persisted record keeps the original base). Any mismatch →
-   `task.workspaceConflict` (one-writer invariant; the foreign tree is
-   neither adopted nor deleted).
-3. **Create:** `git -C <repositoryRoot> worktree add -b <branch> <path>
-   HEAD`, then `baseCommit = git rev-parse HEAD` (repository root), then
-   revalidate (common-directory check). Any Git failure →
-   `task.worktreeFailed` (message carries the stderr tail).
-
-`commitTaskWork({ path, planTaskId, title }) → { headCommit, committed }`:
-
-- `git -C <path> status --porcelain`; when changes exist: `git add -A` +
-  `git commit -m "dsh task <planTaskId>: <title ≤ 120 chars>"`. The commit
-  uses the repository's configured identity — **no invented identity**; a
-  missing identity is `task.commitFailed` with an actionable message.
-  Clean tree → `committed: false`.
-- `headCommit = git rev-parse HEAD` (equals `baseCommit` when nothing was
-  committed).
-
-`removeTaskWorktree({ repositoryRoot, projectRoot, path }) → boolean`:
-
-- `git -C <repositoryRoot> worktree remove --force <path>`; when git reports
-  no registered worktree (a crashed mid-creation), fall back to a
-  revalidated plain removal (real directory, `assertContained`, not a
-  symlink) and `rm`. Returns whether anything was removed.
-
-`removeBranch({ repositoryRoot, branch }) → boolean`: `git branch -D
-<branch>`; “not found” → `false`.
-
-All operations are idempotent and safe to re-run (restart, resume, cleanup
-retries).
-
-## 5. Integration strategy — `src/tasks/integration.ts`
-
-Master spec §17: “The exact strategy should be configurable. Support at
-minimum a clean, deterministic integration path.” The strategy is a seam
-with one shipped implementation:
+### 3.1 Memory record — `src/memory/types.ts` + `src/memory/spec.ts`
 
 ```ts
-interface IntegrationStrategy {
-  readonly name: string
-  run(input: IntegrationInput): Promise<IntegrationOutcome>
+export const MEMORY_KINDS = [
+  'architecture', 'decision', 'convention', 'dependency', 'environment',
+  'testing', 'deployment', 'operations', 'research', 'finding',
+  'known-problem', 'failure-pattern', 'procedure', 'repository-map',
+  'user-preference',
+] as const // 15 kinds, master spec §20 — the complete declared set
+export const MEMORY_STATUSES = ['active', 'superseded', 'archived'] as const
+export type MemoryKind = (typeof MEMORY_KINDS)[number]
+export type MemoryStatus = (typeof MEMORY_STATUSES)[number]
+export type MemoryId = string // uuid
+
+export interface ProjectMemoryRecord {
+  readonly id: MemoryId
+  readonly projectId: string
+  readonly kind: MemoryKind
+  readonly title: string
+  readonly body: string
+  readonly tags: readonly string[]
+  readonly sourceRunId?: string
+  readonly sourceTaskId?: string
+  readonly sourceSessionId?: string
+  readonly confidence?: number
+  readonly status: MemoryStatus
+  readonly supersedes?: MemoryId
+  readonly pinned?: boolean
+  readonly createdAt: string
+  readonly updatedAt: string
+  readonly version: number
 }
 ```
 
-`MergeInOrderStrategy` (the only MVP strategy):
+`projectMemoryRecordSchema` (strict zod, in `src/memory/spec.ts`, the same
+conventions as `src/runs/spec.ts`): `id`/`projectId` uuid; `kind`
+`z.enum(MEMORY_KINDS)`; `title` nonBlank `.max(200)`; `body` nonBlank
+`.max(12_000)`; `tags` array of nonBlank `.max(40)` strings, `.max(20)`
+items; `sourceRunId`/`sourceTaskId` uuid optional; `sourceSessionId` nonBlank
+optional (prefixed session id, not a bare uuid — same convention as
+`coordinatorSessionId`); `confidence` `z.number().min(0).max(1)` optional;
+`status` `z.enum(MEMORY_STATUSES)`; `supersedes` uuid optional; `pinned`
+boolean optional; `createdAt`/`updatedAt`/`supersedes`… timestamps;
+`version` `z.number().int().min(1)`. `.strict()` as with every
+`dsh_projects` table.
 
-1. Provision the integration worktree (§4.3; branch
-   `dsh/run-<short>/integration`, from the repository `HEAD` at integration
-   time). On a re-run (resume after a failed attempt) the previous attempt's
-   integration worktree + branch are removed first (best-effort) and a fresh
-   one is provisioned — deterministic re-run.
-2. For every non-empty task — `headCommit !== baseCommit` — in numeric
-   `planTaskId` order (plan order): `git -C <integrationPath> merge --no-ff
-   <taskBranch> -m "dsh merge <planTaskId>"`.
-3. **Conflict:** capture `git diff --name-only --diff-filter=U`, then
-   `git merge --abort` → outcome `conflict` with `conflictingPaths`; the
-   integration worktree + branch are kept for inspection; no force
-   resolution, no silent skip.
-4. Outcome: `{ status: 'integrated' | 'conflict', integratedBranch,
-   integratedHead, merged: string[], skipped: string[], conflictingPaths? }`
-   (`skipped` = tasks that produced no commits).
+Validation bounds (enforced by the service, §4.2): title ≤ 200 chars,
+body ≤ 12 000 chars, ≤ 20 tags of ≤ 40 chars each.
 
-`verifyIntegration({ repositoryRoot, integrationPath, integrationBranch,
-taskBranches }) → { ok, missing? }` (the validating-phase check): the
-branch resolves (`rev-parse --verify`), the worktree is sound
-(common-directory check), and every merged task branch is an ancestor of the
-integrated branch (`git merge-base --is-ancestor`).
+### 3.2 Declared tables — `src/runs/spec.ts`
 
-## 6. `ProjectTaskService` extension (host — `src/tasks/task-service.ts`)
+`dshProjectsDomainSpec.tables` gains exactly one additive entry (imported
+from `src/memory/spec.ts`, the same one-way import edge as
+`projectTaskRecordSchema`):
 
-Constructor gains two optional parameters (after `worker`):
-`worktreeManager?: TaskWorktreeManager` and
-`integrationStrategy?: IntegrationStrategy` (default `MergeInOrderStrategy`).
-`worktreeManager === undefined` ⇒ no isolation at all (Phase 4 behavior;
-test seam). Production wiring always passes the real manager + strategy.
+```ts
+// Additive (Phase 6): durable per-project knowledge (spec §3.1).
+memory: domainTable<MemoryId, ProjectMemoryRecord>(projectMemoryRecordSchema),
+```
 
-- **`beginExecution` (task → running):** after the CAS to `running`, before
-  dispatch: `source = catalog.projectWorkspaceSource(run.projectId)` (the
-  existing per-project decision — `worktree` when the project has a Git
-  repository, `controlled-directory` otherwise).
-  - `worktree` strategy + manager: `provisionTaskWorktree`; on success a
-    second CAS adds `workspaceId` (path), `branch`, and `baseCommit`
-    (creation only). On failure the attempt settles through the **existing
-    settlement path** as a synthetic failed worker result
-    (`kind: 'failed', error: 'worktree provisioning failed: …'`) — the
-    attempt budget, backoff, and events all apply unchanged; the next
-    attempt re-provisions idempotently.
-  - `controlled-directory` (or no manager): no fields; the worker's
-    `cwd` stays `project.root` (exactly Phase 4).
-- **`executeTask`:** `cwd = started.workspaceId ?? project.root`; the worker
-  input gains the optional `branch` (§6.1 below).
-- **`settleResult` success path (worktree tasks only):** before the CAS to
-  `succeeded`, `commitTaskWork` — a commit failure settles the attempt as a
-  failed result (`task.commitFailed`, retryable); on success the CAS adds
-  `headCommit`. **After** the transition, `removeTaskWorktree` (best-effort:
-  a failure is a warn log — the task is already `succeeded`; the run's
-  finalization is the authoritative cleanup). A task can never reach
-  `succeeded` with uncommitted work (intent §9.1.3).
-- **Failure / cancel / retirement:** no commit; the worktree is kept for
-  inspection (cleanup only at run finalization, §7).
-- **Retry (new attempt):** provisioning is idempotent → the same worktree is
-  reused **as-is** — the previous attempt's uncommitted work is visible to
-  the agent; no `git reset`, no silent discard.
-- **`stop()`:** unchanged (abort in-flight workers; no filesystem cleanup;
-  cross-restart reconciliation is Phase 10).
+The domain stays **version 0**; storage-domain initializes the absent table
+as empty on open (no migration). The medium table set asserted by the
+storage integration tests grows to `['memory', 'plans', 'run_events',
+'runs', 'tasks']`.
 
-### 6.1 Worker seam (additive)
+### 3.3 Run event types — additive to `RUN_EVENT_TYPES`
 
-`TaskWorkerInput.branch?: string` — `LocalTaskWorker` uses it for one line
-of prompt guidance (“You are working in a dedicated Git worktree on branch
-<b>; your changes will be committed to this branch.”); `TeamTaskWorker` and
-fakes ignore it. `worker.ts` is otherwise unchanged; import isolation
-(`agentTeams` in exactly one file) is untouched.
+```ts
+// Additive (Phase 6): memory distillation of a finished run (spec §3.3/§6).
+'run.memory.distilled', 'run.memory.distillation.failed',
+```
 
-## 7. Run completion pipeline (driven by the existing tick)
+- `run.memory.distilled` — title `Memory distilled`; detail
+  `${persisted} entries persisted (${superseded} superseded)`; emitted only
+  when `persisted + superseded > 0` (a zero-entry distillation emits
+  nothing — no noise).
+- `run.memory.distillation.failed` — title `Memory distillation failed`;
+  detail = truncated error message (≤ 200, the existing `EVENT_DETAIL_LIMIT`
+  convention).
 
-A new section 4 of `tickOnce`, handling non-terminal runs; the existing
-execution sections are untouched. Every step re-reads persisted state and
-every run transition goes through `ProjectRunService.transitionRun`
-(guard miss = logged no-op, the PlanRunCoupler pattern). The tick
-coalescing serializes pipeline steps per process.
+## 4. Memory service — `src/memory/memory-service.ts`
 
-1. **All-succeeded detection (run `executing`):** the run has ≥ 1 task and
-   **every** task is `succeeded` → Git project: `transitionRun(run,
-   'integrating')`; non-Git project: `transitionRun(run, 'finalizing')`
-   (the state machine allows `executing → finalizing` directly; no
-   integration branch exists for non-Git runs).
-2. **`integrating`:**
-   - Crash-safety leg: a `run.integration.completed` event exists and
-     `verifyIntegration` passes (crash between the event and the phase move)
-     → `transitionRun(run, 'validating')` without re-merging.
-   - Otherwise: persist `run.integration.started`; remove a previous failed
-     attempt's integration worktree + branch (best-effort); run the
-     strategy:
-     - `integrated` → CAS the run record adding `integrationBranch` +
-       `integrationHead` (coordinator pattern); persist
-       `run.integration.completed`; `transitionRun(run, 'validating')`.
-     - `conflict` / error → persist `run.integration.failed` (detail:
-       conflicting paths or the error, truncated); `transitionRun(run,
-       'blocked', { error })`. Retryable: task branches are immutable, so a
-       resume re-runs the integration deterministically.
-3. **`validating`:** `verifyIntegration` → ok: `transitionRun(run,
-   'finalizing')`; not ok (e.g. the branch was deleted outside the harness):
-   `run.integration.failed` + `blocked` (a human repairs the git state and
-   resumes). MVP validation is **structural** (branch resolvable, worktree
-   sound, merged task branches are ancestors of the integrated branch);
-   running project test/build commands is a non-goal (§14).
-4. **`finalizing`:** remove all task branches and the integration worktree
-   (the integration branch is kept); then `transitionRun(run, 'succeeded',
-   { resultSummary: 'integrated branch <name> @ <short head>' })` (non-Git:
-   `all tasks succeeded (no Git isolation)`). Cleanup operations are
-   idempotent; a persistently failing cleanup keeps the run in `finalizing`
-   (warn log, retried on the next tick; a human may cancel —
-   `finalizing → canceled` is a legal edge) — never a fabricated `succeeded`
-   with incomplete cleanup.
-5. **Blocked runs:** the pipeline does not touch them — the existing
-   `runTransition` RPC resumes them (`blocked → integrating` is dynamically
-   allowed via `suspendedFrom`) and the next tick re-enters step 2.
+`ProjectMemoryService` follows the sibling-service pattern exactly
+(`RunPlanService`/`ProjectTaskService`): constructor
+`(ctx: Context, catalog: ProjectCatalog, runService: ProjectRunService,
+driver?: MemoryDistillationDriver)`; `start()` borrows the shared domain via
+`runService.domain()` and takes `domain.table('memory')`,
+`domain.table('runs')`, `domain.table('run_events')`; `stop()` clears the
+borrow; `requireStarted()` throws `DashboardDomainError('memory.notStarted', …)`.
+The catalog validates `projectId` existence on create/list
+(`memory.projectNotFound`).
+
+### 4.1 Store, CAS, and status transitions
+
+- `list(input: { projectId, query?, kinds?, tags?, limit?, includeArchived? }):
+  { entries: ProjectMemoryRecord[]; counts: Record<MemoryKind, number> }` —
+  `searchMemory` (§5.1) over `active` (+ `archived` when
+  `includeArchived`); `counts` = per-kind counts over **all active** entries
+  of the project (unfiltered, zero-filled for every kind) for the UI kind
+  chips.
+- `search(input)` — the §5.1 retrieval interface (synchronous; the in-process
+  domain tables are Map-backed — reads are sync, as in `run-service.ts`).
+- `create(input: { projectId, kind, title, body, tags?, pinned?, confidence? })
+  → { entry, supersededId? }` — manual notes (§25) **and** the persistence
+  half of distillation (§4.2/§4.3); dedup/supersession always applied.
+- `update(id, expectedVersion, patch: { title?, body?, tags?, pinned? }) →
+  record` — at least one patch field required; allowed on `active` and
+  `archived`; `superseded` → `memory.immutable` (audit trail is immutable).
+- `setStatus(id, expectedVersion, status: 'active' | 'archived' |
+  'superseded') → record` — legal moves: `active ↔ archived`,
+  `active → superseded` (user "mark obsolete"); anything from `superseded` →
+  `memory.immutable`; same-status no-op rejected as `memory.invalidStatus`.
+- **CAS** — every mutation compares `expectedVersion` to the stored
+  `version` (the domain's atomic `update` chain, the Phase 2/4 pattern);
+  a miss throws `memory.staleVersion`; a hit bumps `version` + 1 and
+  `updatedAt`.
+
+### 4.2 Write policy and candidate validation (master spec §21)
+
+`validateMemoryCandidate(candidate)` (pure, exported) returns the record
+fields or `DashboardDomainError('memory.invalidCandidate', reason)` with
+reasons: `unknown-kind`, `empty-title`, `title-too-long`, `empty-body`,
+`body-too-long`, `too-many-tags`, `invalid-tag`, `invalid-confidence`,
+`contains-secrets`.
+
+- Hard bounds: §3.1 (kind in `MEMORY_KINDS`; title/body non-blank + max
+  length; tags trimmed, non-blank, ≤ 40 chars, ≤ 20, de-duplicated
+  case-insensitively; confidence in `[0, 1]`).
+- **Secrets scan** (the §21 "Does it contain secrets?" question): reject
+  when the body or title matches any of:
+  `(api[_-]?key|apikey|token|secret|password)\s*[:=]\s*\S{8,}` (case-
+  insensitive), `AKIA[0-9A-Z]{16}`, `-----BEGIN [A-Z ]*PRIVATE KEY-----`,
+  `Bearer\s+[A-Za-z0-9._-]{20,}`. Rejection is per-candidate (other
+  candidates in the same submission still persist).
+- The §21 questions "useful in another run? / project-specific? / still
+  true?" are answered by the **distillation prompt** (§6.2 — the agent is
+  told the §21 good/bad examples and "submit zero entries if nothing is
+  reusable"); "already stored?" by dedup (§4.3). Validation enforces only
+  hard limits + the secrets scan — no semantic judgment in code.
+- Invalid candidates are skipped with a `ctx.logger.warn` (including the
+  reason and the run id) — never an exception out of the distillation,
+  never persisted.
+
+### 4.3 Deduplication and supersession (master spec §22)
+
+Pure, deterministic, exported from `src/memory/retrieval.ts`
+(`normalizeTerms`, `termOverlap`):
+
+- **Normalization** — lowercase; keep unicode word characters; split into
+  word tokens of ≥ 3 chars; drop a fixed minimal stopword list
+  (`the a an is are was were in on for to of and or this that it with from
+  by at as`).
+- **Overlap** — `overlap = |T_c ∩ T_e| / min(|T_c|, |T_e|)` (containment —
+  robust to different entry lengths).
+- **Rule** — a candidate supersedes an existing **active** entry of the
+  **same kind** when `overlap ≥ 0.6`; with several matches, the highest
+  overlap wins (ties → lexicographically smallest `id` — deterministic).
+  No match → plain new `active` entry, no `supersedes`.
+- **Effect** — the old entry flips to `superseded` (`version`+1,
+  `updatedAt`); the new entry is `active` with `supersedes` = the old id.
+  The old entry is never deleted (§2 invariant 5).
+- Idempotent-ish: re-submitting an entry identical to an active one
+  supersedes it (the audit trail grows); that is the documented behavior —
+  history, not data loss.
+
+## 5. Retrieval and context budget — `src/memory/retrieval.ts`
+
+### 5.1 Lexical search (master spec §23)
+
+`searchMemory(entries: readonly ProjectMemoryRecord[], input: { projectId,
+query?, kinds?, tags?, limit? }) → ProjectMemoryRecord[]` — pure; the
+service passes the project's pool (`status === 'active'`; `superseded` and
+`archived` are history, never retrieval results):
+
+- **Filters** — `kinds?` subset; `tags?` = the entry must contain **all**
+  listed tags (case-insensitive); `query?` = scored below.
+- **Scoring** — query terms via the §4.3 normalizer; per entry
+  `score = (3·|Q ∩ title| + 2·|Q ∩ tags| + 1·|Q ∩ body|) / (3·|Q|)` ∈
+  `[0, 1]` (title hits weigh 3×, tags 2×, body 1×). No query / no matching
+  terms → `score = 0` for all (recency order below).
+- **Order** — `pinned` first, then `score` desc, then `updatedAt` desc,
+  then `id` asc (fully deterministic). `limit` applied after sorting
+  (default 50 for `list`; retrieval callers pass the budget's
+  `maxEntries`).
+- **Seam** — the service calls `searchMemory` through one private
+  `strategy` field (default: the lexical implementation) so a future
+  semantic/vector strategy replaces it without touching callers
+  (master spec §23: "Design it so semantic/vector retrieval can be added
+  later").
+
+### 5.2 Budgets and context packet (master spec §24)
+
+```ts
+export interface MemoryBudgets {
+  readonly maxEntries: number
+  readonly maxChars: number
+  readonly pinnedMaxChars: number
+  readonly retrievedMaxChars: number
+} // invariant: pinnedMaxChars + retrievedMaxChars ≤ maxChars
+
+export const COORDINATOR_MEMORY_BUDGET: MemoryBudgets =
+  { maxEntries: 10, maxChars: 4000, pinnedMaxChars: 1500, retrievedMaxChars: 2500 }
+export const TASK_MEMORY_BUDGET: MemoryBudgets =
+  { maxEntries: 6, maxChars: 2000, pinnedMaxChars: 800, retrievedMaxChars: 1200 }
+```
+
+`buildMemoryPacket(entries, budgets)` (pure) → `string | undefined`:
+
+- Pinned entries first (rendered within `pinnedMaxChars`), then the
+  non-pinned retrieved entries (within `retrievedMaxChars`); entries stop
+  being added when a section's character budget is exhausted (each line's
+  length counts; no partial lines).
+- Sections in fixed order: `PINNED` (when present), then one section per
+  present kind in `MEMORY_KINDS` order, header = the kind upper-cased
+  (the master spec §24 "Relevant architecture / decisions / testing /
+  known pitfalls" shape).
+- Entry line: `- title: body` with `body` truncated at 300 chars (`…`).
+- Packet header:
+  `PROJECT MEMORY (knowledge persisted from earlier runs — verify before
+  relying on it):`.
+- `undefined` when there is nothing to render (no active entries) —
+  callers append nothing (no placeholder text, §2 invariant 2).
+
+`ProjectMemoryService.packetFor({ projectId, query, budgets }) →
+string | undefined` — `buildMemoryPacket(searchMemory(pool, { query,
+limit: budgets.maxEntries }), budgets)`; synchronous.
+
+## 6. Distillation — `src/memory/distillation.ts`
+
+### 6.1 Driver seam (master spec §73 Phase 6 "Run memory distillation")
+
+```ts
+export interface MemoryDistillationSubmission {
+  readonly entries: readonly {
+    readonly kind: string
+    readonly title: string
+    readonly body: string
+    readonly tags?: readonly string[]
+    readonly confidence?: number
+    readonly sourceTaskId?: string
+  }[]
+}
+export interface MemoryDistillationDriverInput {
+  readonly sessionId: string // `dsh-memory-<uuid>`, generated by the service
+  readonly cwd: string
+  readonly permissionPreset: string
+  readonly agentPreset?: string
+  readonly prompt: string
+  readonly signal: AbortSignal
+  readonly onMemorySubmit: (input: MemoryDistillationSubmission) =>
+    Promise<{ readonly persisted: number; readonly superseded: number }>
+}
+export interface MemoryDistillationDriver {
+  start(input: MemoryDistillationDriverInput):
+    Promise<{ readonly kind: 'completed' | 'failed' | 'blocked'; readonly error?: string }>
+}
+```
+
+`HarnessMemoryDistillationDriver` is the native implementation and mirrors
+`HarnessCoordinatorDriver` line-for-line in mechanics:
+`ctx.agents.create({ sessionId, meta: { cwd }, agentOptions (current model
+selection), signal, setup })`; in `setup` — presets mount (when configured),
+`installModelSelection`, and `installSubmitMemoryTool` registering
+`dsh_projects_submit_memory` via `defineTool` (parameters: `entries` array —
+`kind` string **enum of the 15 kinds**, `title`/`body` required strings,
+`tags` string array, `confidence` number, `sourceTaskId` string — plus
+optional `note`; `execute` calls `onMemorySubmit` and returns
+`{ persisted, superseded }` as the tool output; "Call exactly once with all
+entries — an empty array is a valid answer when nothing is reusable"); then
+one `createUserMessage` prompt, `whenIdle`, `flush`, turn-end reason mapping
+(`error`/`blocked`/`completed`), `dispose` in `finally` — identical error
+handling to the Phase 3 driver. No new Harness API is touched.
+
+### 6.2 Distillation prompt (pure `buildDistillationPrompt`)
+
+Sections, in order: (1) identity — "You are distilling durable project
+memory from a completed run"; (2) the run goal; (3) per-task lines
+`t<n> [succeeded|failed] <title> — <outputSummary truncated 400>` (real
+persisted task data only); (4) **already-stored titles** (active entries of
+the project, ≤ 25, truncated 120 chars) — "do not resubmit duplicates";
+(5) the write policy — the master spec §21 good/bad memory examples, the
+five §21 questions, "persist only reusable project knowledge; submit zero
+entries if nothing is reusable; never submit secrets, credentials, or
+transcript dumps". No invented capabilities; the agent reads nothing else.
+
+### 6.3 `distillRun(run)` — trigger, persistence, events
+
+Preconditions: `run.phase === 'succeeded'`; a driver is configured (no
+driver → **silent no-op**, no event — unmounted runtime, §2 invariant 2);
+the run has a `projectId`.
+
+1. Build the prompt (§6.2) from persisted tasks + existing memory titles;
+   `sessionId = dsh-memory-<uuid>`.
+2. `onMemorySubmit` → `persistCandidates`: each candidate validated
+   (§4.2 — invalid ones skipped + warned), dedup/supersede (§4.3), persisted
+   with `sourceRunId = run.id`, `sourceTaskId` when the candidate carries
+   one, `sourceSessionId = sessionId`; returns `{ persisted, superseded }`.
+3. Events on the run's per-run `seq` (the existing `appendRunEvent` pattern,
+   §3.3): `persisted + superseded > 0` → `run.memory.distilled`; driver
+   `failed`/`blocked` → `run.memory.distillation.failed` (truncated error);
+   zero entries → nothing.
+4. Never throws into the caller — all failures become the failed-event or
+   a warn log.
+
+**Trigger wiring (additive):** `ProjectTaskService`'s constructor gains
+`memory?: ProjectMemoryService` and `hooks?: { readonly onRunSucceeded?:
+(run: ProjectRunRecord) => void }`. In `finalizeRun`, **after**
+`safeTransitionRun(run.id, 'succeeded', …)` succeeds, the service calls
+`Promise.resolve(this.hooks?.onRunSucceeded?.(run)).catch(err → warn)` —
+fire-and-forget: the pipeline tick never awaits the distillation session,
+so `succeeded` is never delayed or blocked by it. `src/index.ts` wires
+`onRunSucceeded: run => { void memoryService.distillRun(run) }`.
+
+**Documented limitation:** a process restart between the `succeeded`
+transition and the distillation completion loses that run's auto-distillation
+(the run itself is already terminal and persisted; no re-trigger on
+already-succeeded runs). Restart recovery of side effects is Phase 10
+(non-goal §14).
+
+## 7. Injection points (master spec §24)
+
+### 7.1 Coordinator prompt
+
+`CoordinatorService`'s constructor gains an optional trailing
+`memory?: ProjectMemoryService`. `buildPrompt(run, project)` appends, when
+`memory` is defined and `memory.packetFor({ projectId: run.projectId,
+query: run.goal, budgets: COORDINATOR_MEMORY_BUDGET })` returns a packet:
+`\n\n` + packet, after the existing `coordinatorPrompt(…)` section. No
+packet → the prompt is byte-identical to today (no placeholder text).
+
+### 7.2 Task prompts (worker seam, additive)
+
+- `TaskWorkerInput` (`src/tasks/worker.ts`) gains
+  `readonly memoryContext?: string` — a pre-rendered packet, not an entry
+  list (the adapters stay presentation-only).
+- `ProjectTaskService` (with `memory` configured) fills it at worker start:
+  `packetFor({ projectId: run.projectId, query: \`${task.title}
+  ${task.description}\`, budgets: TASK_MEMORY_BUDGET })`; absent packet →
+  field stays absent.
+- `renderTaskPrompt` (local-adapter) and `renderTeamTaskPrompt`
+  (team-adapter) insert, when present, a section before the report
+  contract: `Project memory (durable knowledge from earlier runs — verify
+  before relying on it):\n<packet>\n`. Absent → prompts are byte-identical
+  to today.
 
 ## 8. Events and errors
 
-- Persisted event types: the three additive types of §3.3.
-- Cordis: **no new Cordis event types** — the run's
-  `integrating/validating/finalizing` moves already fire
-  `dsh-projects/run/phase-changed` (Phase 1), which the GUI's existing
-  run-refresh path handles.
-- New `DashboardDomainError` codes (all settle through the generic
-  execution-failure path — attempt budget + backoff apply;
-  `task.workspaceConflict` is persistent by nature, so retries exhaust to a
-  terminal `failed`):
+- Run events: the two additive types of §3.3 (no other event changes).
+- New `DashboardDomainError.dashboardCode`s (surfaced through the existing
+  `encodeDashboardError` path): `memory.notStarted`, `memory.projectNotFound`,
+  `memory.unknown` (id not found), `memory.staleVersion` (CAS miss),
+  `memory.invalidCandidate` (detail = the §4.2 reason), `memory.immutable`
+  (superseded entries), `memory.invalidStatus` (illegal transition / no-op).
+- Distillation failures never fail a run: they are events + warn logs (§6.3).
 
-| Code | When |
-| --- | --- |
-| `task.worktreeFailed` | Worktree provisioning/validation infrastructure error (message carries the stderr tail). |
-| `task.workspaceConflict` | A foreign worktree occupies the expected path (wrong branch, or not a worktree of this repository). |
-| `task.commitFailed` | The final commit could not be created (e.g. the repository has no git identity). |
+## 9. RPC (additive — four new endpoints)
 
-The client maps all three to zh/en strings (`src/client/errors.ts`,
-`src/client/locales.ts`).
+`handleDashboardRpc` gains a 10th optional parameter
+`memory?: ProjectMemoryService`; the four new cases follow the existing
+payload-validation conventions (`readStringField`, `badRequest`, structured
+failures for an absent service):
 
-## 9. RPC (additive — no new endpoints)
+| Endpoint | Payload | Result |
+| --- | --- | --- |
+| `memoryList` | `{ projectId (required), query?, kinds?, tags?, limit?, includeArchived? }` | `{ entries: ProjectMemoryRecord[]; counts: Record<MemoryKind, number> }` (counts zero-filled, §4.1) |
+| `memoryCreate` | `{ projectId, kind, title, body, tags?, pinned?, confidence? }` | `{ entry, supersededId? }` (validation → `memory.invalidCandidate` failure; dedup applied) |
+| `memoryUpdate` | `{ id, expectedVersion, title?, body?, tags?, pinned? }` (≥ 1 patch field) | `{ entry }` |
+| `memorySetStatus` | `{ id, expectedVersion, status: 'active'\|'archived'\|'superseded' }` | `{ entry }` |
 
-- `runDetail`: tasks flow through `taskList` (additive optional fields of
-  §3.1); the run view spreads the record (`integrationBranch` /
-  `integrationHead` automatic); integration events flow through the event
-  list.
-- `snapshot`: run summary rows carry the run view (automatic).
-- `taskRetry`, `runTransition`, and every other endpoint are unchanged
-  (resume of a blocked integration = `runTransition` back to
-  `suspendedFrom`).
+No snapshot projection is added (entries are unbounded; the Memory tab
+fetches on demand like `runDetail`). `DashboardSnapshot.version` stays 2.
 
-## 10. UI (existing Dashboard surface, zh/en parity)
+## 10. UI (new Memory tab, zh/en parity compile-enforced)
 
-- **Task rows** (inspector Tasks section): when `branch` is present, a mono
-  chip with the branch name + the 7-char `headCommit` short; non-Git tasks
-  render nothing extra.
-- **Integration panel** (new inspector subsection, visible when the run has
-  tasks and its phase is one of `integrating` / `validating` / `finalizing`,
-  or it is `succeeded` with an `integrationBranch`):
-  - `integrating` → “Integrating…” + the planned integration branch (mono).
-  - `validating` → “Validating integration…”
-  - `finalizing` → “Finalizing (cleanup)…”.
-  - `succeeded` + `integrationBranch` → the integrated branch + short head
-    (mono).
-  - `blocked` + the latest `run.integration.failed` event → the error, the
-    conflicting-paths list, and a hint that resuming re-runs the integration
-    from the task branches.
-- **Non-Git notice** (run level; when the project's workspace source is
-  `controlled-directory` and the run has tasks): “This project has no Git
-  repository — tasks run in the shared working tree without isolation.”
-- zh/en parity: new locale keys in `src/client/locales.ts` (both maps),
-  compile-enforced by the existing i18n regression suite.
-- No new controls (no push/PR buttons — §14).
+`type Tab = 'board' | 'runtime' | 'runs' | 'projects' | 'memory' |
+'configuration'` — the new tab sits between `projects` and
+`configuration`. `t('tab.memory')`: zh `项目记忆` / en `Project Memory`.
+
+`MemoryView` (Dashboard.tsx, the existing component/style conventions —
+`role="table"` rows, `aria-label` from `t(…)`, `busy` gating, error
+banner):
+
+- **Project selector** — the catalog's projects; default = first project;
+  no projects → `memory.noProjects` empty state. Selecting a project or
+  changing the query dispatches `memoryList` (the on-demand pattern of
+  `runDetail`).
+- **Search** — input (`memory.searchAria`: zh `搜索项目记忆` / en `Search
+  project memory`); the query goes server-side into `memoryList`.
+- **Kind chips** — one per present kind with its `counts` value
+  (`memory.countsAria`); clicking toggles the `kinds` filter (re-dispatch).
+- **Entry list** — per entry: kind label (`memory.kind.<kind>` × 15 — zh:
+  架构/决策/约定/依赖/环境/测试/部署/运维/研究/发现/已知问题/失败模式/流程/仓库地图/用户偏好;
+  en: Architecture/Decision/Convention/Dependency/Environment/Testing/
+  Deployment/Operations/Research/Finding/Known Problem/Failure Pattern/
+  Procedure/Repository Map/User Preference), title, body clamped to 3 lines,
+  tags, status marker (`memory.status.active|superseded|archived`), pin
+  indicator, the supersession relationship when present
+  (`memory.supersededBy` on superseded entries; `memory.supersedes` when the
+  entry carries `supersedes`), and a source-run link
+  (`memory.sourceRun`) opening the existing run inspector when
+  `sourceRunId` is set.
+- **Per-entry actions** — pin/unpin (`memory.pin`/`memory.unpin` →
+  `memoryUpdate` with `pinned`), edit (`memory.edit` → dialog with
+  title/body/tags/pinned → `memoryUpdate` + `expectedVersion`),
+  archive/restore (`memory.archive`/`memory.restore` → `memorySetStatus`),
+  mark obsolete (`memory.markObsolete`, active entries only →
+  `memorySetStatus 'superseded'`).
+- **Manual note** — `memory.addNote` button → dialog (kind select
+  `memory.kindSelectAria`, title `memory.titlePlaceholder`, body
+  `memory.bodyPlaceholder`, tags `memory.tagsPlaceholder` comma-separated →
+  `memoryCreate`); a `supersededId` in the result shows
+  `memory.supersededNotice` (zh `已取代既有记忆：{id}` / en `Superseded
+  existing memory: {id}`).
+- **States** — empty project → `memory.empty`; memory service unavailable →
+  `memory.unavailable` (the structured RPC failure, never a swallowed
+  promise). Every control dispatches a real RPC (invariant 2).
+
+`DashboardController` gains `memoryList/memoryCreate/memoryUpdate/
+memorySetStatus` (the direct `rpc.call('/dsh-dashboard', …)` pattern of
+`runDetail`). `src/client/locales.ts` gains the keys above in zh and en
+(the parity compile-enforcement already in place catches drift).
 
 ## 11. Module layout & wiring
 
-| File | Change |
+New files:
+
+| File | Contents |
 | --- | --- |
-| `src/workspace/git.ts` | **New** — shared `runGit` helper (extracted, behavior unchanged). |
-| `src/workspace/manager.ts` | Imports `runGit` from `git.ts` (private helper removed); behavior unchanged. |
-| `src/tasks/git-workspace.ts` | **New** — naming functions (§4.2) + `TaskWorktreeManager` (§4.3). |
-| `src/tasks/integration.ts` | **New** — `IntegrationStrategy` seam + `MergeInOrderStrategy` + `verifyIntegration` (§5). |
-| `src/tasks/task-service.ts` | Worktree provisioning in `beginExecution`, commit + worktree removal in `settleResult`, pipeline section 4 in `tickOnce`, new constructor parameters (§6, §7). |
-| `src/tasks/worker.ts` | `TaskWorkerInput.branch?` (additive, optional; §6.1). |
-| `src/tasks/local-adapter.ts` | One worktree prompt line when `input.branch` is present. |
-| `src/tasks/types.ts`, `src/tasks/spec.ts` | Task record/view fields (§3.1). |
-| `src/runs/types.ts`, `src/runs/spec.ts` | Run record fields + event types (§3.2, §3.3); `maxConcurrentAgents` comment updated (worktrees make > 1 safe; the default stays 1). |
-| `src/tasks/constants.ts` | `GIT_OPERATION_TIMEOUT_MS`; `DEFAULT_TASK_CONCURRENCY` comment updated. |
-| `src/index.ts` | Construct the `TaskWorktreeManager` + default strategy; pass both to `ProjectTaskService`. |
-| `src/client/locales.ts`, `src/client/Dashboard.tsx` | §10. |
-| `src/tasks/team-adapter.ts`, `src/tasks/scheduler.ts`, `src/tasks/state-machine.ts`, `src/runs/state-machine.ts` | **Unchanged** (import isolation + pure modules untouched; the run machine already has every phase/edge needed). |
+| `src/memory/types.ts` | `MEMORY_KINDS`/`MEMORY_STATUSES`, `MemoryKind`/`MemoryStatus`/`MemoryId`, `ProjectMemoryRecord` |
+| `src/memory/spec.ts` | `projectMemoryRecordSchema` (strict zod) |
+| `src/memory/retrieval.ts` | `normalizeTerms`, `termOverlap`, `searchMemory`, `MemoryBudgets` + the two budgets, `buildMemoryPacket` (all pure) |
+| `src/memory/memory-service.ts` | `ProjectMemoryService` (store/CAS/status, `validateMemoryCandidate`, dedup wiring, `packetFor`, `distillRun`, events) |
+| `src/memory/distillation.ts` | `MemoryDistillationSubmission/DriverInput/Driver`, `HarnessMemoryDistillationDriver`, `buildDistillationPrompt` |
+
+Edits (all additive): `src/runs/spec.ts` (table + 2 event types);
+`src/tasks/worker.ts` (`memoryContext?`); `src/tasks/local-adapter.ts` +
+`src/tasks/team-adapter.ts` (prompt section); `src/tasks/task-service.ts`
+(`memory?` + `hooks?` ctor params, packet at worker start, `onRunSucceeded`
+after `succeeded`); `src/coordinator/coordinator-service.ts` (`memory?` ctor
+param, packet in `buildPrompt`); `src/rpc/handler.ts` (4 cases + param);
+`src/client/controller.ts` (4 methods); `src/client/Dashboard.tsx` (tab +
+`MemoryView` + dialogs); `src/client/locales.ts` (zh/en keys); `src/index.ts`
+(`new ProjectMemoryService(ctx, catalog, runService, new
+HarnessMemoryDistillationDriver(ctx))` + wiring into task/coordinator).
+`tsconfig.json` needs no change (src is glob-included; test files are
+glob-included).
+
+Wiring in `src/index.ts` (order matters — after `runService`):
+
+```ts
+const memoryService = new ProjectMemoryService(ctx, catalog, runService, new HarnessMemoryDistillationDriver(ctx))
+// taskService/coordinator gain memoryService as their new optional params
+```
+
+`memoryService.start()` inside the existing run-service-started region
+(borrowed domain — same as plan/task services); `stop()` in the existing
+shutdown sequence. Client isolation (§2 invariant 8) is asserted by the
+import-scan test (extend the existing scan: `src/client/**` must not import
+`src/memory/**`).
 
 ## 12. Test plan
 
-| File | Cases (spec-level) |
-| --- | --- |
-| `tests/git-workspace.test.ts` (new; real Git fixture repos — the `workspace-manager.test.ts` pattern: `git init` + `-c user.name/user.email` commits in a temp dir) | naming: deterministic branch/worktree names; leaf normalization (never trusts input); ref-safety. provision: creates worktree + branch from `HEAD` with `baseCommit`; idempotent reuse (same identity → `createdNow: false`, no re-creation); foreign branch at the path → `task.workspaceConflict`; path that is not a worktree of the repo → `task.workspaceConflict`; containment (a crafted leaf cannot escape the project root). commitTaskWork: dirty tree → exactly one commit on the task branch (`committed: true`, `headCommit` advances); clean tree → `committed: false` with `headCommit === baseCommit`; missing identity → `task.commitFailed`. removal: worktree remove + branch `-D`; double removal is a no-op; fallback removal of an unregistered tree (revalidated). |
-| `tests/integration-strategy.test.ts` (new; real Git fixtures) | two task branches with disjoint changes → integrated branch contains both, plan-ordered merge commits, `merged`/`skipped` correct, `integratedHead` = tip; overlapping changes → `conflict` + exact `conflictingPaths` + worktree aborted back to base (no partial merge state), task branches untouched; empty task (`headCommit === baseCommit`) skipped; `verifyIntegration`: ok / missing branch → not ok / tampered worktree → not ok; the strategy seam accepts a fake implementation. |
-| `tests/task-service.test.ts` (extended; in-memory domain + fake worker + **fake worktree-manager seam** + fake strategy) | worktree provisioning on running (the fake worker receives `cwd` = worktree path and `branch`); the task record gains `workspaceId`/`branch`/`baseCommit`; commit before `succeeded` (fake manager called with the task identity; commit failure → failed attempt with `task.commitFailed`, retryable); a succeeded task's worktree is removed, its branch kept; a failed task's worktree is kept; retry reuses the worktree (idempotent provision, no reset); non-Git project (`controlled-directory` source) → `cwd = project.root`, no worktree fields, manager never called; `worktreeManager === undefined` → Phase 4 behavior. Pipeline: all-succeeded + Git → run `integrating` (+ `run.integration.started`); fake strategy `integrated` → run record gains `integrationBranch`/`integrationHead`, `run.integration.completed`, run `validating` → `finalizing` → `succeeded` (resultSummary names the branch), task branches + integration worktree removed, integration branch kept; conflict → `run.integration.failed` (paths in detail) + run `blocked`, task branches intact; resume (`transitionRun` back to `integrating`) → previous integration worktree cleaned + strategy re-runs → `succeeded`; non-Git all-succeeded → run `finalizing` → `succeeded` (no integration branch); crash-safety leg: completed event + run still `integrating` → verify passes → `validating` without re-merging. |
-| `tests/run-storage-integration.test.ts` (extended; real JSON domain + real Git fixture repo) | full pipeline on the real medium: two tasks whose fake workers write real files into real worktrees → all succeeded → integrating → the **real** `MergeInOrderStrategy` merges → succeeded; after a domain reopen the task `headCommit`s, the run's `integrationBranch`/`integrationHead`, and the integration events survive; the medium table set is unchanged. |
-| `tests/workspace-manager.test.ts` (regression) | green after the `runGit` extraction (behavior unchanged). |
-| `tests/rpc-handler.test.ts` (extended) | `runDetail.tasks[]` carries the additive Git fields when present (absent property when not); the run view carries `integrationBranch` when set; integration events appear in `runDetail.events`; no new endpoints. |
-| `tests/dashboard-tasks-interactions.test.tsx` (extended, jsdom zh) | a task row renders the branch chip + commit short when present and nothing when not; the integration panel renders its zh state per phase (integrating/validating/finalizing/succeeded); a blocked integration shows the conflicting paths + the resume hint; the non-Git notice renders only for `controlled-directory` projects. |
-| `tests/dashboard-i18n-regressions.test.tsx` | the new locale keys exist in both zh and en (existing parity mechanism). |
-| regression | every existing suite green; the Phase 4 import-isolation source scan still passes (the Git modules add no runtime surface); parallel execution at `maxConcurrentAgents > 1` proven with disjoint **and** conflicting file sets (worktrees make it safe — the Phase 4 concurrency rationale is retired). |
+1. **`tests/memory-retrieval.test.ts`** (new, pure) — `normalizeTerms`
+   (unicode, stopwords, ≥ 3 chars); `termOverlap` (containment, empty sets);
+   `searchMemory` (filters, scoring weights, pinned-first order, tie-breaks,
+   `limit`, empty pool, no-query recency order, determinism — same input →
+   same output, two runs compared); `buildMemoryPacket` (sections + kind
+   order, per-section budget truncation, no partial lines, 300-char body
+   truncation, `undefined` when empty, the exact header line).
+2. **`tests/memory-service.test.ts`** (new, in-memory domain harness) —
+   record validation through the real zod schema; CAS (stale version →
+   `memory.staleVersion`; hit bumps `version`/`updatedAt`); status
+   transitions (legal matrix, `memory.immutable`, `memory.invalidStatus`);
+   `validateMemoryCandidate` (every §4.2 reason, each secret pattern);
+   dedup/supersession (near-duplicate flip + link, distinct facts both
+   active, tie → smallest id, idempotent re-submit grows history, counts
+   zero-filled, archived excluded from `counts`).
+3. **`tests/memory-distillation.test.ts`** (new, fake driver seam) —
+   `buildDistillationPrompt` (goal, real task lines with truncated
+   summaries, already-stored titles, the §21 policy text); submission →
+   validate + dedup + persist (sourceRunId/sourceSessionId set,
+   sourceTaskId passthrough, invalid candidates skipped without aborting
+   siblings); zero entries → **no event**; driver failure →
+   `run.memory.distillation.failed` (truncated detail); no driver → silent
+   no-op; aborted signal.
+4. **`tests/task-service.test.ts`** (extended) — packet injection: fake
+   memory service → `TaskWorkerInput.memoryContext` present with the task
+   budget (query = title + description); absent packet → field absent;
+   **Run #1 → Run #2 end-to-end** (the phase's end state): a real
+   (fake-driver) distillation persists an entry for run 1 → run 2's task
+   worker input carries it; `onRunSucceeded` fire-and-forget — the run
+   reaches `succeeded` without awaiting the (slow) fake driver.
+5. **`tests/coordinator-service.test.ts`** (extended) — `buildPrompt`
+   includes the packet (goal as query) when the memory service returns one;
+   byte-identical prompt when it returns `undefined`.
+6. **`tests/rpc-handler.test.ts`** (extended) — the four endpoints:
+   success shapes (zero-filled counts, `supersededId` pass-through),
+   validation failures (missing `projectId`, unknown kind, missing patch
+   field, stale version, illegal status), absent-service structured failure.
+7. **`tests/dashboard-memory.test.tsx`** (new, jsdom) — tab renders (zh);
+   project selector + `memoryList` dispatch; kind chips with counts + filter
+   toggle; entry row (kind label, tags, status marker); pin/edit/archive/
+   mark-obsolete dispatch the right RPCs with `expectedVersion`; manual-note
+   dialog (zh + en) → `memoryCreate` + `memory.supersededNotice`;
+   supersession display; source-run link opens the run inspector; empty +
+   unavailable states.
+8. **`tests/run-storage-integration.test.ts`** (extended) — memory entries
+   (active + superseded with `supersedes`) survive a real JSON domain
+   reopen; table set `['memory', 'plans', 'run_events', 'runs', 'tasks']`;
+   domain still format v0.
+9. Import-isolation scan extended: `src/client/**` must not import
+   `src/memory/**`.
 
-## 13. Acceptance criteria (maps to `intent.md` §9.4)
+Timeouts follow the Phase 5 conventions (real pipeline tests
+`45_000–90_000`; the distillation e2e uses the fast fake driver — no real
+agent sessions in unit tests).
 
-1. (§9.4.1) Every live task of a Git project runs in its own worktree +
-   branch with the §16 naming; the one-writer-per-worktree invariant holds
-   (unique naming + identity check + `task.workspaceConflict` guard,
-   tested); non-Git projects run in the shared tree with the explicit UI
-   notice and no Git metadata.
-2. (§9.4.2) Task work is committed onto the task branch before `succeeded`
-   (dirty tree committed by the service; empty tree = no-commit success; no
-   silently discarded work); `workspaceId`/`branch`/`baseCommit`/
-   `headCommit` are real git results or absent, never fabricated.
-3. (§9.4.3) All tasks succeeded → run `integrating` → the integrated branch
-   is produced by the deterministic merge-in-order strategy in the
-   integration worktree; a conflict is a structured failure (conflicting
-   paths persisted in the event), never force-resolved; the
-   default/protected branch is never touched (only `dsh/run-*` branches are
-   created or deleted).
-4. (§9.4.4) The completion pipeline is wired end-to-end on the existing
-   state machine (no new phases): `integrating → validating → finalizing →
-   succeeded`; a failed integration leaves the run `blocked` and a resume
-   re-runs the integration deterministically from the immutable task
-   branches.
-5. (§9.4.5) Cleanup: a succeeded task's worktree is removed after its
-   commit (branch kept); a terminal-succeeded run removes the task branches
-   + the integration worktree and keeps the integration branch; failed /
-   canceled runs keep worktrees for inspection; `stop()` removes nothing.
-6. (§9.4.6) UI: per-task branch + head-commit chip, the integration panel
-   (all phases + conflict detail), the integrated branch on success, the
-   non-Git notice — zh/en parity compile-enforced, no fabricated Git data.
-7. (§9.4.7) Storage: the new task/run fields + integration events survive a
-   real JSON domain reopen; `dsh_projects` stays format version 0; the
-   medium table set is unchanged.
-8. (§9.4.8) Repo green: typecheck, build, `pnpm vitest run` (modulo the
-   documented pre-existing environment failures); parallel execution at
-   concurrency > 1 proven by tests.
+## 13. Acceptance criteria (maps to `intent.md` §11.3)
 
-## 14. Explicit non-goals (Phase 6+)
+1. **Store** — `memory` is a declared table of `dsh_projects` (v0, no
+   migration; §3.2); records validate against the strict §3.1 schema;
+   `version` bumps on every accepted mutation (CAS, §4.1);
+   `superseded`/`archived` entries are retained, never deleted (§4.1/§4.3).
+2. **Write policy** — only distillation (real validated candidates, §4.2/§6)
+   and manual notes (§4.1 `create`) produce entries; raw output never
+   persists; a run with no reusable knowledge → zero entries, no event
+   (§6.3); no driver → no auto entries, no error spam (§6.3).
+3. **Dedup/supersession** — near-duplicate same-kind candidate flips the old
+   entry to `superseded` and links it (§4.3); distinct facts both stay
+   active; archive hides from retrieval (§5.1); the audit trail survives
+   reopen (§12.8).
+4. **Retrieval** — deterministic lexical search: pinned first, filters
+   respected, relevance ordered, `limit` honored (§5.1); empty project →
+   empty result; the strategy seam accepts a fake implementation (§5.1/§12.1).
+5. **Budget + injection** — the packet respects `maxEntries` + the section
+   character budgets (§5.2); injected into the coordinator prompt (§7.1) and
+   task prompts (§7.2); no packet with no active memory; **Run #1 → Run #2**
+   end-to-end (§12.4).
+6. **UI** — the Memory tab renders search/kind counts/tags/status/
+   supersession view/source-run link/pin/edit/archive/mark-obsolete/manual
+   create (§10); zh/en parity compile-enforced; every action dispatches a
+   real RPC with surfaced errors (§10).
+7. **Storage** — memory entries + statuses + `supersedes` survive a real
+   JSON reopen; table set grows by exactly one table; domain stays v0
+   (§3.2, §12.8).
+8. **Repo green** — typecheck, build, `pnpm vitest run` (modulo the
+   documented pre-existing environment failures).
 
-- No automatic push/PR of the integrated branch (master spec §17's
-  “optional push → optional pull request → human review” stays optional:
-  the branch is produced and shown; a human pushes/reviews from it).
-- No interactive conflict-resolution UI — a conflict is a structured
-  failure with persisted conflicting paths; resolution happens via resume
-  (once the branches change) or a human's manual Git work in the
-  integration worktree (kept on failure).
-- No configurable validation command in the `validating` phase — MVP
-  validation is structural (branch resolvable, worktree sound, task
-  branches are ancestors of the integrated branch).
-- No integration strategies beyond `MergeInOrderStrategy` (the seam exists;
-  one implementation ships).
-- No Project Memory (6). No `ApprovalRequest` objects, no budgets (7). No
-  report artifacts (8). No triggers (9).
-- No startup reconciliation of orphaned worktrees/branches (10) —
-  `stop()` removes nothing; provisioning idempotency + the conflict guard
-  make a restart safe; orphan pruning belongs to Phase 10.
-- No monetary cost figures; token accounting only from native session
-  usage (unchanged from Phase 4).
-- `awaiting-review` remains unreachable (Phase 7 approval modes).
+## 14. Explicit non-goals (Phase 7+)
+
+- No semantic/vector retrieval, embeddings, or mandatory external vector
+  database — the §5.1 seam only (master spec §23 defers it).
+- No cross-project memory sharing (memory is per-project by model, §3.1).
+- No automatic expiry/TTL or background garbage collection — supersession +
+  manual archiving only (audit trail preserved).
+- No recovery of an interrupted distillation on restart (§6.3 documented
+  limitation; Phase 10 recovery).
+- No approval objects for memory writes (Phase 7 approvals apply to
+  runs/plans; memory writes are service-internal + manual).
+- No spend/budget enforcement (Phase 7) — `MemoryBudgets` is a retrieval
+  bound, not a cost limit.
+- No artifact system (Phase 8) — memory entries are knowledge, not
+  documents.
+- No provenance graph beyond `supersedes` + the three source fields; no edit
+  history table.
+- No new run phases, no snapshot projection, no `DashboardSnapshot`
+  version change.
+
+## 15. Sequencing (build order)
+
+| Step | Deliverable | Gate evidence |
+| --- | --- | --- |
+| 1 | `src/memory/types.ts` + `src/memory/spec.ts` + the additive table/event types in `src/runs/spec.ts` | typecheck; storage integration table set |
+| 2 | `src/memory/retrieval.ts` (pure) + `tests/memory-retrieval.test.ts` | §12.1 green |
+| 3 | `src/memory/memory-service.ts` + `tests/memory-service.test.ts` | §12.2 green |
+| 4 | `src/memory/distillation.ts` + `tests/memory-distillation.test.ts` | §12.3 green |
+| 5 | Injection: `worker.ts`, both adapters, `task-service.ts`, `coordinator-service.ts` + extended tests | §12.4/§12.5 green (incl. Run #1 → Run #2) |
+| 6 | RPC: `handler.ts` (4 endpoints) + `tests/rpc-handler.test.ts` | §12.6 green |
+| 7 | UI: `locales.ts`, `controller.ts`, `Dashboard.tsx` + `tests/dashboard-memory.test.tsx` | §12.7 green; parity compile |
+| 8 | `src/index.ts` wiring + storage-integration extension + import-scan | §12.8/§12.9 green |
+| 9 | Full suite (`pnpm run typecheck` + `pnpm run build` + `pnpm vitest run`) | §13.8 |

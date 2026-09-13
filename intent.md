@@ -296,7 +296,7 @@ policy), §22 (dedup/supersession), §23 (retrieval), §24 (context budget),
 1. **Memory store** — a new additive `memory` table in the `dsh_projects`
    domain (declared table set grows; the domain stays format v0 — same
    additive pattern as the Phase 4 `tasks` table, no migration). The record
-   carries the §20 shape: `kind` from the 14 declared kinds
+   carries the §20 shape: `kind` from the 15 declared kinds
    (architecture, decision, convention, dependency, environment, testing,
    deployment, operations, research, finding, known-problem, failure-pattern,
    procedure, repository-map, user-preference), `title`/`body`, `tags`,
