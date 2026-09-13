@@ -1,6 +1,6 @@
 # Intent — DSH Projects
 
-**Gate:** Intent · **Status:** Phases 0–4 delivered (v0.10.0 released; `etumulkans/dsh-projects` PR #2 merged) · **Spec:** `DSH_PROJECTS_SPEC.md` · **Architecture:** `docs/dsh-projects-architecture.md`
+**Gate:** Intent · **Status:** Phases 0–5 delivered (v0.11.0 released; Phase 5 shipped on `main` @ `c44e054`, no fork PR this cycle) · **Spec:** `DSH_PROJECTS_SPEC.md` · **Architecture:** `docs/dsh-projects-architecture.md`
 
 ## 1. What we are doing
 
@@ -31,8 +31,8 @@ The dashboard today observes and schedules *tasks* (task sources, local store, G
 | 2 | Versioned RunPlans — `plans` table, `RunPlanService`, plan UI on RunInspector | **done (v0.8.0)** |
 | 3 | Coordinator — Lead session driving plan creation via structured output | **done (v0.9.0)** |
 | 4 | Task DAG + team execution — `ProjectTaskService`, adapters over `ctx.agentTeams`/`ctx.subagents` | **done (v0.10.0)** |
-| 5 | Git isolation + integration — per-task worktrees, `dsh/run-<id>/<task>` branches, run completion pipeline | **next** |
-| 6 | Project Memory — `project_memory`, retrieval, distillation | planned |
+| 5 | Git isolation + integration — per-task worktrees, `dsh/run-<id>/<task>` branches, run completion pipeline | **done (v0.11.0)** |
+| 6 | Project Memory — `memory` store, retrieval, distillation, context budget, Memory UI | **next** |
 | 7 | Approvals + budgets — `project_approvals`, budget enforcement | planned |
 | 8 | Artifacts + final report — `project_artifacts`, report generation | planned |
 | 9 | Triggers — TaskSource events → `ProjectTrigger` adapters | planned |
@@ -274,3 +274,151 @@ run-completion pipeline coupling, cleanup/retention rules, the additive
 storage fields + run event types, the RPC surface, the inspector Git
 metadata section, the non-Git degradation path, and the full test plan,
 per the sequencing table above.
+
+## 11. Phase 6 intent — Project Memory
+
+**End state (master spec §73):** *Run #2 can automatically reuse knowledge
+learned in Run #1.*
+
+Phase 5 made a run's work durable in Git. Phase 6 makes a run's *knowledge*
+durable in the project: structured, persistent, searchable project memory
+that is distilled from finished runs, deduplicated and superseded (never
+blindly deleted), retrieved with a local lexical strategy under an explicit
+context budget, and injected into the next run's coordinator and task
+prompts — plus a Memory page in the Dashboard where the user manages it
+manually. Memory is NOT chat history: only reusable knowledge is persisted
+(master spec §21). Master spec anchors: §20 (memory model), §21 (write
+policy), §22 (dedup/supersession), §23 (retrieval), §24 (context budget),
+§25 (management UI), §73 Phase 6.
+
+### 11.1 Capability slices (master spec §73 Phase 6)
+
+1. **Memory store** — a new additive `memory` table in the `dsh_projects`
+   domain (declared table set grows; the domain stays format v0 — same
+   additive pattern as the Phase 4 `tasks` table, no migration). The record
+   carries the §20 shape: `kind` from the 14 declared kinds
+   (architecture, decision, convention, dependency, environment, testing,
+   deployment, operations, research, finding, known-problem, failure-pattern,
+   procedure, repository-map, user-preference), `title`/`body`, `tags`,
+   source provenance (`sourceRunId?`/`sourceTaskId?`/`sourceSessionId?`),
+   `confidence?`, `status: active | superseded | archived`, `supersedes?`,
+   `pinned?`, `createdAt`/`updatedAt`, `version` (CAS, the same optimistic
+   concurrency pattern as plans/runs/tasks).
+2. **Memory write policy (distillation)** — memory entries are created only
+   by (a) a **distillation step** at the end of a run: when a run reaches
+   `succeeded`, a distillation pass (Design: the exact trigger point and the
+   representation — the natural seam is the Phase 3 coordinator structured-
+   output channel, which already runs a real lead session for plan creation)
+   proposes *reusable knowledge* as structured candidates (kind, title,
+   body, tags, confidence, source run/task); candidates are validated
+   (known kind, non-empty body, bounded length, no raw transcript dumps)
+   before persisting with `sourceRunId`/`sourceTaskId`. Raw task output,
+   token usage, and session chatter are never persisted as memory
+   (§21 "Bad memory"). (b) **Manual notes** created from the Memory UI.
+   When no agent runtime is mounted, auto-distillation is a no-op and memory
+   is manual-only — honest degradation, no fake entries (invariant 2).
+3. **Deduplication and supersession** — on write, the service compares the
+   candidate against same-`kind` active entries (lexical overlap, Design:
+   exact scoring): a near-duplicate *supersedes* the old entry — old →
+   `superseded`, new → `active` with `supersedes` pointing at the old id —
+   keeping the audit trail; nothing is ever deleted by the system
+   (§22). Archiving (user action) hides an entry from retrieval without
+   deleting it.
+4. **Retrieval (local lexical strategy)** — a `search({ projectId, query,
+   kinds?, tags?, limit? })` interface per §23: pinned entries first, then
+   kind/tag filtering, then lexical relevance (deterministic term-based
+   scoring over title+body+tags; no external dependencies, no mandatory
+   vector DB), then recency as a tie-break. The strategy sits behind a seam
+   so semantic/vector retrieval can be added later (master spec §23:
+   "Design it so semantic/vector retrieval can be added later").
+5. **Context budget + injection** — retrieval is always bounded: config
+   carries max entries, max characters (pinned budget + retrieved budget,
+   §24). A compact context packet (PROJECT SUMMARY with per-kind sections —
+   relevant architecture / decisions / testing knowledge / known pitfalls)
+   is built from the bounded search and injected into (a) the coordinator's
+   session context and (b) task prompts, so Run #2's agents see Run #1's
+   knowledge. No packet when the project has no active memory (no
+   placeholder text, invariant 2).
+6. **Memory UI** — a Memory page in the existing Dashboard (Design: tab
+   placement; zh/en parity compile-enforced as in Phases 2–5): search,
+   filter by kind (with per-kind counts), filter by tag, inspect the source
+   Run (deep link to the existing run inspector), pin/unpin, edit, archive,
+   mark obsolete (supersession), see supersession relationships
+   (old ↔ new), and create a manual note (§25). Every control is backed by
+   a real RPC — no dead buttons (invariant 2).
+
+### 11.2 Non-goals (Phase 7+)
+
+- No semantic/vector retrieval, no embeddings, no mandatory external vector
+  database (§23 explicitly defers it; the seam exists).
+- No memory sharing across projects — memory is per-project by model.
+- No automatic expiry/TTL or background garbage collection of memory —
+  supersession + manual archiving only (audit trail preserved).
+- No approval modes for memory writes (Phase 7 approval objects apply to
+  runs/plans; memory writes are service-internal + manual).
+- No budget/cost enforcement (Phase 7) — the context budget is a retrieval
+  bound, not a spend limit.
+- No artifact system (Phase 8): memory entries are knowledge, not
+  documents; reports/artifacts remain a separate later phase.
+- No per-entry provenance graph beyond `supersedes` + the three source
+  fields (no citation network, no edit history table in this phase).
+
+### 11.3 Acceptance (intent level; each gate verifies its part)
+
+1. Store: `memory` is a declared table of `dsh_projects` (format v0, no
+   migration); records validate against the strict §20 shape; `version`
+   bumps on every accepted mutation (CAS); `superseded`/`archived` entries
+   are retained, never deleted by the system.
+2. Write policy: only distillation (real structured candidates, validated)
+   and manual notes create entries; raw output is never persisted as
+   memory; a run with no reusable knowledge produces zero entries (no
+   filler); unmounted runtime → no auto entries, no error spam.
+3. Dedup/supersession: a near-duplicate candidate in the same kind flips the
+   old entry to `superseded` and links it via `supersedes`; distinct facts
+   both stay active; archive hides from retrieval; the audit trail (old
+   entry, its status, the link) is intact after reopen.
+4. Retrieval: deterministic lexical search — pinned first, kind/tag filters
+   respected, relevance ordered, `limit` honored; empty project → empty
+   result (no fabricated entries); the strategy seam accepts a fake
+   implementation in tests.
+5. Budget + injection: the context packet respects max-entries and
+   max-characters (pinned + retrieved budgets) and is injected into the
+   coordinator context and task prompts; no packet with no active memory.
+   End-to-end: knowledge distilled from Run #1 is present in Run #2's
+   injected context (the phase's end state).
+6. UI: the Memory page renders search/kind counts/tags/source-run link/
+   pin/edit/archive/supersession view/manual create; zh/en parity
+   compile-enforced; every action dispatches a real RPC (absent-service and
+   validation errors surfaced, never swallowed).
+7. Storage: memory entries + their statuses survive a real JSON domain
+   reopen; the medium table set grows by exactly one table; domain stays
+   v0.
+8. Repo green: typecheck, build, `pnpm vitest run` (modulo the documented
+   pre-existing environment failures).
+
+### 11.4 Test plan (intent level; Design formalizes seams)
+
+Memory store/state module (record validation, CAS, status transitions,
+supersession link invariants); distillation service against a fake
+coordinator/structured-output seam (candidate validation, bad-memory
+rejection, no-runtime no-op, zero-entry runs); dedup/supersession unit
+cases (near-duplicate flip, distinct facts, idempotent rewrite); retrieval
+module (scoring determinism, pinned priority, filters, limit, empty case,
+fake-strategy seam); context-packet builder (budgets, sections, absence);
+coordinator + task-service coupling (Run #1 → Run #2 injection end-to-end on
+the in-memory domain, including the no-runtime degradation); additive RPC
+(validation + absent-service); jsdom UI interactions (zh + en: search,
+kind counts, pin, edit, archive, supersession view, manual create, source-run
+deep link); extended storage integration (memory survives a real JSON
+reopen; table set `['memory','plans','run_events','runs','tasks']`).
+
+## 12. Next gate
+
+**Design (Phase 6 — Project Memory):** formalize `spec.md` — the `memory`
+table schema + strict record spec, the memory state machine (status
+transitions, CAS, supersession rules), the distillation step (trigger point,
+candidate schema, validation, the structured-output seam), the dedup scoring
+contract, the lexical retrieval strategy + seam, the context-budget config
++ packet builder, the injection points (coordinator context, task prompts),
+the additive RPC surface, the Memory page (placement, zh/en keys), and the
+full test plan, per §11.
