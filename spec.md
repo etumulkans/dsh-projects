@@ -1,801 +1,638 @@
-# Spec — Phase 7: Approvals + budgets
+# Spec — Phase 8: Artifacts + final report
 
-**Gate:** Design · **Intent:** `intent.md` (Phase 7, commit `d30a7da`) · **Master spec:** `DSH_PROJECTS_SPEC.md` §18 (approval modes), §19 (approval objects), §30 (budgets) · **Predecessor:** Phase 6 spec (Project Memory, `3a03aab`)
+**Gate:** Design · **Intent:** `intent.md` (Phase 8, commit `15a8653`) · **Master spec:** `DSH_PROJECTS_SPEC.md` §26 (artifact system), §64 (human-friendly final report), §28 (event model — `artifact.created`), PHASE 8 · **Predecessor:** Phase 7 spec (Approvals + budgets, `321821d`)
 
 ## 1. Goal and success
 
-A run only does what its **approval mode** allows, and it stops when it runs
-out of **budget** — both enforced in code (not model instructions), both
-persisted (surviving browser refresh and process restart), both visible and
-inspectable in the Dashboard.
+A run produces **durable artifacts** (test reports, research outputs, patches/diffs,
+PR references, …) and ends with a **human-readable final report** — the user should
+not have to inspect five Agent sessions to understand what happened. Every artifact
+persists (surviving browser refresh and process restart) and is inspectable in the
+Dashboard.
 
-Success: the `project_approvals` table + approval-mode policy gate the plan
-and merge stages; every declared `RunBudget` key is checked at a named code
-site with an 80% warning and a limit action; the Dashboard shows pending
-approvals (Approve/Reject), the run's mode, and budget usage; the existing
-plan-approval flow keeps working unchanged (it now resolves a persisted
-object); `pnpm run typecheck`, `pnpm run build`, `pnpm vitest run` green
-(modulo the documented pre-existing environment failures).
+Success: the `project_artifacts` table + `ProjectArtifactService` store append-only
+artifacts (12 kinds, reference-not-blob content policy, secrets scrubbed); the run
+completion pipeline generates a deterministic `final-report` artifact at the run's
+terminal transition (master spec §64 layout); the Dashboard shows the run's artifacts
+(RunInspector section) and the project's artifacts (a project-level tab) with a
+readable final report; `pnpm run typecheck`, `pnpm run build`, `pnpm vitest run`
+green (modulo the documented pre-existing environment failures).
 
 ## 2. Invariants (from `intent.md` §3)
 
 1. **No invented APIs.** Only native Harness/Cordis/Agent-Teams/subagent/storage primitives as installed.
-2. **No placeholder APIs, no fake UI data.** Every RPC, service method, and UI control is backed by real behavior; declared-but-untriggered approval types are generic (the endpoint works for any declared type) but have no fake trigger sites.
-3. **No premature phases.** No new run phases; no triggers (Phase 9), no artifacts (Phase 8), no TTL timers.
-4. **Preserve existing behavior.** The Phase 2 plan-approval flow (plan `awaiting-approval` ↔ run `awaiting_approval`, the `plan.approval.*` events, the plan UI buttons) keeps working exactly as today — Phase 7 adds a persisted object behind it, not a replacement.
+2. **No placeholder APIs, no fake UI data.** Every RPC, service method, and UI control is backed by real behavior; the final report is generated in code from the persisted records (deterministic, no model call, no fabricated data).
+3. **No premature phases.** No new run phases; no triggers (Phase 9), no recovery of interrupted report generation (Phase 10), no artifact versioning beyond the one-`final-report`-per-run regeneration.
+4. **Preserve existing behavior.** The Phase 5 completion pipeline, the Phase 6 memory distillation, and the Phase 7 approval/budget flow keep working exactly as today — Phase 8 adds an artifact store + a report behind them, not a replacement.
 5. **Extend the native Dashboard UI** (one frontend, existing slots).
 6. **State in code + persistent storage** (`dsh_projects` domain, format version stays 0).
 7. **Repo stays buildable and testable** at every commit.
 
 ## 3. Storage (additive, domain stays v0)
 
-### 3.1 `project_approvals` table (new)
+### 3.1 `project_artifacts` table (new)
 
 Declared in `dshProjectsDomainSpec` (the domain version stays 0 — storage-domain
-initializes absent declared tables as empty, per the Phase 2/4/6 precedent):
+initializes absent declared tables as empty, per the Phase 2/4/6/7 precedent):
 
 ```ts
-export type ApprovalType =
-  | 'plan' | 'external-write' | 'git-push' | 'pull-request' | 'merge' | 'dangerous-action'
-export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired'
+export const ARTIFACT_KINDS = [
+  'plan', 'research-report', 'architecture-note', 'patch', 'diff',
+  'test-report', 'validation-report', 'review-report', 'screenshot',
+  'log-reference', 'pull-request', 'external-link', 'final-report',
+] as const
+export type ArtifactKind = (typeof ARTIFACT_KINDS)[number]
+export type ArtifactId = string
 
-export interface ApprovalRequestRecord {
-  readonly id: ApprovalId            // uuid
+export interface ProjectArtifactRecord {
+  readonly id: ArtifactId            // uuid
   readonly projectId: ProjectId
-  readonly runId: RunId
-  readonly type: ApprovalType
-  readonly summary: string           // 1..500 chars
-  readonly payload?: unknown         // structured context for the type (e.g. branch names for merge)
-  readonly status: ApprovalStatus
-  readonly requestedAt: string       // ISO
-  readonly resolvedAt?: string       // ISO; set on any terminal status
-  readonly resolvedBy?: string       // 1..200; who resolved
-  readonly createdAt: string
-  readonly updatedAt: string
-  readonly version: number           // CAS, min 1
+  readonly runId?: RunId             // the producing run (most artifacts are run-scoped)
+  readonly taskId?: TaskId           // the producing task (optional finer scope)
+  readonly kind: ArtifactKind
+  readonly title: string             // 1..200 chars
+  readonly content?: string          // inline text, bounded (§4.1)
+  readonly path?: string             // file reference (no large binaries in JSON storage)
+  readonly url?: string              // external reference (e.g. a PR URL)
+  readonly metadata?: Record<string, unknown>
+  readonly createdAt: string         // ISO
 }
 ```
 
-Strict zod schema (`projectApprovalRecordSchema`) in `src/approvals/spec.ts`;
-`payload` is `z.unknown().optional()` (the type-specific shape is validated by
-the trigger site, not the table). `summary` is `nonBlank` with a 500-char cap
-(`z.string().trim().min(1).max(500)`).
+Strict zod schema (`projectArtifactRecordSchema`) in `src/artifacts/spec.ts`;
+`title` is `nonBlank` with a 200-char cap (`z.string().trim().min(1).max(200)`);
+`content`/`path`/`url`/`metadata` are optional; `metadata` is
+`z.record(z.unknown()).optional()` (the kind-specific shape is validated by the
+trigger site, not the table — the same pattern as the approval `payload`).
 
-### 3.2 Run record — three additive optional fields
+**Append-only:** the record has **no `version` and no `updatedAt`** — an artifact
+is never mutated or deleted (the durable record of what a run produced). The one
+exception is the `final-report` regeneration (§6.4), which replaces the single
+existing `final-report` row for a run in place (same `runId` + kind), not by
+adding a second row.
+
+### 3.2 Run event type (additive — one)
+
+```
+'artifact.created'   // an artifact was persisted (detail: `<kind>: <title>`)
+```
+
+Added to `RUN_EVENT_TYPES` (`src/runs/spec.ts`) and the `ProjectRunEventType`
+union (`src/runs/types.ts`). The artifact service appends it on the run's per-run
+`seq` (the existing `appendRunEvent` pattern) when the artifact has a `runId`
+(project-scoped artifacts without a `runId` emit no run event — there is no run to
+project onto). The master spec §28 names this event `artifact.created`; the
+product's event stream is per-run, so it is emitted only for run-scoped artifacts.
+
+## 4. Content policy (master spec §26: "do not store huge binary blobs")
+
+### 4.1 The inline `content` bound
+
+`content` is inline **text** (reports, notes, diffs-as-text). It is bounded to
+**64 KB** (`MAX_ARTIFACT_CONTENT_LENGTH = 65_536` chars, exported from
+`src/artifacts/spec.ts`). A `content` longer than the bound is rejected at
+creation with `artifact.contentTooLarge` (`params: { maxLength }`) — the caller
+must store a `path` reference instead (§4.2). The bound is enforced by the service
+(`validateArtifact`, §5.2); the schema keeps the storage contract strict but does
+not re-check the bound (the service is the single authority, the Phase 6 memory
+pattern).
+
+### 4.2 References, not blobs
+
+- **Large/binary outputs are references, not blobs** — a `path` (a file in the
+  project workspace) or a `url` (an external link / PR). A `screenshot` kind
+  stores a `path`/`url`, **never the bytes** (master spec §26, explicit).
+- **`pull-request` / `external-link`** carry a `url` (+ `metadata` for the PR
+  number, head/branch, etc.).
+- **`patch` / `diff`** may carry inline `content` (the diff text, when ≤ 64 KB)
+  or a `path` (a patch file in the workspace) — the trigger site chooses.
+- **No file upload/download endpoints** — a `path` is a reference into the
+  project workspace; the Dashboard links to it, it does not stream bytes
+  (§13).
+
+### 4.3 Secrets are scrubbed
+
+`content`/`path`/`url`/`metadata` are scanned for secrets at creation (the Phase 6
+memory `SECRET_PATTERNS` — reused, exported from `src/memory/memory-service.ts`
+or duplicated into `src/artifacts/spec.ts`; the Design keeps a single source). A
+candidate containing what looks like a secret is rejected with
+`artifact.containsSecrets` (`params: { reason: 'contains-secrets' }`) — an
+artifact never becomes a secret leak. The scan is a hard rejection (the Phase 6
+memory pattern), not a silent redaction: the caller must fix the input.
+
+### 4.4 Kind-specific validation (the trigger site, not the table)
+
+`validateArtifact` (§5.2) enforces the **hard** limits (title/content bounds,
+secrets) for all kinds. Kind-specific rules are enforced at the trigger site:
+- a `pull-request` / `external-link` **requires** a `url` (a
+  `pull-request` with no `url` is a `artifact.missingUrl`);
+- a `screenshot` **requires** a `path` or `url` (never inline bytes);
+- a `final-report` is **never created via `artifactCreate`** — it is generated by
+  the completion pipeline (§6.3); a manual `final-report` create is a
+  `artifact.kindReserved` (the kind is reserved for the generator).
+
+## 5. Artifact service — `src/artifacts/artifact-service.ts`
+
+### 5.1 Service shape
+
+`ProjectArtifactService` (host-only; the client never imports it — the Phase 6/7
+isolation invariant extends: a new scan asserts no `src/client/**` file imports
+`src/artifacts/**`):
 
 ```ts
-/** Additive (Phase 7): the approval mode governing this run (config default when absent). */
-readonly approvalMode?: 'manual' | 'plan' | 'guarded' | 'autonomous'
-/** Additive (Phase 7): the run's budget limits. Absent or key-absent = unlimited for that key. */
-readonly budget?: RunBudget
-/** Additive (Phase 7): budget keys that already emitted their 80% warning (one warning per key per run). */
-readonly budgetWarnings?: readonly string[]
-```
-
-`RunBudget` (in `src/runs/types.ts`):
-
-```ts
-export interface RunBudget {
-  readonly maxRuntimeMinutes?: number   // int, 1..100_000
-  readonly maxTotalTokens?: number      // int, >= 1
-  readonly maxInputTokens?: number      // int, >= 1
-  readonly maxOutputTokens?: number     // int, >= 1
-  readonly maxAgents?: number           // int, 1..50 (caps the concurrency knob, §5.3)
-  readonly maxConcurrentAgents?: number // int, 1..50
-  readonly maxReplans?: number          // int, >= 1
-  readonly maxRetriesPerTask?: number   // int, >= 1
-  readonly maxCost?: number             // number, >= 0 — declared; unenforceable until a cost source exists (§5.5)
-}
-```
-
-All keys optional; the schema is `z.object({ … }).strict().optional()` with
-per-key `z.number().int().min(…)` bounds as above. `maxCost` is a plain
-`z.number().min(0)` (not int — costs are fractional).
-
-### 3.3 Run event types (additive — two)
-
-```
-'run.approval.requested'   // an ApprovalRequest went pending (any type)
-'run.approval.resolved'    // an ApprovalRequest went terminal (detail: `<type> <status> by <resolvedBy>`)
-'run.budget.warning'       // a budget key crossed 80% (detail: `<key> at <pct>% of <limit>`)
-'run.budget.exceeded'      // a budget key hit its limit (detail: the per-key action, §5.4)
-```
-
-The existing `plan.approval.requested` / `plan.approved` / `plan.rejected`
-events are **unchanged** — they stay the plan-status projection (the plan
-service emits them on plan transitions, exactly as today). The new
-`run.approval.*` events are the **approval-object** projection (the approval
-service emits them on object transitions). For `type: 'plan'` objects both
-streams fire (plan event from the plan service, run.approval event from the
-approval service) — the event stream is an append-only log; the object is the
-single authority for "is this approved?" (§4.4).
-
-## 4. Approval service — `src/approvals/approval-service.ts`
-
-### 4.1 Service shape
-
-`ApprovalService` (host-only; the client never imports it — the Phase 6
-isolation invariant extends: a new scan asserts no `src/client/**` file
-imports `src/approvals/**`):
-
-```ts
-constructor(ctx: Context, catalog: ProjectCatalog, runService: ProjectRunService)
+constructor(ctx: Context, catalog: ProjectCatalog, runService: ProjectRunService, clock?: () => string)
 start(): Promise<void>   // borrows the shared dsh_projects tables (requires runService started)
 stop(): Promise<void>
 ```
 
-Borrows the `project_approvals` table from the shared domain (the same
-borrow pattern as `ProjectMemoryService` — `start()` after `runService.start()`,
-`stop()` before `runService.stop()` in `index.ts`).
+Borrows the `project_artifacts` table from the shared domain (the same borrow
+pattern as `ProjectMemoryService` — `start()` after `runService.start()`,
+`stop()` before `runService.stop()` in `index.ts`). It also borrows `runs`,
+`run_events`, `tasks`, and `memory` (the final-report generator reads them, §6).
 
-### 4.2 The mode policy table (master spec §18)
-
-The mode is read from the run record (`run.approvalMode`, falling back to the
-config default — §6.2). The policy table, `approvalPolicy.ts` (pure, exported
-for tests):
-
-| Stage | `manual` | `plan` | `guarded` | `autonomous` |
-| --- | --- | --- | --- | --- |
-| **plan** (activating a plan) | approval required | approval required | **not required** | **not required** |
-| **merge** (the run's integration merge) | approval required | approval required | approval required | approval required |
-
-- **`manual`** — approval before the major execution stages: the plan gate
-  and the merge gate.
-- **`plan`** — the human approves the Run Plan; after approval local
-  execution proceeds automatically (the merge gate still applies — the
-  integration merge is an external/dangerous stage, not "local execution").
-- **`guarded`** — ordinary sandboxed work (planning, task execution) proceeds
-  automatically; the plan gate is lifted (the plan is activated directly),
-  the merge gate applies.
-- **`autonomous`** — the coordinator proceeds without plan approval, within
-  permissions and budgets; the merge gate applies. Even in autonomous mode:
-  never bypass Harness permissions, never silently elevate permissions, never
-  merge into protected production branches by default, never expose secrets
-  (master spec §18) — these are honored by the gate itself (the merge always
-  requires approval in every mode; there is no per-run override that lifts it
-  in Phase 7) and by the existing Harness permission preset (the agent
-  profile's `permissionPreset` is untouched).
-- **The default is conservative:** the config default is **`plan`** (§6.2).
-
-`requiresApproval(mode, stage): boolean` is the pure function; the two
-`ApprovalStage` values are `'plan' | 'merge'` (the other declared
-`ApprovalType`s have no trigger site in Phase 7 — §7).
-
-### 4.3 Request / resolve
+### 5.2 Create / list / get (append-only)
 
 ```ts
-/** Create a pending approval (idempotent per (run, type): an existing pending object for the same
- *  (runId, type) is returned, not duplicated). A *terminal* object for the same
- *  (runId, type) never blocks a new request — the new pending object supersedes it
- *  (the old object is retained for the audit trail, never deleted). */
-requestApproval(input: {
-  readonly runId: RunId
-  readonly type: ApprovalType
-  readonly summary: string            // 1..500
-  readonly payload?: unknown
-}): Promise<ApprovalRequestRecord>
+/** Persist a new artifact (append-only — no update/delete). Validates the hard
+ *  limits + the secrets scan + the kind-specific rules (§4). Emits the
+ *  `artifact.created` run event when the artifact has a runId. */
+async create(input: ArtifactCreateInput): Promise<ProjectArtifactRecord>
 
-resolveApproval(id: ApprovalId, decision: 'approved' | 'rejected', input: {
-  readonly expectedVersion?: number   // CAS
-  readonly resolvedBy?: string        // 1..200, default 'dashboard'
-}): Promise<ApprovalRequestRecord>
+/** List artifacts (newest first). At least one of runId/projectId required. */
+list(input: { readonly runId?: RunId; readonly projectId?: string; readonly kind?: ArtifactKind }): ProjectArtifactRecord[]
 
-/** Explicit expiry (no TTL — §7): mark a pending object `expired` (e.g. its run was canceled). */
-expireApproval(id: ApprovalId, input: { readonly expectedVersion?: number }): Promise<ApprovalRequestRecord>
-
-listApprovals(runId?: RunId, projectId?: RunId): ApprovalRequestRecord[]  // newest first
+/** The full record for the detail view. */
+get(id: ArtifactId): ProjectArtifactRecord | undefined
 ```
 
-- **One pending per (run, type):** `requestApproval` first looks up a pending
-  object for the same `(runId, type)` and returns it (idempotent re-request).
-  A *terminal* object for the same `(runId, type)` is superseded by a new
-  pending one (a rejected plan can be re-requested; a rejected merge can be
-  re-requested after the run is resumed) — the old object is never deleted
-  (audit trail).
-- **Resolve** is CAS on `version` (`approval.staleVersion` on mismatch,
-  `expectedVersion`/`actualVersion` params like `memory.staleVersion`);
-  resolving a terminal object → `approval.invalidStatus`; `resolvedBy`
-  defaults to `'dashboard'`; `resolvedAt` is set.
-- **Expiry** is the only path to `expired` (no background timer — §7);
-  resolving an already-terminal object → `approval.invalidStatus`.
-- Every accepted mutation bumps `version`, sets `updatedAt`, persists first,
-  then appends the run event (§3.3) and emits a Cordis event:
-  - `requestApproval` → `run.approval.requested` (title `Approval requested: <type>`, detail = summary) + `dsh-projects/approval/requested`
-  - `resolveApproval` → `run.approval.resolved` (title `Approval <status>: <type>`, detail `<type> <status> by <resolvedBy>`) + `dsh-projects/approval/resolved`
-  - `expireApproval` → `run.approval.resolved` (detail `<type> expired by <resolvedBy>`) + `dsh-projects/approval/resolved`
-
-### 4.4 The plan trigger site (the existing flow, now persisted)
-
-The plan approval flow today: the coordinator submits the plan → the plan
-service moves it to `awaiting-approval` → the `PlanRunCoupler` moves the run
-`planning → awaiting_approval` → the user approves/rejects in the plan UI
-(`planTransition` RPC) → the plan moves `active`/`draft` → the coupler moves
-the run `executing`/`planning`.
-
-Phase 7 inserts the approval object **at the plan transition**, inside the
-plan service's existing `onPlanStatus`-adjacent flow — specifically a new
-optional hook on `RunPlanService` (the same hook pattern as `onPlanStatus`):
+`ArtifactCreateInput`:
 
 ```ts
-hooks: {
-  onPlanStatus?: …  // existing
-  onPlanApproval?: (event: PlanApprovalEvent) => Promise<void>  // NEW (Phase 7)
+export interface ArtifactCreateInput {
+  readonly projectId: string
+  readonly runId?: RunId
+  readonly taskId?: TaskId
+  readonly kind: string            // validated against ARTIFACT_KINDS
+  readonly title: string           // 1..200
+  readonly content?: string        // ≤ 64 KB
+  readonly path?: string
+  readonly url?: string
+  readonly metadata?: Record<string, unknown>
 }
 ```
 
-`PlanApprovalEvent` = `{ runId, planId, version, action: 'requested' | 'approved' | 'rejected', summary }`,
-fired from the plan service at the three existing transition points
-(`awaiting-approval` → `requested`; `active` → `approved`; `draft` (from
-`awaiting-approval`) → `rejected`). A plan that goes `draft → active`
-directly (the `direct` pattern, or a `guarded`/`autonomous` orchestrated
-plan, §4.4) fires `approved` with **no pending object to resolve** — the
-wiring's `pendingFor` lookup returns `undefined` and the hook is a no-op
-(the object exists only when the plan actually went through
-`awaiting-approval`). The wiring in `index.ts`:
+- **Append-only:** there is **no `update` and no `delete`** method (the durable
+  record; §13). The only mutation is the `final-report` regeneration (§6.4),
+  which is a private in-place replace, not a public `update`.
+- **Create** validates via the pure `validateArtifact` (§5.3), persists the record
+  (a `put` — no CAS needed, append-only), and appends the `artifact.created` run
+  event (when `runId` is present) + emits a Cordis event
+  (`dsh-projects/artifact/created`).
+- **List** is synchronous (Map-backed) and newest-first (`createdAt` descending,
+  id tiebreak — the Phase 7 deterministic-ordering pattern). A `kind` filter is
+  optional. At least one of `runId`/`projectId` is required (both absent →
+  `artifact.badRequest`).
+- **Get** returns the record or `undefined` (the RPC maps `undefined` →
+  `artifact.unknown`).
+
+### 5.3 Pure validation (exported for tests)
 
 ```ts
-planService = new RunPlanService(ctx, runService, undefined, {
-  onPlanStatus: async event => { await coupler.handle(event); await taskService.handlePlanStatus(event) },
-  onPlanApproval: async event => {
-    if (event.action === 'requested') {
-      await approvalService.requestApproval({ runId: event.runId, type: 'plan', summary: `Plan v${event.version} approval requested` })
-    } else {
-      const pending = approvalService.pendingFor(event.runId, 'plan')
-      if (pending !== undefined) await approvalService.resolveApproval(pending.id, event.action, { resolvedBy: 'plan-ui' })
-    }
-  },
+export type ArtifactInvalidReason =
+  | 'unknown-kind' | 'empty-title' | 'title-too-long'
+  | 'content-too-large' | 'missing-url' | 'kind-reserved' | 'contains-secrets'
+
+export function validateArtifact(input: ArtifactCreateInput): ProjectArtifactRecord  // throws artifact.invalidCandidate
+```
+
+Enforces only the hard limits + the secrets scan + the kind-specific rules (§4) —
+no semantic judgment. Returns the normalized record (trimmed title, the `id`
+assigned by the caller). The `final-report` kind is rejected here
+(`artifact.kindReserved`) — it is generator-only (§6.3).
+
+## 6. The final report (master spec §64)
+
+### 6.1 The trigger (the run's terminal transition)
+
+The report is generated when a run reaches a **terminal** phase —
+`succeeded` / `failed` / `canceled` (`TERMINAL_RUN_PHASES`, the existing
+state-machine set). `blocked` and `paused` are **resumable, not terminal** — a
+report at a resumable phase would be premature (the run may resume and reach a
+different terminal phase); the report is generated once, at the terminal
+transition.
+
+The trigger is the **`dsh-projects/run/completed`** Cordis event (emitted by
+`ProjectRunService.transitionRun` when `isTerminalRunPhase(next.phase)` — the
+existing event, already listened to by the task-service). `ProjectArtifactService`
+listens for it (the same `ctx.on` pattern as the task-service's
+`onRunCanceled`):
+
+```ts
+// in ProjectArtifactService.start():
+this.removeCompletedListener = this.ctx.on('dsh-projects/run/completed', event => {
+  void this.generateFinalReport(event.runId)   // fire-and-forget
 })
 ```
 
-- The `plan.approval.*` run events and the plan UI buttons are **unchanged**
-  (invariant 4) — the hook only adds the persisted object + the
-  `run.approval.*` events behind them.
-- **Mode gating for the plan:** the coordinator's `settle` (Phase 3) today
-  always moves an orchestrated plan to `awaiting-approval`. Phase 7 changes
-  `settle` to consult the policy: `requiresApproval(mode, 'plan')` true →
-  `awaiting-approval` (today's behavior); false → `active` directly (the
-  `direct`-pattern path). The mode is read from the run record (config
-  default when absent). The `direct` pattern is unaffected (it was always
-  auto-activated).
+**Fire-and-forget** (the Phase 6 `distillRun` pattern): the generation is never
+awaited by the transition; a failure is a warn log + a `run.report.failed` run
+event (a new additive event, §6.5) + **no artifact** — never a run failure, never
+thrown into the pipeline. The run reaches its terminal phase regardless of whether
+the report succeeds.
 
-### 4.5 The merge trigger site (the Phase 5 integration step)
+### 6.2 The generator (deterministic, in code, no model call)
 
-The integration step today: all coding tasks succeed → the run moves
-`executing → integrating` → `driveCompletionPipeline` runs the integration
-strategy (merge the task branches into the integration branch) → `validating`.
-
-Phase 7 inserts the merge gate **at the `executing → integrating` edge**, in
-`ProjectTaskService.detectAllSucceeded` (the single site that moves the run
-to `integrating`):
+`buildFinalReport(run, tasks, memory, approvals, artifacts): string` — a **pure**
+function (host-only, exported for tests) that renders the master spec §64 layout
+from the **persisted records** (no model call, no fabricated data, byte-stable for
+the same inputs):
 
 ```
-if (requiresApproval(run.approvalMode, 'merge')) {
-  await approvalService.requestApproval({
-    runId, type: 'merge',
-    summary: `Merge ${taskBranches.length} task branch(es) into ${integrationBranch}`,
-    payload: { integrationBranch, taskBranches },
-  })
-  await runService.transitionRun(runId, 'awaiting_approval')   // the run pauses at the gate
-  return  // the pipeline does not run yet
-}
-// no approval required: today's behavior (the run moves integrating → pipeline runs)
+Goal
+<run.goal>
+
+Outcome
+<phase>. <resultSummary | error>
+
+Changes
+- <task.title>: <task.outputSummary | status>   (one line per task, plan order)
+
+Validation
+- <the integration step outcome: branch/head for Git projects, or "no Git isolation">
+- <the run.integration.* events, when present>
+
+Git
+Branch: <run.integrationBranch>
+Commit: <run.integrationHead>
+PR: <the run's pull-request artifact url, when present>
+
+Agents
+<the agent count: the number of distinct task workers, or the run's maxConcurrentAgents>
+
+Usage
+Input: <run.tokenUsage.input>
+Output: <run.tokenUsage.output>
+Runtime: <completedAt - startedAt, humanized>
+
+Project knowledge learned
+- <the memory entries distilled from this run (sourceRunId === run.id), titles>
+
+Remaining risks
+- <the failed/blocked tasks, titles>
+- <the budget warnings (run.budget.warning events), when present>
 ```
 
-- The run is in `awaiting_approval` with `suspendedFrom: 'executing'` (the
-  existing `suspendedFrom` machinery — no new phase).
-- **Resume:** when the `merge` approval is resolved `approved`, the approval
-  service (via the `onApprovalResolved` hook, §4.6) moves the run
-  `awaiting_approval → integrating` directly. (Resuming to `executing`
-  instead would re-trigger `detectAllSucceeded` and re-request the approval
-  — an infinite loop.) This spec adds `integrating` to
-  `ALLOWED_TRANSITIONS['awaiting_approval']` — a one-edge addition to the
-  state machine, validated by `transitionRun`. The next scheduler tick sees
-  `run.phase === 'integrating'` and runs `driveCompletionPipeline` (the
-  existing crash-safety leg handles the event/phase ordering).
-- **Reject:** the approval resolution moves the run `awaiting_approval →
-  blocked` (the existing edge; resumable — a human can re-request the merge
-  approval or cancel the run).
-- **The pipeline itself is unchanged** — the gate is at the edge, not inside
-  the merge. The integration strategy, the `run.integration.*` events, and
-  the verification leg all work exactly as today.
+- **Every section is present**; an empty section renders its header + "None."
+  (never an omitted section — the layout is stable).
+- **The `resultSummary` is included verbatim** in the Outcome (the Phase 7
+  budget-stop explanation — "Budget limit reached: <key> (…)").
+- **The Git section** renders the branch/head when present (a Git project); a
+  non-Git project renders "No Git isolation." The PR line renders the run's
+  `pull-request` artifact's `url` (when one exists as an artifact) — otherwise
+  omitted (no fabricated PR).
+- **The knowledge section** lists the Phase 6 memory entries distilled from this
+  run (`sourceRunId === run.id`), by title (the `run.memory.distilled` event's
+  entries).
+- **The risks section** lists the failed/blocked tasks (titles) + the budget
+  warnings (the `run.budget.warning` events' details).
+- **Deterministic:** for the same persisted records, the output is byte-identical
+  (no timestamps in the body beyond the run's own `startedAt`/`completedAt`; no
+  random ordering — tasks in plan order, memory in list order).
 
-### 4.6 The approval → run coupling hook
+### 6.3 Persisting the report
 
-`ApprovalService` takes an optional hook (the same pattern as
-`ProjectTaskService.hooks.onRunSucceeded`):
+`generateFinalReport(runId)` (the fire-and-forget handler):
 
-```ts
-hooks?: {
-  onApprovalResolved?: (record: ApprovalRequestRecord) => Promise<void>
-}
-```
+1. Read the run (the fresh post-transition record); if absent or not terminal →
+   no-op.
+2. Read the run's tasks, memory (sourceRunId), approvals, and existing artifacts
+   (for the PR reference).
+3. `buildFinalReport(...)` → the report text.
+4. **One `final-report` per run** (idempotent): if a `final-report` artifact
+   already exists for the run → replace its `content`/`title`/`metadata` in place
+   (the single allowed mutation, §3.1); otherwise create a new row. The record:
+   `kind: 'final-report'`, `title: 'Final report'`, `content: <the report>`,
+   `runId`, `projectId`, `metadata: { phase, generatedBy: 'pipeline' }`.
+5. Append the `artifact.created` run event (detail `final-report: Final report`)
+   + emit the Cordis event.
+6. On any failure: a warn log + the `run.report.failed` run event (detail = the
+   error message) + no artifact. Never throw.
 
-Wired in `index.ts` to move the run (§4.5): `approved` + `type: 'merge'` →
-`runService.transitionRun(runId, 'integrating')`; `rejected` + `type:
-'merge'` → `runService.transitionRun(runId, 'blocked')` (with the
-`run.approval.resolved` event already appended); `type: 'plan'` → no run move
-(the plan coupler already moved it — the object is the audit record). A
-guard miss (the run moved concurrently) is a logged no-op, exactly like the
-`PlanRunCoupler` (invariant: the approval resolution stands; the run phase
-simply does not follow).
+### 6.4 The regenerate affordance
 
-## 5. Budgets (master spec §30)
+A `runGenerateReport` RPC (§7) re-runs `generateFinalReport(runId)` **on demand**
+(the UI's "Regenerate" button). It is allowed in **any** phase (a human may want
+to regenerate after adding a `pull-request` artifact, or to re-render after a
+budget raise). It returns the (re)generated `final-report` record. The same
+idempotent in-place replace applies (§6.3 step 4). A run with no tasks and no
+integration still produces a report (the empty sections render "None.") — the
+report is always generatable from the persisted records.
 
-### 5.1 Where the checks live
-
-| Key | Site | Usage source |
-| --- | --- | --- |
-| `maxTotalTokens` / `maxInputTokens` / `maxOutputTokens` | `ProjectTaskService` — after each task's `tokenUsage` is accumulated onto the run (the existing `tokenUsage` accumulation at task completion) | `run.tokenUsage` (already persisted per task completion) |
-| `maxRuntimeMinutes` | `ProjectTaskService.tick` — once per tick per non-terminal run (cheap: `now - run.startedAt`) | `run.startedAt` |
-| `maxAgents` | `ProjectTaskService` — the scheduler's `limit` (the existing `run.maxConcurrentAgents ?? DEFAULT_TASK_CONCURRENCY` line) is capped: `limit = min(limit, budget.maxAgents)` | the scheduler's ready-task pick |
-| `maxConcurrentAgents` | same line (the budget view unifies the existing per-run knob: `limit = min(run.maxConcurrentAgents ?? DEFAULT, budget.maxConcurrentAgents ?? ∞)`) | the scheduler's ready-task pick |
-| `maxRetriesPerTask` | `ProjectTaskService.taskRetry` — before re-queueing, `task.attempt >= budget.maxRetriesPerTask` → refuse | `task.attempt` (already persisted, 0-based) |
-| `maxReplans` | `RunPlanService` — at `createPlan` with `supersedesPlanId` (a replan), count the run's plan chain (plans with the same `runId`); `count >= budget.maxReplans` → refuse | the `plans` table (existing) |
-| `maxCost` | **no site** — no cost metering exists (§5.5); the key is validated at creation but never checked | — |
-
-### 5.2 The 80% warning (once per key per run)
-
-A pure helper `budgetCheck.ts` (host-only, exported for tests):
-
-```ts
-export interface BudgetCheckResult {
-  readonly key: string            // the budget key that crossed
-  readonly ratio: number          // usage / limit
-  readonly warning: boolean       // ratio >= 0.8 && ratio < 1 (or == 1 on the first check)
-  readonly exceeded: boolean      // ratio >= 1
-  readonly usage: number
-  readonly limit: number
-}
-export function checkBudget(budget: RunBudget | undefined, usage: number, key: string, warned: readonly string[]): BudgetCheckResult | undefined
-```
-
-- **Warning:** `ratio >= 0.8` and the key is not in `run.budgetWarnings` →
-  append the key to `run.budgetWarnings` (a run-record update, CAS), append
-  the `run.budget.warning` event (detail `<key> at <pct>% of <limit>`), and
-  return. **Once per key per run** — the `budgetWarnings` array is the
-  dedup (no background timer, no per-tick spam).
-- **Exceeded:** `ratio >= 1` → the per-key action (§5.3) + the
-  `run.budget.exceeded` event. An exceeded key is also added to
-  `budgetWarnings`. Raising a limit via `runSetBudget` clears that key from
-  `budgetWarnings`, so the 80% of the *new* limit can fire once more (if
-  usage is still ≥ 80% of the new limit on the next check).
-- **Unset = unlimited:** a key absent from `budget` (or `budget` itself
-  absent) → `checkBudget` returns `undefined` (no check, no event).
-
-### 5.3 The per-key limit action (stop or pause according to policy)
-
-| Key | Action at the limit |
-| --- | --- |
-| `maxTotalTokens` / `maxInputTokens` / `maxOutputTokens` | the run moves `→ paused` (with `suspendedFrom`), `resultSummary` = `Budget limit reached: <key> (<usage> of <limit>)`; a human can raise the budget (`runSetBudget`) and resume. No new task starts (the scheduler tick skips a `paused` run — the existing `run.phase !== 'executing' continue` guard). |
-| `maxRuntimeMinutes` | same: `→ paused`, `resultSummary` = `Budget limit reached: maxRuntimeMinutes (<elapsed> of <limit>)`. |
-| `maxAgents` / `maxConcurrentAgents` | **no pause** — the cap silently limits the scheduler's ready-task pick (the run continues with fewer concurrent agents; this is a concurrency bound, not a stop condition). No event (the cap is visible in the UI's budget panel as "capped at N"). |
-| `maxRetriesPerTask` | the specific `taskRetry` call is refused with `task.retryBudgetExceeded` (a new error code, `params: { attempt, max }`); the task stays `failed`; the run is unaffected (a human can raise the budget and retry). No run pause. |
-| `maxReplans` | the specific `createPlan` (replan) call is refused with `plan.replanBudgetExceeded` (a new error code, `params: { count, max }`); the run is unaffected. |
-| `maxCost` | no action (no site, §5.5). |
-
-The `resultSummary` on a token/runtime pause is the "final report explains
-why execution stopped" (master spec §30). The state machine today accepts
-`resultSummary` only on `succeeded` transitions; this spec extends that to
-`paused` as well (`to === 'succeeded' || to === 'paused'` — additive; the
-`succeeded` behavior is unchanged, and a `resultSummary` on any other
-transition is still ignored).
-
-### 5.4 Setting and raising budgets
-
-- **At creation:** `CreateRunInput` gains an optional `budget?: RunBudget`
-  (validated by the run record schema — an invalid budget is a
-  `run.budgetInvalid` bad-request, `params: { key, reason }`). The RPC
-  `runCreate` passes it through (the existing `readCreateRun` gains the
-  field).
-- **Raising:** a new additive RPC `runSetBudget` (patch the budget of a run
-  in `paused` or `blocked` — the only phases where a raise makes sense;
-  `params: { runId, budget: RunBudget, expectedVersion? }`). The patch
-  **replaces the existing one wholesale** (a full `RunBudget` object — no
-  partial merge, which `exactOptionalPropertyTypes` would make ambiguous);
-  the UI sends the current budget with the raised key changed. Every key
-  that was in the old budget but is absent from the new one is cleared from
-  `run.budgetWarnings` (a removed limit can never warn again); a key
-  present in both is cleared only if its limit changed (§5.2). A
-  non-`paused`/`blocked` run → `run.budgetPhaseInvalid`.
-
-### 5.5 No cost metering
-
-`maxCost` is declared and validated (invariant 2: the field exists and is
-checked at creation), but there is no price feed in the product — the check
-is a no-op until a source exists. The budget panel renders the `maxCost`
-limit with "no cost data" (not a fabricated zero).
-
-## 6. Config + RPC
-
-### 6.1 Config — the conservative default
-
-`src/config.ts` `policyDefaults` gains:
-
-```ts
-approvalMode: z.enum(['manual', 'plan', 'guarded', 'autonomous']).default('plan')
-```
-
-The default is **`plan`** (master spec §18: "The default should be
-conservative. I recommend `plan` or `guarded`" — `plan` is the more
-conservative of the two: it gates the plan, which `guarded` does not).
-`createRun` stamps `run.approvalMode = config.policyDefaults.approvalMode`
-when the input does not override it (the input can set a per-run mode —
-`CreateRunInput` gains an optional `approvalMode`).
-
-### 6.2 RPC (additive — four new endpoints + two extended)
-
-`handleDashboardRpc` gains an 11th param `approvals?` (the `ApprovalService`,
-the same pattern as the 10th `memory?`):
-
-- **`approvalList`** — `{ runId? , projectId? }` → `{ approvals: ApprovalRequestRecord[] }` (newest first; at least one of `runId`/`projectId` required — both absent → bad-request).
-- **`approvalResolve`** — `{ id, decision: 'approved' | 'rejected', expectedVersion?, resolvedBy? }` → the resolved record. Structured errors: `approval.unknown` (no such id), `approval.staleVersion` (CAS mismatch, `params: { expectedVersion, actualVersion }`), `approval.invalidStatus` (already terminal).
-- **`approvalExpire`** — `{ id, expectedVersion? }` → the expired record (same error set).
-- **`runSetBudget`** — `{ runId, budget: RunBudget, expectedVersion? }` → the updated run record. Errors: `run.budgetPhaseInvalid` (the run is not `paused`/`blocked`), `run.budgetInvalid` (schema violation), `run.versionConflict` (CAS).
-- **`runCreate`** (extended) — the payload gains optional `budget` + `approvalMode` (validated; the existing callers are unchanged — the fields are optional).
-- **`runDetail`** (extended) — when the approvals service is mounted, the
-  detail gains `approvals: ApprovalRequestRecord[]` for the run (the
-  on-demand pattern — not a snapshot projection; `DashboardSnapshot.version`
-  stays 2).
-
-Absent-service failures follow the Phase 6 pattern: `badRequest('<endpoint>
-is unavailable: the Approval service is not mounted')`.
-
-### 6.3 Error codes (new)
-
-`src/runtime/errors.ts` (host) + `src/client/errors.ts` (mapping, the
-`params` envelope field — not `args`):
+### 6.5 The failure event (additive — one)
 
 ```
-approval.notStarted          // the service is not started
-approval.unknown             // no such approval id
-approval.staleVersion        // CAS mismatch (params: expectedVersion, actualVersion)
-approval.invalidStatus       // the object is already terminal
-approval.runUnknown          // the runId is not a known run
-run.budgetInvalid            // the budget object violates the schema (params: key, reason)
-run.budgetPhaseInvalid       // runSetBudget on a run that is not paused/blocked
-task.retryBudgetExceeded     // task.attempt >= maxRetriesPerTask (params: attempt, max)
-plan.replanBudgetExceeded    // the plan chain is >= maxReplans (params: count, max)
+'run.report.failed'   // final-report generation failed (detail: the error message)
 ```
 
-## 7. UI (existing Dashboard, zh/en parity compile-enforced)
+Added to `RUN_EVENT_TYPES` + the `ProjectRunEventType` union (the same additive
+pattern as §3.2). It is the observable signal that a terminal run has **no**
+final report (the UI renders a "report unavailable" marker + the regenerate
+affordance when the run is terminal but has no `final-report` artifact).
 
-### 7.1 RunInspector — Approvals section
+## 7. RPC (additive, the established pattern)
 
-A new **Approvals** section in the RunInspector (below the Tasks section),
-rendered from `runDetail.approvals` (the extended `runDetail` payload, §6.2):
+`handleDashboardRpc` gains a 12th param `artifacts?` (the
+`ProjectArtifactService`, the same pattern as the 11th `approvals?`):
 
-- Each pending approval: the type label (zh/en), the summary, the requested
-  time, and **Approve / Reject** buttons (dispatch `approvalResolve` with
-  `decision` + `expectedVersion`; busy gating + the inline error banner per
-  the existing conventions).
-- Resolved approvals: the status label (approved/rejected/expired), the
-  resolved time, the `resolvedBy`.
-- The run's `approvalMode` displayed in the inspector header area (a chip:
-  审批模式: 计划 / Approval mode: plan).
-- The existing plan approve/reject buttons are **unchanged** (they resolve
-  the plan object through the hook, §4.4).
+- **`artifactList`** — `{ runId?, projectId?, kind? }` → `{ artifacts: ProjectArtifactRecord[] }` (newest first; at least one of `runId`/`projectId` required — both absent → bad-request).
+- **`artifactCreate`** — `{ projectId, runId?, taskId?, kind, title, content?, path?, url?, metadata? }` → the created record. Structured errors: `artifact.invalidCandidate` (the §5.3 reasons, `params: { reason, … }`), `artifact.contentTooLarge`, `artifact.missingUrl`, `artifact.kindReserved` (a manual `final-report`), `artifact.containsSecrets`.
+- **`artifactGet`** — `{ id }` → the record. `artifact.unknown` (no such id).
+- **`runGenerateReport`** — `{ runId }` → the (re)generated `final-report` record. `artifact.runUnknown` (no such run), `artifact.reportFailed` (the generation failed — the `run.report.failed` event was emitted).
+- **`runDetail`** (extended) — when the artifacts service is mounted, the detail
+  gains `artifacts: ProjectArtifactRecord[]` for the run (the on-demand pattern —
+  not a snapshot projection; `DashboardSnapshot.version` stays 2) + a
+  `finalReport?: ProjectArtifactRecord` (the run's `final-report`, when present).
 
-### 7.2 RunInspector — Budget panel
+Absent-service failures follow the Phase 6/7 pattern: `badRequest('<endpoint> is
+unavailable: the Artifact service is not mounted')`.
 
-A **Budget** section (below Approvals) rendering the run's `budget` +
-current usage:
+## 8. Error codes (new)
 
-- Per key (only keys present in the budget): the limit, the current usage
-  (tokens from `run.tokenUsage`; runtime from `startedAt`; agents from the
-  scheduler's effective cap; retries from the max `task.attempt`), and a
-  warning marker (⚠) when the key is in `run.budgetWarnings`.
-- `maxCost`: the limit + "no cost data" (no fabricated value, §5.5).
-- No budget → the section is absent (not an empty panel).
+`src/runtime/errors.ts` (host) + `src/client/errors.ts` (mapping, the `params`
+envelope field — not `args`):
 
-### 7.3 New Run dialog — budget + mode fields
+```
+artifact.notStarted          // the service is not started
+artifact.unknown             // no such artifact id
+artifact.runUnknown          // the runId is not a known run
+artifact.badRequest          // artifactList with neither runId nor projectId
+artifact.invalidCandidate    // the §5.3 validation failure (params: reason, …)
+artifact.contentTooLarge     // content > 64 KB (params: maxLength)
+artifact.missingUrl          // a pull-request/external-link with no url
+artifact.kindReserved        // a manual final-report create (generator-only)
+artifact.containsSecrets     // the secrets scan matched (params: reason)
+artifact.reportFailed        // runGenerateReport: the generation failed
+```
 
-The New Run dialog (the existing run-creation form) gains:
+## 9. UI (existing Dashboard, zh/en parity compile-enforced)
 
-- An optional **Approval mode** select (default = the config default; the
-  four modes, zh/en labels).
-- Optional **Budget** fields (all empty = unlimited): max runtime (min),
-  max total tokens, max input tokens, max output tokens, max agents, max
-  concurrent agents, max replans, max retries per task, max cost. The
-  dialog sends them into `runCreate` (absent fields are omitted — not sent
-  as `undefined`).
+### 9.1 RunInspector — Artifacts section
 
-### 7.4 Runs list — pending-approval indicator
+A new **Artifacts** section in the RunInspector (below the Approvals section),
+rendered from `runDetail.artifacts` (the extended `runDetail` payload, §7):
 
-The Runs list row for a run in `awaiting_approval` keeps the existing phase
-chip (待审批 / Awaiting approval). The pending *type* (e.g. "合并 / merge")
-is named in the inspector's Approvals section (§7.1), which is where the
-on-demand `runDetail.approvals` data lives — the list does not fetch
-approvals per row (no snapshot projection, §11).
+- Each artifact: the kind label (zh/en), the title, the created time.
+- The **`final-report`** rendered as a **readable document** (the master spec §64
+  layout — the `content` split into its sections; not a raw code block).
+- A **detail view** for non-final-report artifacts: the inline `content` (when
+  present, ≤ 64 KB) or a `path`/`url` link (a `path` renders as a workspace
+  reference; a `url` as a clickable link).
+- A **Regenerate** affordance on the `final-report` (dispatches
+  `runGenerateReport`; busy gating + the inline error banner per the existing
+  conventions). When the run is terminal but has **no** `final-report` (the
+  `run.report.failed` case), the section renders a "report unavailable" marker +
+  the Regenerate affordance.
 
-### 7.5 Locale keys (zh/en parity compile-enforced)
+### 9.2 Artifacts tab (项目产物 / Artifacts)
+
+A new **project-level** tab in the Dashboard (the Phase 6 Memory-tab pattern):
+
+- The project's artifacts across runs (kind chips + counts, the Memory-tab
+  pattern), filter by run/kind, newest first.
+- The detail view (the §9.1 detail view, shared).
+- The `final-report` of each run surfaced (a "Final report" chip per run).
+- An **Add artifact** dialog (kind select, title, content/path/url, metadata) —
+  dispatches `artifactCreate` (the manual attach; the `final-report` kind is
+  disabled in the dialog — generator-only, §4.4).
+
+### 9.3 Locale keys (zh/en parity compile-enforced)
 
 New keys under the `dsh-dashboard` namespace (the `t` key union — the
 `en satisfies Record<DashboardLocaleKey, string>` parity check):
-`run.approvals` (审批 / Approvals), `run.approvalMode` (审批模式 / Approval mode),
-`run.budget` (预算 / Budget), `run.budgetNoData` (无成本数据 / No cost data),
-`approval.type.plan` (计划 / Plan), `approval.type.merge` (合并 / Merge),
-`approval.type.external-write` (外部写入 / External write), `approval.type.git-push` (Git 推送 / Git push),
-`approval.type.pull-request` (拉取请求 / Pull request), `approval.type.dangerous-action` (危险操作 / Dangerous action),
-`approval.status.pending` (待处理 / Pending), `approval.status.approved` (已批准 / Approved),
-`approval.status.rejected` (已拒绝 / Rejected), `approval.status.expired` (已过期 / Expired),
-`approval.approve` (批准 / Approve), `approval.reject` (拒绝 / Reject),
-`approval.requestedAt` (请求时间 / Requested), `approval.resolvedAt` (处理时间 / Resolved),
-`approval.resolvedBy` (处理人 / Resolved by),
-`budget.maxRuntimeMinutes` (最大运行时长（分钟）/ Max runtime (min)),
-`budget.maxTotalTokens` (最大总 token / Max total tokens),
-`budget.maxInputTokens` (最大输入 token / Max input tokens),
-`budget.maxOutputTokens` (最大输出 token / Max output tokens),
-`budget.maxAgents` (最大代理数 / Max agents),
-`budget.maxConcurrentAgents` (最大并发代理数 / Max concurrent agents),
-`budget.maxReplans` (最大重规划次数 / Max replans),
-`budget.maxRetriesPerTask` (每任务最大重试 / Max retries per task),
-`budget.maxCost` (最大成本 / Max cost),
-`budget.warning` (预算警告 / Budget warning),
-`mode.manual` (手动 / Manual), `mode.plan` (计划 / Plan), `mode.guarded` (受保护 / Guarded), `mode.autonomous` (自主 / Autonomous).
+`artifacts` (产物 / Artifacts), `artifact.kind.plan` (计划 / Plan),
+`artifact.kind.research-report` (研究报告 / Research report),
+`artifact.kind.architecture-note` (架构说明 / Architecture note),
+`artifact.kind.patch` (补丁 / Patch), `artifact.kind.diff` (差异 / Diff),
+`artifact.kind.test-report` (测试报告 / Test report),
+`artifact.kind.validation-report` (验证报告 / Validation report),
+`artifact.kind.review-report` (评审报告 / Review report),
+`artifact.kind.screenshot` (截图 / Screenshot),
+`artifact.kind.log-reference` (日志引用 / Log reference),
+`artifact.kind.pull-request` (拉取请求 / Pull request),
+`artifact.kind.external-link` (外部链接 / External link),
+`artifact.kind.final-report` (最终报告 / Final report),
+`artifact.title` (标题 / Title), `artifact.createdAt` (创建时间 / Created),
+`artifact.content` (内容 / Content), `artifact.path` (路径 / Path),
+`artifact.url` (链接 / URL), `artifact.regenerate` (重新生成 / Regenerate),
+`artifact.reportUnavailable` (报告不可用 / Report unavailable),
+`artifact.add` (添加产物 / Add artifact),
+`report.goal` (目标 / Goal), `report.outcome` (结果 / Outcome),
+`report.changes` (变更 / Changes), `report.validation` (验证 / Validation),
+`report.git` (Git), `report.agents` (代理 / Agents), `report.usage` (用量 / Usage),
+`report.knowledge` (学到的项目知识 / Project knowledge learned),
+`report.risks` (剩余风险 / Remaining risks), `report.none` (无 / None).
 
-## 8. Module layout & wiring
+## 10. Module layout & wiring
 
 ```
-src/approvals/
-  types.ts            # ApprovalType, ApprovalStatus, ApprovalRequestRecord, ApprovalId, PlanApprovalEvent
-  spec.ts             # projectApprovalRecordSchema (strict zod)
-  approval-service.ts # ApprovalService (request/resolve/expire/list + hooks)
-  approval-policy.ts  # requiresApproval(mode, stage) — the pure policy table
+src/artifacts/
+  types.ts            # ArtifactKind, ArtifactId, ProjectArtifactRecord, ArtifactCreateInput
+  spec.ts             # projectArtifactRecordSchema (strict zod), MAX_ARTIFACT_CONTENT_LENGTH
+  artifact-service.ts # ProjectArtifactService (create/list/get + the run/completed listener)
+  final-report.ts     # buildFinalReport (the pure §6.2 generator) + generateFinalReport
 src/runs/
-  types.ts            # + RunBudget, + approvalMode/budget/budgetWarnings on ProjectRunRecord, + CreateRunInput.budget/approvalMode
-  spec.ts             # + the three run fields, + the four run event types, + the project_approvals table
-  run-service.ts      # createRun stamps approvalMode + budget; runSetBudget
-src/plans/
-  plan-service.ts     # + onPlanApproval hook; maxReplans check at replan
-src/tasks/
-  task-service.ts     # + the merge gate at detectAllSucceeded; the token/runtime budget checks; the scheduler cap; the retry budget check
+  spec.ts             # + the project_artifacts table, + the artifact.created + run.report.failed events
+  types.ts            # + the two run event types, + RunDetailView.artifacts/finalReport
 src/rpc/
-  handler.ts          # + the approvals param; approvalList/approvalResolve/approvalExpire/runSetBudget; runCreate budget/mode; runDetail approvals
+  handler.ts          # + the artifacts param; artifactList/artifactCreate/artifactGet/runGenerateReport; runDetail artifacts
 src/runtime/
-  errors.ts           # + the approval.* + run.budget* + task.retryBudgetExceeded + plan.replanBudgetExceeded codes
+  errors.ts           # + the artifact.* codes
 src/client/
-  controller.ts       # + the client mirror types (ClientApprovalType etc. — the client never imports src/approvals/**)
+  controller.ts       # + the client mirror types (ClientArtifactKind etc. — the client never imports src/artifacts/**)
   errors.ts           # + the client error mappings
-  Dashboard.tsx       # + the Approvals section, the Budget panel, the New Run dialog fields
-  locales.ts          # + the zh/en keys (§7.5)
-src/index.ts          # + the ApprovalService wiring (start/stop, the hooks, the RPC param)
+  Dashboard.tsx       # + the RunInspector Artifacts section, the project-level Artifacts tab, the Add artifact dialog
+  locales.ts          # + the zh/en keys (§9.3)
+src/index.ts          # + the ProjectArtifactService wiring (start/stop, the run/completed listener, the RPC param)
 tests/
-  approval-service.test.ts    # new — the policy table, request/resolve/expire, the plan hook, the merge gate
-  budget-enforcement.test.ts  # new — the 80% warning, the limit actions, unset=unlimited, the budget patch
-  task-service.test.ts        # extended — the scheduler cap, the token/runtime checks, the retry budget
-  plan-service.test.ts        # extended — the maxReplans refusal
-  rpc-handler.test.ts         # extended — the four endpoints + runCreate/runDetail extensions
-  dashboard-approvals.test.tsx# new — the Approvals section, the Budget panel, the New Run dialog (zh + en)
-  run-storage-integration.test.ts # extended — the table set + the budget/approval fields survive a reopen
-  client-approvals-isolation.test.ts # new — no src/client/** imports src/approvals/**
+  artifact-service.test.ts    # new — the store, the content policy, the append-only rule, the event projection
+  final-report.test.ts        # new — the deterministic generator, the terminal trigger, the idempotency, the failure
+  task-service.test.ts        # extended — the run/completed trigger fires the report generation
+  rpc-handler.test.ts         # extended — the four endpoints + runDetail artifacts
+  dashboard-artifacts.test.tsx# new — the RunInspector section + the project tab + the Add dialog (zh + en)
+  run-storage-integration.test.ts # extended — the table set + the artifacts survive a reopen
+  client-artifacts-isolation.test.ts # new — no src/client/** imports src/artifacts/**
 ```
 
-**Wiring in `index.ts`** (the order matters — the approval service borrows
-the shared domain, so it starts after `runService.start()` and stops before
-`runService.stop()`, like the memory service):
+**Wiring in `index.ts`** (the order matters — the artifact service borrows the
+shared domain, so it starts after `runService.start()` and stops before
+`runService.stop()`, like the memory/approval services):
 
 ```ts
-const approvalService = new ApprovalService(ctx, catalog, runService, {
-  onApprovalResolved: async record => { /* §4.6: the merge run move */ },
-})
+const artifactService = new ProjectArtifactService(ctx, catalog, runService)
 // … after runService.start():
-await approvalService.start()
-// … the planService gains the onPlanApproval hook (§4.4)
-// … handleDashboardRpc(…, memoryService, approvalService)
+await artifactService.start()   // registers the run/completed listener
+// … handleDashboardRpc(…, memoryService, approvalService, artifactService)
+// … before runService.stop():
+await artifactService.stop()
 ```
 
-## 9. Test plan
+## 11. Test plan
 
-### 9.1 `tests/approval-service.test.ts` (new)
+### 11.1 `tests/artifact-service.test.ts` (new)
 
-- **Policy table:** all 4 modes × the 2 stages (`requiresApproval` — the
-  pure function; `manual`: plan+merge; `plan`: plan+merge; `guarded`: merge
-  only; `autonomous`: merge only).
-- **Request:** a pending object persists (the table, the `run.approval.requested`
-  event, the Cordis event); the idempotent re-request returns the existing
-  pending (no duplicate); a terminal object is superseded (a new pending is
-  created; the old is retained — never deleted); the `summary` bounds
-  (1..500); the `payload` is stored as-is.
-- **Resolve:** CAS (`approval.staleVersion` on mismatch, `params:
-  { expectedVersion, actualVersion }`); `resolvedBy` default `'dashboard'`;
-  `resolvedAt` set; the `run.approval.resolved` event; resolving a terminal
-  object → `approval.invalidStatus`.
-- **Expire:** a pending → `expired` (the only path); a terminal →
-  `approval.invalidStatus`; no TTL (no timer — the test asserts the object
-  stays `pending` across a clock advance).
-- **The plan hook:** the plan service's `onPlanApproval` fires at the three
-  transition points (requested/approved/rejected); the object is created +
-  resolved; the `plan.approval.*` events are unchanged (the plan service
-  still emits them); the run phase follows through the existing coupler
-  (unchanged).
-- **The merge gate:** `detectAllSucceeded` with `requiresApproval(mode,
-  'merge')` true → the approval is requested + the run moves to
-  `awaiting_approval` (the pipeline does not run); `false` → today's
-  behavior (the run moves `integrating`, the pipeline runs); the resume
-  path (the approval `approved` → the run moves `awaiting_approval →
-  integrating` → the next tick runs the pipeline); the reject path (the run
-  moves `awaiting_approval → blocked`).
-- **The state machine:** `awaiting_approval → integrating` is allowed (the
-  one-edge addition); `resultSummary` is accepted on `paused` transitions
-  (the §5.3 extension); all existing edges and the `succeeded`
-  `resultSummary` behavior are unchanged.
+- **Store:** create persists (the table, the `artifact.created` event when
+  run-scoped, the Cordis event); the 12 kinds validate; the title bounds (1..200);
+  the `content` bound (≤ 64 KB); `path`/`url` references stored as-is;
+  `metadata` stored as-is; project-scoped (no `runId`) → no run event.
+- **Content policy:** a `content` > 64 KB → `artifact.contentTooLarge`
+  (`params: { maxLength }`); a `pull-request`/`external-link` with no `url` →
+  `artifact.missingUrl`; a `screenshot` with no `path`/`url` → rejected; secrets
+  in `content`/`metadata` → `artifact.containsSecrets` (the Phase 6 patterns).
+- **Append-only:** no `update`/`delete` method exists (the test asserts the
+  service surface); a re-create is a new row (not a mutation).
+- **One `final-report` per run:** a manual `final-report` create →
+  `artifact.kindReserved`; the generator's in-place replace (no second row).
+- **List:** newest-first (the deterministic ordering); the `kind` filter; at
+  least one of `runId`/`projectId` (both absent → `artifact.badRequest`).
+- **Get:** a known id → the record; an unknown id → `undefined`.
 
-### 9.2 `tests/budget-enforcement.test.ts` (new)
+### 11.2 `tests/final-report.test.ts` (new)
 
-- **80% warning:** a token usage crossing 80% → the `run.budget.warning`
-  event (detail `<key> at <pct>% of <limit>`) + the key added to
-  `run.budgetWarnings`; a second crossing (90%) → no second event (once per
-  key); a different key → its own warning.
-- **Limit:** a token usage ≥ 100% → the run moves `paused` (with
-  `suspendedFrom`), `resultSummary` = `Budget limit reached: <key> (…)`, the
-  `run.budget.exceeded` event; the scheduler tick skips the paused run (no
-  new task starts).
-- **Runtime:** `maxRuntimeMinutes` crossing → the same pause (the tick
-  check).
-- **Scheduler cap:** `maxAgents` / `maxConcurrentAgents` → the scheduler's
-  `limit` is capped (the ready-task pick respects the cap); no pause, no
-  event.
-- **Retry budget:** `taskRetry` with `task.attempt >= maxRetriesPerTask` →
-  `task.retryBudgetExceeded` (`params: { attempt, max }`); the task stays
-  `failed`; below the limit → the retry proceeds (today's behavior).
-- **Replan budget:** `createPlan` with `supersedesPlanId` when the plan
-  chain is ≥ `maxReplans` → `plan.replanBudgetExceeded` (`params:
-  { count, max }`); below → the replan proceeds.
-- **Unset = unlimited:** a key absent from the budget (or `budget` absent)
-  → no check, no event (the run runs past any usage).
-- **Budget patch:** `runSetBudget` on a `paused` run → the budget is
-  replaced; the raised key is cleared from `budgetWarnings`; a non-
-  `paused`/`blocked` run → `run.budgetPhaseInvalid`; an invalid budget →
-  `run.budgetInvalid` (`params: { key, reason }`).
-- **`maxCost`:** validated at creation; no check site (the test asserts the
-  key is stored but never triggers an event).
+- **The generator:** `buildFinalReport` renders all 9 sections (Goal/Outcome/
+  Changes/Validation/Git/Agents/Usage/knowledge/risks); an empty section renders
+  its header + "None."; the `resultSummary` is included verbatim (the budget-stop
+  explanation); the Git section renders branch/head (a Git project) or "No Git
+  isolation" (non-Git); the PR line renders the `pull-request` artifact's `url`
+  (when present) / omitted (when absent); the knowledge section lists the
+  run's distilled memory titles; the risks section lists the failed tasks +
+  budget warnings.
+- **Determinism:** the same persisted records → byte-identical output (two calls,
+  deep-equal); no fabricated data (a run with no tasks/integration/memory → the
+  empty sections, no invented content).
+- **The terminal trigger:** the `run/completed` event fires `generateFinalReport`
+  (succeeded/failed/canceled); a `blocked`/`paused` transition does **not** fire
+  it (resumable, not terminal); the generation is fire-and-forget (the transition
+  completes regardless).
+- **Idempotency:** a second terminal transition (or a regenerate) replaces the
+  single `final-report` row in place (no second row).
+- **The failure:** a generation failure (e.g. the run vanished mid-flight) → a
+  warn log + the `run.report.failed` event + no artifact; never thrown into the
+  pipeline; the run reaches its terminal phase regardless.
 
-### 9.3 `tests/task-service.test.ts` (extended)
+### 11.3 `tests/task-service.test.ts` (extended)
 
-- The merge gate (the `detectAllSucceeded` cases — the approval requested,
-  the run paused, the pipeline not run; the resume; the reject).
-- The token accumulation triggering the warning + the pause (the real
-  `tokenUsage` accumulation at task completion).
-- The scheduler cap (`maxAgents` / `maxConcurrentAgents` limiting the
-  ready-task pick).
-- The retry budget (the `taskRetry` refusal).
+- The `run/completed` trigger: a run reaching `succeeded`/`failed`/`canceled`
+  fires the report generation (the artifact service's listener); the report
+  references the run's tasks/integration/usage/memory.
 
-### 9.4 `tests/plan-service.test.ts` (extended)
+### 11.4 `tests/rpc-handler.test.ts` (extended)
 
-- The `maxReplans` refusal (the replan budget).
-- The `onPlanApproval` hook (the plan approval object created + resolved at
-  the three transition points).
-
-### 9.5 `tests/rpc-handler.test.ts` (extended)
-
-- `approvalList` (per run, per project, both absent → bad-request).
-- `approvalResolve` (valid, CAS mismatch → `approval.staleVersion` with
-  `params`, terminal → `approval.invalidStatus`, unknown id →
-  `approval.unknown`).
-- `approvalExpire` (valid, terminal → `approval.invalidStatus`).
-- `runSetBudget` (valid on `paused`, non-`paused` → `run.budgetPhaseInvalid`,
-  invalid → `run.budgetInvalid`, CAS → `run.versionConflict`).
-- `runCreate` (the `budget` + `approvalMode` fields validated + passed
-  through; the existing callers unchanged — the fields are optional).
-- `runDetail` (the `approvals` array when the service is mounted; absent
-  when not).
+- `artifactList` (per run, per project, the `kind` filter, both absent →
+  bad-request).
+- `artifactCreate` (valid; the §5.3 reasons → `artifact.invalidCandidate` with
+  `params`; `contentTooLarge`; `missingUrl`; `kindReserved` for a manual
+  `final-report`; `containsSecrets`).
+- `artifactGet` (valid; unknown → `artifact.unknown`).
+- `runGenerateReport` (valid → the `final-report` record; unknown run →
+  `artifact.runUnknown`; a generation failure → `artifact.reportFailed`).
+- `runDetail` (the `artifacts` array + the `finalReport` when the service is
+  mounted; absent when not).
 - Absent-service failures (the four endpoints → the structured not-mounted
   bad-requests).
 
-### 9.6 `tests/dashboard-approvals.test.tsx` (new, jsdom)
+### 11.5 `tests/dashboard-artifacts.test.tsx` (new, jsdom)
 
-- The Approvals section renders the pending objects (type label, summary,
-  requested time) + the Approve/Reject buttons; Approve dispatches
-  `approvalResolve` with `decision: 'approved'` + `expectedVersion`; Reject
-  with `decision: 'rejected'`; the busy gating + the inline error banner
-  (a structured `approval.staleVersion` error).
-- The resolved objects render the status + resolved time + `resolvedBy`.
-- The `approvalMode` chip renders (zh + en).
-- The Budget panel renders the per-key limit + usage + the warning marker;
-  `maxCost` renders "no cost data"; no budget → the section is absent.
-- The New Run dialog: the approval-mode select + the budget fields dispatch
-  into `runCreate` (absent fields omitted); zh + en.
-- The existing plan approve/reject buttons still work (the plan flow is
-  unchanged — the object is resolved behind them).
+- The RunInspector Artifacts section renders the run's artifacts (kind label,
+  title, created time); the `final-report` renders as a readable document (the
+  §64 sections); the detail view renders the inline `content` or a `path`/`url`
+  link; the Regenerate affordance dispatches `runGenerateReport` with busy
+  gating + the inline error banner (a structured `artifact.reportFailed`); a
+  terminal run with no `final-report` renders the "report unavailable" marker +
+  Regenerate; zh + en.
+- The project-level Artifacts tab renders the project's artifacts (kind chips +
+  counts, the run/kind filters, newest first); the Add artifact dialog dispatches
+  `artifactCreate` (the `final-report` kind disabled); zh + en.
 
-### 9.7 `tests/run-storage-integration.test.ts` (extended)
+### 11.6 `tests/run-storage-integration.test.ts` (extended)
 
 - The table set is exactly `['memory', 'plans', 'project_approvals',
-  'run_events', 'runs', 'tasks']` (the new table).
-- The `approvalMode` + `budget` + `budgetWarnings` run fields survive a real
-  JSON domain reopen (zod-validated).
-- The `project_approvals` records survive the reopen (the pending + the
-  resolved).
+  'project_artifacts', 'run_events', 'runs', 'tasks']` (the new table).
+- The `project_artifacts` records (a run-scoped artifact + the `final-report`)
+  survive a real JSON domain reopen (zod-validated).
+- The `artifact.created` + `run.report.failed` run events survive the reopen.
 - The domain stays v0.
 
-### 9.8 `tests/client-approvals-isolation.test.ts` (new)
+### 11.7 `tests/client-artifacts-isolation.test.ts` (new)
 
-- No file under `src/client/**` imports `src/approvals/**` (the client
-  carries its own mirror types in `controller.ts`).
+- No file under `src/client/**` imports `src/artifacts/**` (the client carries
+  its own mirror types in `controller.ts`).
 
-## 10. Acceptance criteria (maps to `intent.md` §6.7)
+## 12. Acceptance criteria (maps to `intent.md` §6.7)
 
-1. **Store** — `project_approvals` is a declared table of `dsh_projects`
-   (v0, no migration); records validate against the strict schema; `version`
-   bumps on every accepted mutation; approvals + the run's budget/approval
-   fields survive a real JSON domain reopen; the table set grows by exactly
-   one table.
-2. **Policy** — each of the four modes behaves per §4.2 (manual: plan+merge
-   gated; plan: plan+merge gated; guarded: merge gated; autonomous: merge
-   gated); the conservative default is `plan` (the config default); the mode
-   is stored per run and visible in the UI; the coordinator's `settle`
-   consults the policy (the plan gate lifted for guarded/autonomous).
-3. **Objects** — request/resolve/expire persist + project onto the run event
-   stream (`run.approval.*`); the existing `plan.approval.*` events are
-   unchanged; one pending per (run, type) (idempotent re-request); the
-   terminal objects are retained (never deleted); resolution resumes/blocks
-   the run through the existing state machine (the merge gate); browser
-   refresh and process restart do not lose a pending approval (the storage
-   integration).
-4. **Budgets** — every declared budget key (except `maxCost`, which has no
-   site) is enforced in code at the named site (§5.1): the 80% warning once
-   per key, the limit → the per-key policy action (§5.3), the
-   `resultSummary` explains why; unset keys are unlimited; budgets are set
-   at creation and raised explicitly (`runSetBudget`); no key is enforced by
-   prompt text alone.
-5. **UI** — the Approvals section + Approve/Reject dispatch real RPCs with
-   surfaced errors; the Budget panel renders usage + warning markers; the
-   New Run dialog carries the budget + mode fields; the existing plan
-   approve/reject buttons are unchanged; zh/en parity compile-enforced.
+1. **Store** — `project_artifacts` is a declared table of `dsh_projects` (v0, no
+   migration); records validate against the strict schema (12 kinds, bounded
+   `content`, `path`/`url` references); artifacts are append-only (no
+   update/delete service methods); the table set grows by exactly one table.
+2. **Content policy** — inline `content` is bounded (64 KB); large/binary outputs
+   are `path`/`url` references (never bytes); `pull-request`/`external-link`
+   carry a `url`; secrets are scrubbed (rejected) from `content`/`metadata` at
+   creation.
+3. **Final report** — the completion pipeline generates a `final-report`
+   artifact at the run's terminal transition (succeeded/failed/canceled), in code
+   from the persisted records (deterministic, no model call); it explains
+   goal/outcome/changes/validation/git/agents/usage/knowledge/risks (master spec
+   §64); one per run (idempotent regeneration); a generation failure is a warn +
+   the `run.report.failed` event + no artifact, never a run failure.
+4. **UI** — the RunInspector Artifacts section + the project-level Artifacts tab
+   render artifacts (kind chips, detail view, the readable `final-report`); the
+   regenerate affordance dispatches the real RPC; the Add artifact dialog
+   dispatches `artifactCreate`; zh/en parity compile-enforced.
+5. **RPC** — `artifactList`/`artifactCreate`/`artifactGet`/`runGenerateReport`
+   dispatch with validation (content bound, kind, secret scrub); absent-service
+   structured failures; the new `artifact.*` error codes (with `params`).
 6. **Repo green** — `pnpm run typecheck`, `pnpm run build`, full
-   `pnpm vitest run` (modulo the documented pre-existing environment
-   failures).
+   `pnpm vitest run` (modulo the documented pre-existing environment failures).
 
-## 11. Explicit non-goals (Phase 8+)
+## 13. Explicit non-goals (Phase 9+)
 
-- No new run phases (the existing `awaiting_approval` + `suspendedFrom`
-  machinery is reused; the one-edge addition `awaiting_approval →
-  integrating` is a state-machine edge, not a phase).
-- No TTL/background expiry timers — `expired` only via explicit
-  `approvalExpire` (§4.3).
-- No cost metering/price feeds (`maxCost` declared, unenforceable until a
-  source exists — §5.5).
-- No approval objects for memory writes (Phase 6 non-goal, carried).
-- No protected-branch policy engine — the merge gate (approval required in
-  every mode) is the protection; no branch-name parsing.
-- No trigger sites for `git-push` / `pull-request` / `external-write` /
-  `dangerous-action` (those stages do not exist in the product yet — the
-  schema + RPC + UI support them generically; no fake trigger sites,
-  invariant 2).
-- No per-run override that lifts the merge gate (the merge always requires
-  approval in Phase 7; a future phase may add the override).
-- No triggers/automations (Phase 9), no artifact system (Phase 8), no
-  recovery of interrupted distillation (Phase 10).
-- No `DashboardSnapshot` version change; approvals/budgets are on-demand RPC
-  data (the `runDetail` pattern), not snapshot projections.
+- No artifact **versioning/supersession** beyond the one `final-report`-per-run
+  in-place regeneration (other artifacts are append-only; no edit/delete).
+- No **file upload/download** endpoints (a `path` is a reference into the project
+  workspace; the Dashboard links to it, it does not stream bytes).
+- No **binary/blob storage** (master spec §26 — references only).
+- No **artifact search** beyond kind/run filters (a full-text search over
+  artifact content is a Phase 11 UI-polish concern).
+- No **approval objects for artifact writes** (artifacts are append-only records;
+  no gate).
+- No **triggers/automations** (Phase 9), no **recovery of interrupted report
+  generation** (Phase 10 — a failed generation is a warn + the
+  `run.report.failed` event + no artifact, retried by the regenerate affordance).
+- No `DashboardSnapshot` version change; artifacts are on-demand RPC data (the
+  `runDetail` pattern), not snapshot projections.
+- No report at a **resumable** phase (`blocked`/`paused`) — the report is
+  generated once, at the terminal transition (§6.1).
 
-## 12. Sequencing (build order)
+## 14. Sequencing (build order)
 
-1. **Storage:** the `project_approvals` table + schema (`src/approvals/spec.ts`,
-   `types.ts`); the run record fields (`RunBudget`, `approvalMode`,
-   `budget`, `budgetWarnings`) + the four run event types (`src/runs/spec.ts`,
-   `types.ts`).
-2. **Policy + service:** `approval-policy.ts` (the pure table);
-   `approval-service.ts` (request/resolve/expire/list + the
-   `onApprovalResolved` hook).
-3. **The plan trigger site:** the `onPlanApproval` hook on `RunPlanService`
-   + the wiring in `index.ts`; the coordinator's `settle` consults the
-   policy.
-4. **The merge trigger site:** the gate in `ProjectTaskService.detectAllSucceeded`
-   + the `awaiting_approval → integrating` state-machine edge + the
-   `resultSummary`-on-`paused` state-machine extension (§5.3) + the
-   `onApprovalResolved` run move.
-5. **Budgets:** `budgetCheck.ts` (the pure helper); the token/runtime checks
-   in `ProjectTaskService`; the scheduler cap; the retry budget in
-   `taskRetry`; the replan budget in `RunPlanService`; `runSetBudget` in
-   `ProjectRunService` + the `CreateRunInput` extension.
-6. **RPC:** the `approvals` param on `handleDashboardRpc`;
-   `approvalList` / `approvalResolve` / `approvalExpire` / `runSetBudget`;
-   the `runCreate` + `runDetail` extensions; the error codes (host + client).
-7. **UI:** the Approvals section + the Budget panel in the RunInspector; the
-   New Run dialog fields; the locale keys (zh/en); the client mirror types
+1. **Storage:** the `project_artifacts` table + schema (`src/artifacts/spec.ts`,
+   `types.ts`); the two run event types (`artifact.created`, `run.report.failed`)
+   in `src/runs/spec.ts` + `types.ts`; the `RunDetailView.artifacts/finalReport`
+   extension.
+2. **Content policy + validation:** `MAX_ARTIFACT_CONTENT_LENGTH` + the pure
+   `validateArtifact` (§5.3) + the secrets scan (reused from the Phase 6 memory
+   patterns).
+3. **Service:** `artifact-service.ts` (create/list/get + the `run/completed`
+   listener + the `artifact.created` event projection).
+4. **Final report:** `final-report.ts` (the pure `buildFinalReport` §6.2 + the
+   `generateFinalReport` fire-and-forget handler §6.3 + the idempotent in-place
+   replace).
+5. **RPC:** the `artifacts` param on `handleDashboardRpc`;
+   `artifactList` / `artifactCreate` / `artifactGet` / `runGenerateReport`; the
+   `runDetail` extension; the error codes (host + client).
+6. **UI:** the RunInspector Artifacts section + the project-level Artifacts tab +
+   the Add artifact dialog; the locale keys (zh/en); the client mirror types
    (`controller.ts`).
-8. **Wiring:** `index.ts` (the `ApprovalService` start/stop, the hooks, the
-   RPC param).
-9. **Tests:** every suite in §9 (the new + the extended); the storage
+7. **Wiring:** `index.ts` (the `ProjectArtifactService` start/stop, the
+   `run/completed` listener, the RPC param).
+8. **Tests:** every suite in §11 (the new + the extended); the storage
    integration (the table set + the reopen); the client isolation scan.
