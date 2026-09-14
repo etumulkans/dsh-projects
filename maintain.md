@@ -1,5 +1,99 @@
 # Maintenance Log — DSH Projects
 
+## Cycle 8 (post v0.15.0 deploy) — 2026-09-14
+
+**Status: no incidents.** Phase 9 (Trigger generalization) released as
+v0.15.0 (release commit `9f81336`, build `9d95463`, test report `f4a649c`,
+spec `f9a1ee1`, intent `0a0b648`). Shipped on local `main` and **pushed to
+`origin/main`** this cycle (`1da2ac0..9f81336` — the four Phase 9 commits:
+intent → spec → Build → test, now all on origin; `main` is in sync with
+`origin/main`, 0/0). A release marker branch `dsh-projects-phase-9` (at
+`9f81336`) was created and pushed for consistency with the Phase 3/4/5/6/7/8
+markers.
+
+### Post-deploy verification
+
+- `pnpm run typecheck` — clean (exit 0)
+- `pnpm run build` — clean (dual tsdown: client 491.86 kB / host 455.99 kB)
+- `pnpm exec vitest run` — 611 passed / 5 failed (616 total); the 5 are the
+  pre-existing, documented environment/load failures — 3 macOS tmpdir cases in
+  `tests/project-catalog.test.ts` (`/var/folders` vs `/private/var/folders`
+  realpath mismatch, present since Phase 3) + up to 2 `integration-strategy`
+  git-worktree flakes under full-suite load (they pass 7/7 in isolation;
+  `project-catalog` is exactly 3/6 in isolation). All 57 new Phase 9 tests are
+  green (see `test-report.md`): trigger-service (15), trigger-fire (9),
+  trigger-adapters (14), client-triggers-isolation (1), dashboard-automations
+  (12, +2), rpc-handler (72, +5), run-storage-integration (8, +1).
+- Working tree clean; `dsh_projects` storage domain remains at format version
+  0 (Phase 9 is additive — two tables `project_triggers` + `trigger_fires`, one
+  run event type `trigger.fired`, plus the `dsh-projects/trigger/fired` domain
+  event; no migration needed for installed instances).
+- Invariant checks: the new client-isolation scan
+  (`tests/client-triggers-isolation.test.ts`) proves `src/client/**` never
+  imports the node-side trigger modules — the client carries its own mirror
+  types in `controller.ts` (the `approvalMode` mirror is now the
+  `ClientApprovalMode` union, wire-validated against `CLIENT_APPROVAL_MODES`)
+  and talks to the services only through the typed `DashboardDataPort`;
+  `DashboardSnapshot.version` stays 2 (triggers are on-demand `triggerList`
+  RPC data, not snapshot projections).
+
+### Test-stage findings (fixed during verification, recorded in test-report §3)
+
+1. **`rpc-handler` §10.4 gap** — the Phase 9 build covered the happy-path
+   dispatch + shape validation but not the structured failure surface. Added 5
+   cases: `triggerCreate` `invalidCandidate` + `containsSecrets`;
+   `triggerUpdate` `unknown` + `invalidCandidate`; `triggerSetEnabled`
+   `unknown`; `triggerDelete` `unknown`; `triggerFire` `unknown`/`disabled`/
+   `goalEmpty` — each round-tripping its `dashboardCode` + `params` through
+   `decodeDashboardError` (67 → 72 cases).
+2. **Approval-policy UI gap (spec §8.1/§10.5/§11.5)** — the Phase 9 build
+   shipped the Automations tab without the spec-required **approval policy**:
+   the `approvalMode` data existed in the record but the UI never rendered or
+   set it. Added the **approval-mode select** to the Add trigger dialog
+   (dispatched in `triggerCreate`) + the **Approval policy** label to each
+   trigger row (the mode label, or the "use default" marker); tightened the
+   client `approvalMode` mirror to `ClientApprovalMode` so the dynamic
+   `t(`mode.${…}`)` label typechecks. **Deferred to Phase 11** (spec §12 "no
+   full Automations page polish"): the `next-run` (`nextRunAt`) column and the
+   trigger **detail view** — the working tab ships without them.
+3. **`dashboard-automations` §10.5 gap** — added 2 cases for the new
+   approval-policy surface: the row renders the approval policy (mode label vs
+   the "use default" marker) and the Add dialog dispatches `triggerCreate` with
+   a chosen approval mode (10 → 12 cases).
+4. **`exactOptionalPropertyTypes` + `noUncheckedIndexedAccess`** — Phase 9 code
+   needed tightening for the §11.7 typecheck gate: the dialog `approvalMode`
+   state is `ClientApprovalMode | ''` (matching the Phase 7 run pattern) with
+   the submit value cast to `ClientApprovalMode`; the wire validator casts the
+   `unknown` to `string` before `includes`; the test `trigger()` helper spreads
+   a conditional `approvalMode` (no `undefined` under
+   `exactOptionalPropertyTypes`).
+
+### Known issues (tracked, non-blocking)
+
+1. **`project-catalog.test.ts` × 3** — macOS sandbox realpath mismatch
+   (`/var/folders` vs `/private/var/folders`). Fails identically before and
+   after every Phase 9 commit; not a regression.
+2. **`integration-strategy.test.ts` flaky under full-suite load** — the
+   git-worktree cases intermittently fail when the whole suite runs
+   concurrently (temp-dir / worktree contention); they pass 7/7 in isolation
+   and in the clean full-suite run that produced the §1 numbers. Not
+   introduced by Phase 9 (the Phase 9 diff does not touch the merge strategy).
+3. **Running GUI lags the repo** — the dashboard at http://127.0.0.1:3080
+   still serves a pre-Phase-9 build; the Phase 9 UI (the Automations tab with
+   the trigger list + approval policy, enable/disable + Run now, the Add trigger
+   dialog with the approval-mode select) is only visible after the plugin is
+   reinstalled/restarted against this checkout's v0.15.0 build output.
+
+### Follow-ups (next intent cycle)
+
+- Reinstall/restart the GUI plugin against the v0.15.0 build so the running
+  dashboard serves the Phase 9 UI (the Automations tab, the approval-policy
+  surface, the Add trigger dialog).
+- Decide whether to fix the `project-catalog.test.ts` tmpdir expectations
+  (normalize `realpath` in the assertions) or keep them documented.
+- Phase 10 scope (Recovery + Hardening, per the master spec Phases 0–12): to be
+  drafted as the next `intent.md` when this maintain stage closes.
+
 ## Cycle 7 (post v0.14.0 deploy) — 2026-09-14
 
 **Status: no incidents.** Phase 8 (Artifacts + final report) released as
