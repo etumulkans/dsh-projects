@@ -176,7 +176,7 @@ export interface TriggerView {
   /** The credential-free config projection (a secret is a ref, never a value). */
   readonly config: Record<string, unknown>
   readonly goalTemplate: string
-  readonly approvalMode?: string
+  readonly approvalMode?: ClientApprovalMode
   readonly lastFiredAt?: string
   readonly lastRunId?: string
   readonly createdAt: string
@@ -189,14 +189,14 @@ export interface TriggerCreateInput {
   readonly type: string
   readonly config: Record<string, unknown>
   readonly goalTemplate: string
-  readonly approvalMode?: string
+  readonly approvalMode?: ClientApprovalMode
 }
 
 /** Phase 9: client-side `triggerUpdate` patch (a partial). */
 export interface TriggerUpdateInput {
   readonly goalTemplate?: string
   readonly config?: Record<string, unknown>
-  readonly approvalMode?: string
+  readonly approvalMode?: ClientApprovalMode
 }
 
 export interface ArtifactListPayload {
@@ -962,7 +962,7 @@ function isTriggerView(value: unknown): boolean {
     && typeof trigger.enabled === 'boolean'
     && (trigger.config === undefined || (typeof trigger.config === 'object' && trigger.config !== null && !Array.isArray(trigger.config)))
     && typeof trigger.goalTemplate === 'string'
-    && (trigger.approvalMode === undefined || typeof trigger.approvalMode === 'string')
+    && (trigger.approvalMode === undefined || (CLIENT_APPROVAL_MODES as readonly string[]).includes(trigger.approvalMode as string))
     && (trigger.lastFiredAt === undefined || typeof trigger.lastFiredAt === 'string')
     && (trigger.lastRunId === undefined || typeof trigger.lastRunId === 'string')
     && typeof trigger.createdAt === 'string'

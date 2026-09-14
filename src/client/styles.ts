@@ -807,6 +807,7 @@ export const DASHBOARD_STYLES = String.raw`
 .dshd-trigger-status.enabled { background: #e6f4ea; color: #1d7a3d; }
 .dshd-trigger-status.paused { background: #fbf0e0; color: #875b00; }
 .dshd-trigger-goal { color: #33415a; font-size: 12px; line-height: 1.55; }
+.dshd-trigger-approval { color: #6b7a90; font-size: 11px; margin-left: 10px; }
 .dshd-memory-actions .dshd-danger { color: #c52b3a; border-color: #e5b6bc; }
 .dshd-memory-actions .dshd-danger:hover:not(:disabled) { background: #fff2f4; border-color: #d68f99; }
 `

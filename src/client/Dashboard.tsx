@@ -4694,6 +4694,9 @@ function AutomationsView({ projects, busy, onLoadTriggers, onCreateTrigger, onSe
                   </div>
                   <div className="dshd-memory-meta">
                     <span className="dshd-trigger-goal">{trigger.goalTemplate}</span>
+                    <span className="dshd-trigger-approval" title={t('trigger.approvalPolicy')}>
+                      {t('trigger.approvalPolicy')}: {trigger.approvalMode !== undefined ? t(`mode.${trigger.approvalMode}`) : t('run.approvalModeDefault')}
+                    </span>
                   </div>
                   <div className="dshd-memory-meta">
                     <span>{t('trigger.lastRun')}: {trigger.lastFiredAt !== undefined ? relativeTime(trigger.lastFiredAt, t) : t('trigger.never')}</span>
@@ -4803,6 +4806,7 @@ function AddTriggerDialog({ projectId, onClose, onSubmit }: {
   const [everyMs, setEveryMs] = useState('3600000')
   const [cron, setCron] = useState('')
   const [systemEvent, setSystemEvent] = useState('')
+  const [approvalMode, setApprovalMode] = useState<ClientApprovalMode | ''>('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<unknown>()
 
@@ -4834,6 +4838,7 @@ function AddTriggerDialog({ projectId, onClose, onSubmit }: {
         type,
         config: buildConfig(),
         goalTemplate: goalTemplate.trim(),
+        ...(approvalMode !== '' ? { approvalMode: approvalMode as ClientApprovalMode } : {}),
       })
     } catch (submitError) {
       setError(submitError)
@@ -4906,6 +4911,15 @@ function AddTriggerDialog({ projectId, onClose, onSubmit }: {
         <label>
           {t('trigger.addGoal')}
           <textarea value={goalTemplate} onChange={event => setGoalTemplate(event.currentTarget.value)} rows={3} />
+        </label>
+        <label>
+          {t('run.approvalMode')}
+          <select value={approvalMode} onChange={event => setApprovalMode(event.currentTarget.value as ClientApprovalMode | '')}>
+            <option value="">{t('run.approvalModeDefault')}</option>
+            {(['manual', 'plan', 'guarded', 'autonomous'] as const).map(mode => (
+              <option key={mode} value={mode}>{t(`mode.${mode}`)}</option>
+            ))}
+          </select>
         </label>
         <footer>
           <button type="button" onClick={onClose}>{t('trigger.addCancel')}</button>

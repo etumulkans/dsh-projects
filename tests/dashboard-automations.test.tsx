@@ -185,6 +185,49 @@ describe('Dashboard Automations tab (Phase 9, spec §10.5)', () => {
     })
   })
 
+  it('renders the approval policy on a trigger row (mode label, or the default)', async () => {
+    // A trigger with an explicit approvalMode shows the mode label; one without
+    // shows the "use default" marker.
+    renderAutomationsDashboard({
+      onLoadTriggers: async () => [
+        trigger({ id: 'trigger-guarded', approvalMode: 'guarded' }),
+        trigger({ id: 'trigger-default' }),
+      ],
+    })
+    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    await waitFor(() => expect(screen.getByText('审批策略: 受保护')).toBeTruthy())
+    expect(screen.getByText('审批策略: 使用默认')).toBeTruthy()
+  })
+
+  it('submits a trigger with a chosen approval mode from the Add dialog', async () => {
+    const onCreateTrigger = vi.fn(async (input: TriggerCreateInput) => trigger({ id: 'trigger-new', type: input.type as TriggerView['type'], goalTemplate: input.goalTemplate, ...(input.approvalMode !== undefined ? { approvalMode: input.approvalMode } : {}) }))
+    renderAutomationsDashboard({ onCreateTrigger, onLoadTriggers: async () => [] })
+    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    await waitFor(() => expect(screen.getByText('暂无触发器')).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: '添加触发器' }))
+    await waitFor(() => expect(screen.getByRole('dialog', { name: '添加触发器' })).toBeTruthy())
+    const dialog = screen.getByRole('dialog', { name: '添加触发器' })
+
+    // Fill the goal template (enables submit) + choose the "guarded" approval mode.
+    const textarea = within(dialog).getByRole('textbox', { name: /目标模板/ })
+    fireEvent.change(textarea, { target: { value: 'Fix {{issue.key}}' } })
+    const approvalSelect = within(dialog).getByRole('combobox', { name: /审批模式/ })
+    fireEvent.change(approvalSelect, { target: { value: 'guarded' } })
+
+    const submit = within(dialog).getByRole('button', { name: '添加' })
+    expect((submit as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(submit)
+    await waitFor(() => expect(onCreateTrigger).toHaveBeenCalledTimes(1))
+    expect(onCreateTrigger).toHaveBeenCalledWith({
+      projectId: FIRST_PROJECT,
+      type: 'tracker',
+      config: { sourceKind: '', readyStates: ['ready'] },
+      goalTemplate: 'Fix {{issue.key}}',
+      approvalMode: 'guarded',
+    })
+  })
+
   it('deletes a trigger through the confirm modal', async () => {
     const onDeleteTrigger = vi.fn(async () => undefined)
     renderAutomationsDashboard({ onDeleteTrigger, onLoadTriggers: async () => [trigger()] })

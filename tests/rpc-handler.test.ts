@@ -1467,6 +1467,96 @@ describe('trigger endpoints (Phase 9, spec §10.4)', () => {
     expect(lastCall.data).toEqual({})
   })
 
+  it('triggerCreate surfaces the §5.4 invalidCandidate + containsSecrets service rejections', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const invalid = fakeTriggerService({ create: vi.fn(async () => { throw new DashboardDomainError('trigger.invalidCandidate', 'bad config', { reason: 'invalid-config', field: 'sourceKind' }) }) })
+    const rejected = await handleDashboardRpc(
+      runtime, 'triggerCreate', { projectId: 'p1', type: 'tracker', goalTemplate: 'g', config: {} },
+      signal(), Promise.resolve(), undefined, ...NO_SERVICES, invalid,
+    )
+    expect(rejected).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (rejected.ok === false) {
+      expect(decodeDashboardError(rejected.error.message)).toMatchObject({ dashboardCode: 'trigger.invalidCandidate', params: { reason: 'invalid-config', field: 'sourceKind' } })
+    }
+
+    const secret = fakeTriggerService({ create: vi.fn(async () => { throw new DashboardDomainError('trigger.containsSecrets', 'looks like a secret', { reason: 'contains-secrets' }) }) })
+    const leaked = await handleDashboardRpc(
+      runtime, 'triggerCreate', { projectId: 'p1', type: 'webhook', goalTemplate: 'g', config: { url: 'https://x', secret: 'sk-abc123' } },
+      signal(), Promise.resolve(), undefined, ...NO_SERVICES, secret,
+    )
+    expect(leaked).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (leaked.ok === false) {
+      expect(decodeDashboardError(leaked.error.message)).toMatchObject({ dashboardCode: 'trigger.containsSecrets', params: { reason: 'contains-secrets' } })
+    }
+  })
+
+  it('triggerUpdate surfaces trigger.unknown + trigger.invalidCandidate', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const unknown = fakeTriggerService({ update: vi.fn(async () => { throw new DashboardDomainError('trigger.unknown', 'unknown trigger', { id: TRIGGER_ID }) }) })
+    const missing = await handleDashboardRpc(runtime, 'triggerUpdate', { id: TRIGGER_ID, goalTemplate: 'g' }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, unknown)
+    expect(missing).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (missing.ok === false) {
+      expect(decodeDashboardError(missing.error.message)).toMatchObject({ dashboardCode: 'trigger.unknown', params: { id: TRIGGER_ID } })
+    }
+
+    // A `config` patch passes the handler read (it does not deep-validate the
+    // shape) but is rejected by the service re-validation.
+    const invalid = fakeTriggerService({ update: vi.fn(async () => { throw new DashboardDomainError('trigger.invalidCandidate', 'bad patch', { reason: 'invalid-config', field: 'sourceKind' }) }) })
+    const rejected = await handleDashboardRpc(runtime, 'triggerUpdate', { id: TRIGGER_ID, config: { sourceKind: 'bogus' } }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, invalid)
+    expect(rejected).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (rejected.ok === false) {
+      expect(decodeDashboardError(rejected.error.message)).toMatchObject({ dashboardCode: 'trigger.invalidCandidate', params: { reason: 'invalid-config', field: 'sourceKind' } })
+    }
+  })
+
+  it('triggerSetEnabled surfaces trigger.unknown for a missing record', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const unknown = fakeTriggerService({ setEnabled: vi.fn(async () => { throw new DashboardDomainError('trigger.unknown', 'unknown trigger', { id: TRIGGER_ID }) }) })
+    const missing = await handleDashboardRpc(runtime, 'triggerSetEnabled', { id: TRIGGER_ID, enabled: true }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, unknown)
+    expect(missing).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (missing.ok === false) {
+      expect(decodeDashboardError(missing.error.message)).toMatchObject({ dashboardCode: 'trigger.unknown', params: { id: TRIGGER_ID } })
+    }
+  })
+
+  it('triggerDelete surfaces trigger.unknown for a missing record', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const unknown = fakeTriggerService({ delete: vi.fn(async () => { throw new DashboardDomainError('trigger.unknown', 'unknown trigger', { id: TRIGGER_ID }) }) })
+    const missing = await handleDashboardRpc(runtime, 'triggerDelete', { id: TRIGGER_ID }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, unknown)
+    expect(missing).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (missing.ok === false) {
+      expect(decodeDashboardError(missing.error.message)).toMatchObject({ dashboardCode: 'trigger.unknown', params: { id: TRIGGER_ID } })
+    }
+  })
+
+  it('triggerFire surfaces trigger.unknown / trigger.disabled / trigger.goalEmpty', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const payload = { id: TRIGGER_ID, event: { sourceEventKey: 'k', data: {} } }
+
+    const unknown = fakeTriggerService({ fire: vi.fn(async () => { throw new DashboardDomainError('trigger.unknown', 'unknown trigger', { id: TRIGGER_ID }) }) })
+    const missing = await handleDashboardRpc(runtime, 'triggerFire', payload, signal(), Promise.resolve(), undefined, ...NO_SERVICES, unknown)
+    expect(missing).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (missing.ok === false) {
+      expect(decodeDashboardError(missing.error.message)).toMatchObject({ dashboardCode: 'trigger.unknown', params: { id: TRIGGER_ID } })
+    }
+
+    const disabled = fakeTriggerService({ fire: vi.fn(async () => { throw new DashboardDomainError('trigger.disabled', 'trigger is disabled', { id: TRIGGER_ID }) }) })
+    const off = await handleDashboardRpc(runtime, 'triggerFire', payload, signal(), Promise.resolve(), undefined, ...NO_SERVICES, disabled)
+    expect(off).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (off.ok === false) {
+      expect(decodeDashboardError(off.error.message)).toMatchObject({ dashboardCode: 'trigger.disabled', params: { id: TRIGGER_ID } })
+    }
+
+    const empty = fakeTriggerService({ fire: vi.fn(async () => { throw new DashboardDomainError('trigger.goalEmpty', 'rendered goal is empty', { id: TRIGGER_ID }) }) })
+    const blank = await handleDashboardRpc(runtime, 'triggerFire', payload, signal(), Promise.resolve(), undefined, ...NO_SERVICES, empty)
+    expect(blank).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (blank.ok === false) {
+      expect(decodeDashboardError(blank.error.message)).toMatchObject({ dashboardCode: 'trigger.goalEmpty', params: { id: TRIGGER_ID } })
+    }
+  })
+
   it('the trigger endpoints are unavailable without a Trigger service', async () => {
     const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
     for (const [endpoint, payload] of [
