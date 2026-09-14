@@ -1,6 +1,6 @@
 # Intent — DSH Projects
 
-**Gate:** Intent · **Status:** Phases 0–6 delivered (v0.12.0 released; Phase 6 shipped on `main` @ `ef5ed66`, no fork PR this cycle) · **Spec:** `DSH_PROJECTS_SPEC.md` · **Architecture:** `docs/dsh-projects-architecture.md`
+**Gate:** Intent · **Status:** Phases 0–7 delivered (v0.13.0 released; Phase 7 shipped on `main` @ `7c6db58`, no fork PR this cycle) · **Spec:** `DSH_PROJECTS_SPEC.md` · **Architecture:** `docs/dsh-projects-architecture.md`
 
 ## 1. What we are doing
 
@@ -33,136 +33,115 @@ The dashboard today observes and schedules *tasks* (task sources, local store, G
 | 4 | Task DAG + team execution — `ProjectTaskService`, adapters over `ctx.agentTeams`/`ctx.subagents` | **done (v0.10.0)** |
 | 5 | Git isolation + integration — per-task worktrees, `dsh/run-<id>/<task>` branches, run completion pipeline | **done (v0.11.0)** |
 | 6 | Project Memory — `memory` store, retrieval, distillation, context budget, Memory UI | **done (v0.12.0)** |
-| 7 | Approvals + budgets — approval modes, `project_approvals` table, code-enforced run budgets | **next** |
-| 8 | Artifacts + final report — `project_artifacts`, report generation | planned |
+| 7 | Approvals + budgets — approval modes, `project_approvals` table, code-enforced run budgets | **done (v0.13.0)** |
+| 8 | Artifacts + final report — `project_artifacts`, run report generation, Artifacts UI | **next** |
 | 9 | Triggers — TaskSource events → `ProjectTrigger` adapters | planned |
 | 10 | Recovery + hardening — startup reconciliation | planned |
 | 11 | UI polish — overview/agent/plan/memory/artifacts/automations pages | planned |
 
-## 5. Phase 6 acceptance (delivered, verified in `c95774f`)
+## 5. Phase 7 acceptance (delivered, verified in `73dc5c7`)
 
-- **Domain:** additive `memory` table in `dsh_projects` (format version stays 0) + two run event types (`run.memory.distilled` / `run.memory.distillation.failed`); strict zod schema (15 kinds, 3 statuses, bounds, `supersedes`, provenance fields, CAS `version`).
-- **Service:** `ProjectMemoryService` — list (active pool; archived opt-in; superseded never listed; kind counts over all active), create (bounds + secret scrubbing + dedup containment ≥ 0.6 → supersession, never delete), update (≥1 patch, CAS), setStatus (legal moves only; superseded immutable); fire-and-forget `distillRun` (driver seam + Harness `dsh-memory-<uuid>` sessions; zero candidates → zero entries and no event; failure → warn + failed event, never into the pipeline).
-- **Retrieval:** pure lexical strategy behind a seam — `score = (3·|Q∩title| + 2·|Q∩tags| + 1·|Q∩body|) / (3·|Q|)`, pinned first, zero-score filter, deterministic ordering, `limit`; budgeted packet builder (coordinator/task budgets, header + pinned/kind sections, 300-char truncation, `undefined` when empty).
-- **Injection:** coordinator first-turn prompt appends the packet (query = run.goal); local/team task adapters insert the memory section (query = title + description); byte-identical prompts when there is no active memory.
-- **RPC/UI:** additive `memoryList`/`memoryCreate`/`memoryUpdate`/`memorySetStatus` (10th handler param, structured not-mounted failure); the Memory tab (项目记忆 / Project Memory) with search, kind chips + counts, show-archived, pin/edit/archive/restore/mark-obsolete, source-run link, add/edit dialogs, supersession notices; zh/en parity compile-enforced; client isolation scan proves `src/client/**` never imports `src/memory/**`.
-- **Verification:** all 8 spec §13 acceptance criteria pass; `test-report.md` committed in the test stage (425/3 of 428 — the 3 pre-existing macOS catalog failures); storage integration proves the table set is exactly `['memory','plans','run_events','runs','tasks']` at domain v0.
+- **Domain:** additive `project_approvals` table in `dsh_projects` (format version stays 0) + four run fields (`approvalMode`, `budget`, `budgetWarnings`) + four run event types (`run.approval.requested` / `.resolved`, `run.budget.warning` / `.exceeded`); strict zod schema (4 approval types, 3 statuses, CAS `version`, `resolvedBy`/`resolvedAt`).
+- **Approval service:** `ApprovalService` — the pure four-mode policy table (`manual`/`plan`: plan + merge gated; `guarded`/`autonomous`: merge gated), request (one pending per `(run, type)`, idempotent re-request, terminal objects superseded never deleted), resolve (CAS `approval.staleVersion`, `resolvedBy` default `'dashboard'`), expire (the only path to `expired`; no TTL), the `onApprovalResolved` hook (the plan service's own `plan.approval.*` events unchanged); the merge gate in `ProjectTaskService.detectAllSucceeded` + the two additive state-machine edges (`awaiting_approval → integrating`, `executing → awaiting_approval`).
+- **Budgets:** `RunBudget` (9 keys, all optional — unset = unlimited) enforced in code at the named sites: the 80% warning once per key (`run.budget.warning`), the limit → the per-key policy action (token/runtime → run `paused` + `resultSummary`; retry/replan → structured refusal + `blocked`), the scheduler cap (`maxAgents`/`maxConcurrentAgents`), `runSetBudget` (raise while paused, clears the raised key from `budgetWarnings`); `maxCost` declared but unenforceable (no cost metering).
+- **RPC/UI:** additive `approvalList`/`approvalResolve`/`approvalExpire`/`runSetBudget` (11th handler param, structured not-mounted failure) + `runCreate` budget field; the Approvals section (Approve/Reject dispatch real RPCs, busy gating + structured error banner), the Budget panel (usage + 80% warning markers), the New Run dialog's approval-mode select + nine budget fields; zh/en parity compile-enforced; client isolation scan proves `src/client/**` never imports the node-side approval/budget modules.
+- **Verification:** all 6 spec §10 acceptance criteria pass; `test-report.md` committed in the test stage (489/3 of 492 — the 3 pre-existing macOS catalog failures); storage integration proves the table set is exactly `['memory','plans','project_approvals','run_events','runs','tasks']` at domain v0.
 
-## 6. Phase 7 intent — Approvals + budgets
+## 6. Phase 8 intent — Artifacts + final report
 
-**End state (master spec §18–19, §30):** *a run only does what its approval mode allows, and it stops when it runs out of budget — both enforced in code, both visible and inspectable in the Dashboard, both surviving a restart.*
+**End state (master spec §26, §64):** *a run produces durable artifacts (test reports, research outputs, patches/diffs, PR references, …) and ends with a human-readable final report — the user should not have to inspect five Agent sessions to understand what happened. Every artifact persists, survives a restart, and is inspectable in the Dashboard.*
 
-Today the run state machine already has an `awaiting_approval` phase and the plan flow already emits `plan.approval.requested` / `plan.approved` / `plan.rejected` events (Phases 2–3) — but the approval itself is **ephemeral UI state**: there is no persisted approval object, no mode policy, and no budgets at all (a run can burn tokens/agents/time without limit). Phase 7 makes governance durable and code-enforced.
+Today a finished run ends with a single `resultSummary` string (the Phase 5 completion pipeline) plus Phase 6's fire-and-forget memory distillation — but there is **no durable artifact store**, no structured final report, and no way to attach a run's outputs (a test report, a research note, a PR reference, a patch) to the run for later inspection. The completion pipeline already knows *what* happened (task results, the integration branch/head, usage, the `resultSummary`); Phase 8 makes those outputs durable and inspectable.
 
-### 6.1 Approval modes (master spec §18)
+### 6.1 Artifact store (master spec §26)
 
-A per-run (config-defaulted) `ApprovalMode` decides which stages need a human:
-
-```ts
-type ApprovalMode = 'manual' | 'plan' | 'guarded' | 'autonomous'
-```
-
-- **`manual`** — a human approval is required before the major execution stages (plan activation and the external-write stages below).
-- **`plan`** — the human approves the Run Plan; after approval local execution proceeds automatically; external writes still obey Harness permissions.
-- **`guarded`** — ordinary sandboxed work proceeds automatically; potentially dangerous/external actions require approval.
-- **`autonomous`** — the coordinator proceeds without plan approval, within configured permissions and budgets. Even in autonomous mode: never bypass Harness permissions, never silently elevate permissions, never merge into protected production branches by default, never expose secrets.
-- **The default is conservative** — the plugin config default is `plan` (Design finalizes `plan` vs `guarded` and where the mode is set: config default + per-run override at run/plan creation).
-
-Modes map onto the **existing** phase edges — no new run phases: `awaiting_approval` is where a pending approval pauses the run; approve → the run resumes into the phase it was suspended from (the existing `suspendedFrom` machinery); reject → `blocked` (or `failed` for a rejected plan, per the existing plan-rejection edge — Design decides the exact mapping and keeps it consistent with the Phase 3 coupler).
-
-### 6.2 Approval objects (master spec §19)
-
-A new additive `project_approvals` table in `dsh_projects` (format version stays 0):
+Additive `project_artifacts` table in `dsh_projects` (domain stays v0). The `ProjectArtifact` record:
 
 ```ts
-interface ApprovalRequest {
+interface ProjectArtifact {
   id: string
   projectId: string
-  runId: string
-  type: 'plan' | 'external-write' | 'git-push' | 'pull-request' | 'merge' | 'dangerous-action'
-  summary: string
-  payload?: unknown
-  status: 'pending' | 'approved' | 'rejected' | 'expired'
-  requestedAt: string
-  resolvedAt?: string
-  resolvedBy?: string
+  runId?: string          // the producing run (most artifacts are run-scoped)
+  taskId?: string         // the producing task (optional finer scope)
+  kind: ArtifactKind      // 12 kinds, below
+  title: string
+  content?: string        // inline text (bounded — see 6.2)
+  path?: string           // file reference (no large binaries in JSON storage)
+  url?: string            // external reference (e.g. a PR URL)
+  metadata?: Record<string, unknown>
+  createdAt: string
 }
 ```
 
-- **Persistence is the point** — approval state must survive browser refresh and process restart (real `dsh_projects` storage, zod-validated, CAS `version` like the other tables). The existing `plan.approval.*` events become the event-stream projection of the persisted object (request/approve/reject all append events; the object is the single authority for "is this approved?").
-- **One pending approval per (run, type)** — a second request for the same type while one is pending is rejected (idempotent re-request, not a duplicate).
-- **Resolution is a service method** (`approve` / `reject`, CAS on `version`, `resolvedBy` recorded) that (a) persists the status, (b) appends the run event, (c) resumes or blocks the run through the existing state machine — the same code path the plan UI already drives, now backed by the object.
-- **Which types ship in Phase 7:** `plan` (the existing plan approval, now persisted) and `merge` (the Phase 5 integration step's final merge into the project branch — the one external/dangerous stage that exists today). `git-push` / `pull-request` / `external-write` / `dangerous-action` are declared in the schema and the policy table but have **no trigger site yet** (those stages do not exist in the product yet) — the RPC and UI support them generically (invariant 2: the endpoint works for any declared type; no fake trigger sites).
-- **Expiry:** no TTL (Phase 6 non-goal, carried) — `expired` is a declared status reached only by an explicit service call (Design decides the trigger: e.g. run cancellation while pending), not by a background timer.
+The 12 kinds (master spec §26): `plan`, `research-report`, `architecture-note`, `patch`, `diff`, `test-report`, `validation-report`, `review-report`, `screenshot`, `log-reference`, `pull-request`, `external-link`, `final-report`.
 
-### 6.3 Budgets (master spec §30)
+- **Artifacts are append-only** (created, never mutated or deleted) — they are a durable record of what a run produced. The `final-report` is the one kind the run completion pipeline generates; the others are attached by the coordinator/task workers (a task that writes a test report attaches it) or created manually in the UI.
+- **One `final-report` per run** (idempotent — regenerating it supersedes in place by `runId` + kind, not by a new row).
 
-Additive `RunBudget` on the run record (all fields optional; unset = unlimited):
+### 6.2 Content policy (master spec §26: "do not store huge binary blobs")
 
-```ts
-interface RunBudget {
-  maxRuntimeMinutes?: number
-  maxTotalTokens?: number
-  maxInputTokens?: number
-  maxOutputTokens?: number
-  maxAgents?: number
-  maxConcurrentAgents?: number   // already exists per-run; budget view unifies it
-  maxReplans?: number
-  maxRetriesPerTask?: number
-  maxCost?: number               // declared; no cost metering exists yet — enforced as "no value ⇒ unlimited", never fabricated
-}
-```
+- **Inline `content` is bounded** (Design finalizes the limit — e.g. ≤ 64 KB) for text artifacts (reports, notes, diffs-as-text).
+- **Large/binary outputs are references, not blobs** — a `path` (a file in the project workspace) or a `url` (an external link / PR). A `screenshot` kind stores a `path`/`url`, never the bytes.
+- **`pull-request` / `external-link`** carry a `url` (+ `metadata` for the PR number, head/branch, etc.).
+- **Secrets are scrubbed** from `content`/`metadata` at creation (the Phase 6 memory scrubbing pattern) — an artifact never becomes a secret leak.
 
-- **Enforcement is in code, not model instructions** (master spec §30, explicit):
-  - **~80% of a budget → warning** — a run event (`run.budget.warning`, with the budget key + current/limit in the detail) emitted once per budget per run (no spam on every tick).
-  - **At the limit → stop or pause according to policy** — the Design picks the per-key action (e.g. token/runtime limits → run `paused` with `suspendedFrom`, so a human can raise the budget and resume; retry/replan limits → the specific action is refused with a structured error and the run settles `blocked`); the final report/resultSummary explains **why execution stopped** (the budget key + limit in the detail).
-  - **Where the checks live:** token/runtime checks at the points where usage is already recorded (task completion → `tokenUsage` accumulation; the scheduler tick for runtime); `maxAgents`/`maxConcurrentAgents` in the task scheduler (the concurrency knob already exists — the budget view caps it); `maxRetriesPerTask` in the retry path (the Phase 4 retry logic already counts); `maxReplans` in the plan service (replan attempts already counted via `supersedesPlanId` chains).
-- **Budgets are set at run creation** (RPC `runCreate` gains the optional budget object, validated) and **raised by an explicit transition** while paused (Design: a `runUpdate`-style budget patch endpoint or a dedicated `runSetBudget` — additive RPC either way). No silent auto-raise.
-- **No cost metering** — `maxCost` is declared and validated but there is no price feed in the product; the check is a no-op until a source exists (invariant 2: never fabricate a cost).
+### 6.3 The final report (master spec §64)
+
+At the end of a run (the completion pipeline's terminal transition — `succeeded`, and also `failed`/`blocked` so a stopped run explains *why*), the run completion pipeline generates a `final-report` artifact (fire-and-forget after the transition, the Phase 6 `onRunSucceeded` hook pattern — never into the pipeline, a failure is a warn + no artifact, never a run failure). The report is **human-readable** and explains:
+
+- **Goal** — the run's goal.
+- **Outcome** — `succeeded` / `failed` / `blocked` / `canceled` + the `resultSummary` (Phase 7's budget-stop explanation is included verbatim when a budget stopped the run).
+- **Changes** — the tasks that succeeded/failed + their summaries (the Phase 4 task DAG results).
+- **Validation** — the integration step outcome (branch/head for Git projects, the Phase 5 `run.integration.*` events).
+- **Git** — the integration branch + head commit (+ a PR reference when one exists as a `pull-request` artifact).
+- **Agents + Usage** — the agent count + token/runtime usage (the Phase 7 budget usage already recorded on the run).
+- **Project knowledge learned** — the Phase 6 memory entries distilled from this run (the `run.memory.distilled` event's entries).
+- **Remaining risks** — the failed/blocked tasks + any budget warnings (the `run.budget.warning` events).
+
+The report is generated **in code from the persisted run/task/memory/approval records** (no model call — deterministic, reproducible, byte-stable for the same inputs). It is an artifact like any other (inspectable, linkable), and it is the single place a user looks to understand a finished run.
 
 ### 6.4 UI (existing Dashboard, zh/en parity compile-enforced)
 
-- **RunInspector:** an **Approvals** section — pending approval objects for the selected run (type, summary, requested time) with **Approve / Reject** buttons (dispatch the new RPCs; busy gating + structured error banner per the existing conventions); the run's `approvalMode` displayed; the existing plan approve/reject buttons now resolve the persisted `plan` approval object (same visual, durable backing).
-- **Budgets:** the run's budget + current usage (tokens, runtime, agents, retries) rendered in the inspector with a warning marker when a `run.budget.warning` fired; budget fields in the New Run dialog (optional, all empty = unlimited) — the dialog already carries the run-creation form.
-- **Runs list:** a pending-approval indicator on runs in `awaiting_approval` (the phase is already shown; the indicator names the pending type).
-- **zh/en parity** compile-enforced as in every phase (the `t` key union); new locale keys for modes, approval types/statuses, budget labels, warnings.
+- **RunInspector:** an **Artifacts** section — the run's artifacts (kind, title, created time) with a detail view (inline `content`, or a `path`/`url` link); the `final-report` rendered as a readable document (the master spec §64 layout); a **Pull-report / Regenerate** affordance for the `final-report` (re-runs the deterministic generator).
+- **Artifacts tab (项目产物 / Artifacts):** a project-level list of artifacts across runs (kind chips + counts, the Phase 6 Memory-tab pattern), filter by run/kind, the detail view; the `final-report` of each run surfaced.
+- **zh/en parity** compile-enforced as in every phase (the `t` key union); new locale keys for the 12 kinds, the report section labels, the detail view.
 
 ### 6.5 RPC (additive, the established pattern)
 
-- `approvalList` (per run or per project), `approvalApprove` / `approvalReject` (CAS `expectedVersion`, `resolvedBy`), `runSetBudget` (patch the budget of a run in a phase where raising is legal).
-- Absent-service structured bad-requests like Phase 6's memory endpoints; new `approval.*` + `budget.*` dashboard error codes (client `errors.ts` mapping + `decodeDashboardError` envelopes, the `params` field — not `args`).
-- `runCreate` gains the optional `budget` object (additive field; existing callers unchanged).
+- `artifactList` (per run or per project, filter by kind), `artifactCreate` (manual attach — kind, title, content/path/url, metadata; the secret-scrub + content-bound validation), `artifactGet` (the full record for the detail view).
+- The `final-report` is **not** created via `artifactCreate` — it is generated by the completion pipeline (6.3); the UI's regenerate affordance dispatches a dedicated `runGenerateReport` RPC (additive) that re-runs the deterministic generator.
+- Absent-service structured bad-requests like Phase 6/7's endpoints; new `artifact.*` dashboard error codes (client `errors.ts` mapping + `decodeDashboardError` envelopes, the `params` field).
+- `runDetail` gains the run's `final-report` reference (additive field; the on-demand RPC pattern, not a snapshot projection).
 
-### 6.6 Explicit non-goals (Phase 8+)
+### 6.6 Explicit non-goals (Phase 9+)
 
-- No new run phases (the existing `awaiting_approval` + `suspendedFrom` machinery is reused).
-- No TTL/background expiry timers — `expired` only via explicit service calls.
-- No cost metering/price feeds (`maxCost` declared, unenforceable until a source exists).
-- No approval objects for memory writes (Phase 6 non-goal, carried — memory writes stay service-internal + manual).
-- No protected-branch policy engine — autonomous mode's "never merge into protected production branches by default" is honored by the merge approval gate (the merge always requires approval in every mode except an explicit per-run override, which the Design defines), not by branch-name parsing.
-- No triggers/automations (Phase 9), no artifact system (Phase 8), no recovery of interrupted distillation (Phase 10).
-- No `DashboardSnapshot` version change; approvals/budgets are on-demand RPC data (the runDetail pattern), not snapshot projections.
+- No artifact **versioning/supersession** beyond the one `final-report`-per-run in-place regeneration (other artifacts are append-only; no edit/delete).
+- No **file upload/download** endpoints (a `path` is a reference into the project workspace; the Dashboard links to it, it does not stream bytes).
+- No **binary/blob storage** (master spec §26 — references only).
+- No **artifact search** beyond kind/run filters (a full-text search over artifact content is a Phase 11 UI-polish concern).
+- No **approval objects for artifact writes** (artifacts are append-only records; no gate).
+- No **triggers/automations** (Phase 9), no **recovery of interrupted report generation** (Phase 10 — a failed generation is a warn + no artifact, retried by the regenerate affordance).
+- No `DashboardSnapshot` version change; artifacts are on-demand RPC data (the `runDetail` pattern), not snapshot projections.
 
 ### 6.7 Acceptance (intent-level; the spec formalizes §-numbered criteria)
 
-1. **Store** — `project_approvals` is a declared table of `dsh_projects` (v0, no migration); records validate against the strict schema; `version` bumps on every accepted mutation; approvals survive a real JSON domain reopen; the table set grows by exactly one table.
-2. **Policy** — each of the four modes behaves per §6.1 (manual: plan + merge gated; plan: plan gated, merge gated, local execution free after approval; guarded/autonomous: plan ungated, merge gated; autonomous never bypasses Harness permissions); the conservative default is the config default; the mode is stored per run and visible in the UI.
-3. **Objects** — request/approve/reject persist + project onto the run event stream (the existing `plan.approval.*` events remain the plan projection); one pending per (run, type); resolution resumes/blocks the run through the existing state machine; browser refresh and process restart do not lose a pending approval.
-4. **Budgets** — every declared budget key is enforced in code at the named site (80% warning once per key, limit → the per-key policy action, resultSummary explains why); unset keys are unlimited; budgets are set at creation and raised explicitly; no key is enforced by prompt text alone.
-5. **UI** — the Approvals section + Approve/Reject dispatch real RPCs with surfaced errors; the budget/usage panel renders; the New Run dialog carries the optional budget fields; zh/en parity compile-enforced.
+1. **Store** — `project_artifacts` is a declared table of `dsh_projects` (v0, no migration); records validate against the strict schema (12 kinds, bounded `content`, `path`/`url` references, no blobs); artifacts are append-only (no update/delete service methods); the table set grows by exactly one table.
+2. **Content policy** — inline `content` is bounded; large/binary outputs are `path`/`url` references (never bytes); `pull-request`/`external-link` carry a `url`; secrets are scrubbed from `content`/`metadata` at creation.
+3. **Final report** — the completion pipeline generates a `final-report` artifact at the terminal transition (succeeded + failed/blocked/canceled), in code from the persisted records (deterministic, no model call); it explains goal/outcome/changes/validation/git/agents/usage/knowledge/risks (master spec §64); one per run (idempotent regeneration); a generation failure is a warn + no artifact, never a run failure.
+4. **UI** — the RunInspector Artifacts section + the project-level Artifacts tab render artifacts (kind chips, detail view, the readable `final-report`); the regenerate affordance dispatches the real RPC; zh/en parity compile-enforced.
+5. **RPC** — `artifactList`/`artifactCreate`/`artifactGet`/`runGenerateReport` dispatch with validation (content bound, kind, secret scrub); absent-service structured failures; the new `artifact.*` error codes (with `params`).
 6. **Repo green** — typecheck, build, full `pnpm vitest run` (modulo the documented pre-existing environment failures).
 
 ### 6.8 Test plan (intent-level; the spec details the cases)
 
-- `tests/approval-service.test.ts` (new): the mode policy table (all 4 modes × the gated stages), request/approve/reject CAS + one-pending-per-(run,type), event projection (plan events unchanged), resume/block through the real state machine, reopen persistence.
-- `tests/budget-enforcement.test.ts` (new): per-key 80% warning (once, not per tick), limit actions (pause vs refuse), the resultSummary explanation, unset = unlimited, budget patch legality.
-- `tests/task-service.test.ts` (extended): `maxAgents` / `maxConcurrentAgents` / `maxRetriesPerTask` enforcement at the scheduler/retry sites; token accumulation triggering the warning + pause.
-- `tests/plan-service.test.ts` (extended): `maxReplans` refusal.
-- `tests/rpc-handler.test.ts` (extended): the three approval endpoints + `runSetBudget` + `runCreate` budget validation; absent-service failures; the new error codes (with `params`).
-- `tests/dashboard-approvals.test.tsx` (new, jsdom): the Approvals section renders pending objects, Approve/Reject dispatch the RPCs with busy gating + error banners, the budget panel renders usage + warning markers, the New Run dialog budget fields dispatch into `runCreate`; zh + en.
-- `tests/run-storage-integration.test.ts` (extended): the table set is exactly `['memory','plans','project_approvals','run_events','runs','tasks']` (Design finalizes the table name); approvals + budget fields survive a real JSON reopen; domain stays v0.
-- Client isolation: the new scan pattern extends to the approval types (client mirror types, no `src/approvals/**` import).
+- `tests/artifact-service.test.ts` (new): the store (create/list/get, 12 kinds, content bound, path/url references, secret scrub, append-only — no update/delete), the one-`final-report`-per-run idempotency, the `artifact.created` event projection.
+- `tests/final-report.test.ts` (new): the deterministic generator (goal/outcome/changes/validation/git/agents/usage/knowledge/risks from the persisted records; byte-stable for the same inputs; the budget-stop `resultSummary` included verbatim; failed/blocked runs explain why; a generation failure → warn + no artifact, never a run failure).
+- `tests/task-service.test.ts` (extended): the completion pipeline triggers the final-report generation at the terminal transition (succeeded + failed/blocked); the report references the run's tasks/integration/usage/memory.
+- `tests/rpc-handler.test.ts` (extended): the four artifact endpoints + `runGenerateReport` + `runDetail` final-report field; absent-service failures; the new error codes (with `params`).
+- `tests/dashboard-artifacts.test.tsx` (new, jsdom): the RunInspector Artifacts section + the project-level Artifacts tab render artifacts (kind chips, detail view, the readable `final-report`), the regenerate affordance dispatches the RPC with busy gating + error banners; zh + en.
+- `tests/run-storage-integration.test.ts` (extended): the table set is exactly `['memory','plans','project_approvals','project_artifacts','run_events','runs','tasks']`; artifacts + the `final-report` survive a real JSON reopen; domain stays v0.
+- Client isolation: the new scan pattern extends to the artifact types (client mirror types, no `src/artifacts/**` import).
 
 ## 7. Next gate
 
-**Design (Phase 7 — Approvals + budgets):** formalize `spec.md` — the `project_approvals` table schema + strict record spec, the approval mode policy table (mode × gated stage → required/not, with the exact phase-edge mapping onto the existing state machine), the approval state machine (status transitions, CAS, one-pending rule, expiry path), the budget schema + per-key enforcement sites + the 80%/limit policy table (warning event shape, per-key limit action), the additive RPC surface (approvalList/approvalApprove/approvalReject/runSetBudget + runCreate budget field), the error codes, the UI (Approvals section, budget panel, New Run dialog fields, zh/en keys), and the full test plan, per §6.
+**Design (Phase 8 — Artifacts + final report):** formalize `spec.md` — the `project_artifacts` table schema + strict record spec (12 kinds, bounded `content`, `path`/`url` references, the append-only rule), the content policy (the inline bound, the reference-not-blob rule, the secret scrub), the `ProjectArtifactService` (create/list/get, the one-`final-report`-per-run idempotency, the `artifact.created` event), the final-report generator (the deterministic section builder from the persisted run/task/memory/approval records, the master spec §64 layout, the terminal-transition trigger + the fire-and-forget hook), the additive RPC surface (artifactList/artifactCreate/artifactGet/runGenerateReport + the runDetail final-report field), the error codes, the UI (the RunInspector Artifacts section, the project-level Artifacts tab, the readable `final-report`, the regenerate affordance, zh/en keys), and the full test plan, per §6.
