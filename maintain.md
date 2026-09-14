@@ -1,5 +1,107 @@
 # Maintenance Log — DSH Projects
 
+## Cycle 9 (post v0.16.0 deploy) — 2026-09-14
+
+**Status: no incidents.** Phase 10 (Recovery + hardening) released as
+v0.16.0 (release commit `8012563`, build `c16af2d`, test report `483c3d7`,
+spec `d55eecd`, intent `7f5594a`). Shipped on local `main` and **pushed to
+`origin/main`** this cycle via **PR #3** (`dsh-projects-phase-10` → `main`,
+merge commit `e82a390`); `main` is in sync with `origin/main` (0/0). A release
+marker branch `dsh-projects-phase-10` (at `483c3d7`) was created and pushed for
+consistency with the Phase 3/4/5/6/7/8/9 markers.
+
+### Post-deploy verification
+
+- `pnpm run typecheck` — clean (exit 0)
+- `pnpm run build` — clean (dual tsdown: client 491.86 kB / host 460.59 kB —
+  the host grew ~4.6 kB from the reconciliation pass + the `SessionId` import)
+- `pnpm exec vitest run` — 635 passed / 3 failed (638 total); the 3 failures
+  are the pre-existing, documented environment failures — 3 macOS tmpdir cases
+  in `tests/project-catalog.test.ts` (`/var/folders` vs `/private/var/folders`
+  realpath mismatch, present since Phase 3) + up to 2 `integration-strategy`
+  git-worktree flakes under full-suite load (they pass 7/7 in isolation;
+  `project-catalog` is exactly 3/6 in isolation). All 22 new Phase 10 tests are
+  green (see `test-report.md`): recovery (9), concurrency (5),
+  run-storage-integration (9, +1), task-service (39, +7).
+- Working tree clean; `dsh_projects` storage domain remains at format version
+  0 (Phase 10 is additive — two run event types `task.interrupted` /
+  `run.recovered`; no new table, no new record field, no migration needed for
+  installed instances).
+- Invariant checks: the reconciliation pass is driven through the
+  single-authority transitions (`casTaskTransition` + the existing `tick()`
+  re-dispatch) — no direct phase writes, so the scheduler stays the single
+  authority (master spec §58); a stale `running` task is interrupted +
+  re-queued within the attempt budget or failed when exhausted, a live session
+  is left untouched (§54 "do not blindly restart"), and terminal Runs are never
+  touched. The four §57-critical mutations (task-state / run-phase /
+  plan-activation / approval-resolution) were already compare-and-set guarded;
+  Phase 10 **verifies** them under stress (exactly-one-writer, plan-activation
+  stale-reject, reconcile-vs-live race) — it does not add the guards.
+
+### Test-stage findings (fixed during verification, recorded in test-report §3)
+
+No production-code gaps were found — the Phase 10 build shipped the full
+reconciliation surface and the spec's test plan was met as written. The fixes
+were **test-side only**:
+
+1. **`concurrency.test.ts` fresh-version reads** — the run-phase case initially
+   passed a stale `expectedVersion` (the `createRun` record's version 1) to all
+   8 callers, so all 8 were rejected; fixed to read the fresh version from
+   `domain().table('runs').get(runId)`. The plan-activation case initially
+   asserted a `plan.revisionConflict` after a `draft→active`, but that
+   transition does not bump the revision (only `superseded`/`completed` do);
+   fixed to activate first (revision stays 1) and then race two `superseded`
+   transitions on `expectedRevision: 1`.
+2. **`concurrency.test.ts` approval loser codes** — the 7 concurrent
+   `resolveApproval` losers get `approval.invalidStatus` (the status check
+   `!== 'pending'` fires **before** the version check), not
+   `approval.staleVersion`; fixed the assertion and added a separate
+   version-guard sub-check (a still-`pending` approval whose version moved →
+   `approval.staleVersion`).
+3. **`task-service.test.ts` re-queue observability** — three
+   `reconcileStaleTask` re-queue cases asserted the task ends `ready`, but the
+   default `heldWorker()` re-dispatches the re-queued task on the trailing
+   `tick()` (to `running` attempt 2); fixed those three to use
+   `UnavailableWorker()` so the re-queue is observable. The `isStaleTask`
+   dead-session case had an **inverted probe** (`id => id !== 'dsh-task-live'`
+   reported the dead session as alive); fixed to `id => id === 'dsh-task-live'`.
+4. **`recovery.test.ts` record shapes** — the durable-surface seed used an
+   invalid `MemoryKind` (`'fact'` → `'finding'`) and a `RunPlanRecord` missing
+   `projectId`/`assumptions`/`successCriteria` (and carrying a non-existent
+   `updatedAt`); fixed to the exact record shapes.
+5. **`exactOptionalPropertyTypes` + `noUncheckedIndexedAccess`** — the new test
+   files needed tightening for the §12.8 typecheck gate: the
+   `concurrency.test.ts` fresh-version read narrowed with a `toBeDefined()`
+   assertion + a non-null assertion (the `TransitionRunOptions.expectedVersion`
+   is `number`, not `number | undefined`).
+
+### Known issues (tracked, non-blocking)
+
+1. **`project-catalog.test.ts` × 3** — macOS sandbox realpath mismatch
+   (`/var/folders` vs `/private/var/folders`). Fails identically before and
+   after every Phase 10 commit; not a regression.
+2. **`integration-strategy.test.ts` flaky under full-suite load** — the
+   git-worktree cases intermittently fail when the whole suite runs
+   concurrently (temp-dir / worktree contention); they pass 7/7 in isolation
+   and in the clean full-suite run that produced the §1 numbers. Not introduced
+   by Phase 10 (the Phase 10 diff does not touch the merge strategy).
+3. **Running GUI lags the repo** — the dashboard at http://127.0.0.1:3080 still
+   serves a pre-Phase-10 build; Phase 10 is host-side (no new UI surface — the
+   Run detail / event timeline already renders the two new run events
+   `task.interrupted` / `run.recovered`), so the only visible change after a
+   plugin reinstall/restart against this checkout's v0.16.0 build is the
+   recovery behavior on restart.
+
+### Follow-ups (next intent cycle)
+
+- Reinstall/restart the GUI plugin against the v0.16.0 build so the running
+  dashboard runs the Phase 10 recovery path (host-side; no new UI surface).
+- Decide whether to fix the `project-catalog.test.ts` tmpdir expectations
+  (normalize `realpath` in the assertions) or keep them documented.
+- Phase 11 scope (UI Polish, per the master spec Phases 0–12): to be drafted as
+  the next `intent.md` when this maintain stage closes. Phase 12 (optional
+  Remote Worker Provider) follows.
+
 ## Cycle 8 (post v0.15.0 deploy) — 2026-09-14
 
 **Status: no incidents.** Phase 9 (Trigger generalization) released as
