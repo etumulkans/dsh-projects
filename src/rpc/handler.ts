@@ -16,6 +16,7 @@ import type { ApprovalService } from '../approvals/approval-service.ts'
 import { APPROVAL_MODES } from '../approvals/types.ts'
 import type { ProjectArtifactService } from '../artifacts/artifact-service.ts'
 import { ARTIFACT_KINDS, type ArtifactKind } from '../artifacts/types.ts'
+import type { ProjectTriggerService } from '../triggers/trigger-service.ts'
 import type { RunBudget } from '../runs/types.ts'
 import { runBudgetSchema } from '../runs/spec.ts'
 import type { DashboardSnapshot } from '../runtime/types.ts'
@@ -34,6 +35,7 @@ export async function handleDashboardRpc(
   memory?: ProjectMemoryService,
   approvals?: ApprovalService,
   artifacts?: ProjectArtifactService,
+  triggers?: ProjectTriggerService,
 ): Promise<RpcResult<unknown>> {
   if (signal.aborted) {
     return failure('cancelled', localizedError('request.cancelled', 'Dashboard request was cancelled'))
@@ -163,7 +165,14 @@ export async function handleDashboardRpc(
         const tasksList = tasks === undefined ? undefined : tasks.taskList(detail.run.id)
         const approvalsList = approvals === undefined ? undefined : approvals.listApprovals(detail.run.id)
         const artifactsList = artifacts === undefined ? undefined : artifacts.list({ runId: detail.run.id })
-        if (tasksList === undefined && approvalsList === undefined && artifactsList === undefined) return success(detail)
+        // Additive (Phase 9): attach the run's originating trigger (resolved from
+        // `sourceRef`) when the Trigger service is mounted (the on-demand pattern).
+        const trigger = triggers !== undefined && detail.run.sourceRef !== undefined
+          ? triggers.get(detail.run.sourceRef)
+          : undefined
+        if (tasksList === undefined && approvalsList === undefined && artifactsList === undefined && trigger === undefined) {
+          return success(detail)
+        }
         const finalReport = artifactsList === undefined ? undefined : artifactsList.find(artifact => artifact.kind === 'final-report')
         return success({
           ...detail,
@@ -171,6 +180,7 @@ export async function handleDashboardRpc(
           ...(approvalsList === undefined ? {} : { approvals: approvalsList }),
           ...(artifactsList === undefined ? {} : { artifacts: artifactsList }),
           ...(finalReport === undefined ? {} : { finalReport }),
+          ...(trigger === undefined ? {} : { trigger }),
         })
       }
       case 'runTransition': {
@@ -397,6 +407,62 @@ export async function handleDashboardRpc(
         const report = await artifacts.generateFinalReport(runId, 'on-demand')
         return success(report)
       }
+      case 'triggerList': {
+        if (triggers === undefined) return badRequest('triggerList is unavailable: the Trigger service is not mounted')
+        const projectId = readOptionalString(payload, 'projectId')
+        if (projectId === false || projectId === undefined) {
+          return badRequest('triggerList requires a non-empty `projectId`')
+        }
+        return success({ triggers: triggers.list(projectId) })
+      }
+      case 'triggerCreate': {
+        if (triggers === undefined) return badRequest('triggerCreate is unavailable: the Trigger service is not mounted')
+        const input = readCreateTrigger(payload)
+        if (typeof input === 'string') return badRequest(input)
+        return success(await triggers.create(input))
+      }
+      case 'triggerGet': {
+        if (triggers === undefined) return badRequest('triggerGet is unavailable: the Trigger service is not mounted')
+        const id = readUuidField(payload, 'id')
+        if (id === undefined) return badRequest('triggerGet requires a uuid `id`')
+        const record = triggers.get(id)
+        if (record === undefined) throw new DashboardDomainError('trigger.unknown', `Unknown trigger ${id}`, { id })
+        return success(record)
+      }
+      case 'triggerUpdate': {
+        if (triggers === undefined) return badRequest('triggerUpdate is unavailable: the Trigger service is not mounted')
+        const id = readUuidField(payload, 'id')
+        if (id === undefined) return badRequest('triggerUpdate requires a uuid `id`')
+        const patch = readUpdateTrigger(payload)
+        if (typeof patch === 'string') return badRequest(patch)
+        return success(await triggers.update(id, patch))
+      }
+      case 'triggerSetEnabled': {
+        if (triggers === undefined) return badRequest('triggerSetEnabled is unavailable: the Trigger service is not mounted')
+        const id = readUuidField(payload, 'id')
+        if (id === undefined) return badRequest('triggerSetEnabled requires a uuid `id`')
+        const enabled = payload !== null && typeof payload === 'object' && 'enabled' in payload && typeof (payload as { enabled?: unknown }).enabled === 'boolean'
+          ? (payload as { enabled: boolean }).enabled
+          : false
+        return success(await triggers.setEnabled(id, enabled))
+      }
+      case 'triggerDelete': {
+        if (triggers === undefined) return badRequest('triggerDelete is unavailable: the Trigger service is not mounted')
+        const id = readUuidField(payload, 'id')
+        if (id === undefined) return badRequest('triggerDelete requires a uuid `id`')
+        await triggers.delete(id)
+        return success({ ok: true })
+      }
+      case 'triggerFire': {
+        if (triggers === undefined) return badRequest('triggerFire is unavailable: the Trigger service is not mounted')
+        const id = readUuidField(payload, 'id')
+        if (id === undefined) return badRequest('triggerFire requires a uuid `id`')
+        // The `event` is optional — a `triggerFire` without an event fires a
+        // synthetic "manual fire" event (the UI's "Run now" affordance), so it
+        // is not idempotent (the explicit-intent semantics).
+        const event = readTriggerEvent(payload)
+        return success(await triggers.fire(id, event))
+      }
       case 'runSetBudget': {
         if (runs === undefined) return badRequest('runSetBudget is unavailable: the Project Run service is not mounted')
         const runId = readUuidField(payload, 'runId')
@@ -591,6 +657,73 @@ function readCreateArtifact(value: unknown): import('../artifacts/types.ts').Art
     ...(url === undefined || url === false ? {} : { url }),
     ...(metadata === undefined ? {} : { metadata: metadata as Record<string, unknown> }),
   }
+}
+
+/** Phase 9: `triggerCreate` input. The per-type `config` shape is validated by the service. */
+function readCreateTrigger(value: unknown): import('../triggers/types.ts').TriggerCreateInput | string {
+  const object = readObject(value)
+  const projectId = readStringField(object, 'projectId')
+  if (projectId === undefined) return 'triggerCreate requires a non-empty `projectId`'
+  const type = readStringField(object, 'type')
+  if (type === undefined) return 'triggerCreate requires a non-empty `type`'
+  const goalTemplate = readStringField(object, 'goalTemplate')
+  if (goalTemplate === undefined) return 'triggerCreate requires a non-empty `goalTemplate`'
+  const config = readObjectField(object, 'config')
+  const approvalMode = readApprovalMode(object)
+  if (approvalMode === false) return 'triggerCreate `approvalMode` must be a valid approval mode when provided'
+  return {
+    projectId,
+    type,
+    ...(config === undefined ? { config: {} } : { config: config as Record<string, unknown> }),
+    goalTemplate,
+    ...(approvalMode === undefined ? {} : { approvalMode }),
+  }
+}
+
+/** Phase 9: `triggerUpdate` patch (a partial — at least one field required). */
+function readUpdateTrigger(value: unknown): import('../triggers/types.ts').TriggerUpdateInput | string {
+  const object = readObject(value)
+  if (object === undefined) return 'triggerUpdate requires an object'
+  const goalTemplate = readOptionalString(object, 'goalTemplate')
+  const config = readObjectField(object, 'config')
+  const approvalMode = readApprovalMode(object)
+  if (approvalMode === false) return 'triggerUpdate `approvalMode` must be a valid approval mode when provided'
+  const hasGoal = goalTemplate !== undefined && goalTemplate !== false
+  const hasConfig = config !== undefined
+  const hasApproval = approvalMode !== undefined
+  if (!hasGoal && !hasConfig && !hasApproval) {
+    return 'triggerUpdate requires at least one of `goalTemplate`, `config`, or `approvalMode`'
+  }
+  return {
+    ...(hasGoal ? { goalTemplate: goalTemplate as string } : {}),
+    ...(hasConfig ? { config: config as Record<string, unknown> } : {}),
+    ...(hasApproval ? { approvalMode } : {}),
+  }
+}
+
+/** Phase 9: `triggerFire` event. Optional — a synthetic "manual fire" when absent (the "Run now" affordance). */
+function readTriggerEvent(value: unknown): import('../triggers/types.ts').TriggerEvent {
+  const object = readObject(value)
+  const eventField = object !== undefined ? object['event'] : undefined
+  if (eventField !== undefined && eventField !== null && typeof eventField === 'object' && !Array.isArray(eventField)) {
+    const eventObject = eventField as Record<string, unknown>
+    const sourceEventKey = typeof eventObject['sourceEventKey'] === 'string' && eventObject['sourceEventKey'] !== ''
+      ? eventObject['sourceEventKey']
+      : undefined
+    if (sourceEventKey !== undefined) {
+      const data: Record<string, string> = {}
+      const dataField = eventObject['data']
+      if (dataField !== undefined && dataField !== null && typeof dataField === 'object' && !Array.isArray(dataField)) {
+        for (const [key, field] of Object.entries(dataField as Record<string, unknown>)) {
+          if (typeof field === 'string') data[key] = field
+        }
+      }
+      return { sourceEventKey, data }
+    }
+  }
+  // The synthetic "manual fire" event (the UI's "Run now" affordance) — not
+  // idempotent (the explicit-intent semantics).
+  return { sourceEventKey: `manual:${crypto.randomUUID()}`, data: {} }
 }
 
 /** Phase 7: `runCreate` approval mode. `false` = present but invalid. */

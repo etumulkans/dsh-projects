@@ -31,6 +31,8 @@ import { ProjectRunService } from '../src/runs/run-service.ts'
 import { integrationBranchName, taskBranchName, TaskWorktreeManager } from '../src/tasks/git-workspace.ts'
 import { ProjectTaskService } from '../src/tasks/task-service.ts'
 import type { TaskWorker, TaskWorkerInput, TaskWorkerResult } from '../src/tasks/worker.ts'
+import { ProjectTriggerService } from '../src/triggers/trigger-service.ts'
+import type { TaskSourceRegistry } from '../src/task-source/index.ts'
 
 const temporaryRoots: string[] = []
 const contexts: Context[] = []
@@ -240,7 +242,7 @@ describe('ProjectRunService against real JSON storage', () => {
     // `project_approvals` table, and Phase 8 the `project_artifacts` table
     // (empty here — no artifacts in this leg); every declared table is created
     // on domain open. The domain stays format version 0 (additive).
-    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'project_artifacts', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'project_artifacts', 'project_triggers', 'run_events', 'runs', 'tasks', 'trigger_fires'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(2)
     // 10 boot-1 events + 3 boot-2 events (resume, finalize, completed)
@@ -529,7 +531,7 @@ describe('ProjectRunService against real JSON storage', () => {
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
     // Phase 4 adds the `tasks` table to the domain (empty here — no tasks in
     // this leg); every declared table is created on domain open.
-    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'project_artifacts', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'project_artifacts', 'project_triggers', 'run_events', 'runs', 'tasks', 'trigger_fires'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(1)
     // 7 boot-1 events + 2 boot-2 events (approve, phase change to executing)
@@ -684,7 +686,7 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'project_artifacts', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'project_artifacts', 'project_triggers', 'run_events', 'runs', 'tasks', 'trigger_fires'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.tasks ?? {})).toHaveLength(2)
@@ -809,7 +811,7 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'project_artifacts', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'project_artifacts', 'project_triggers', 'run_events', 'runs', 'tasks', 'trigger_fires'])
     const persistedTasks = Object.values(medium.tables.tasks ?? {})
     expect(persistedTasks).toHaveLength(2)
     const persistedTask = persistedTasks[0] as Record<string, unknown>
@@ -822,4 +824,106 @@ describe('ProjectRunService against real JSON storage', () => {
 
     dispose()
   }, 90_000)
+
+  it('persists a fired trigger + its fire record across a domain reopen (idempotent re-fire)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projects-trigger-it-'))
+    temporaryRoots.push(root)
+    const { ctx, facility, dispose } = await boot(root)
+    const clock = () => new Date(Date.UTC(2026, 8, 10, 0, 0, 0)).toISOString()
+    // The service holds the unscoped registry; the fire path never touches it
+    // (only pollDueTriggers does), so a stub is enough for this integration leg.
+    const sources = { requireScoped: () => { throw new Error('no scoped source in this leg') } } as unknown as TaskSourceRegistry
+
+    // --- boot 1: create a tracker trigger, fire a tracker event (→ a run) ---
+    const first = new ProjectRunService(ctx, catalogFixture(), clock)
+    await first.start()
+    const firstTriggers = new ProjectTriggerService(ctx, catalogFixture(), first, sources, clock)
+    firstTriggers.start()
+    let triggerId = ''
+    let runId = ''
+    try {
+      const trigger = await firstTriggers.create({
+        projectId: PROJECT_ID,
+        type: 'tracker',
+        config: { sourceKind: 'linear', readyStates: ['ready'] },
+        goalTemplate: 'Fix {{issue.key}}: {{issue.title}}',
+        approvalMode: 'plan',
+      })
+      triggerId = trigger.id
+      const fired = await firstTriggers.fire(trigger.id, {
+        sourceEventKey: 'linear:LI-7:ready',
+        data: { 'issue.key': 'LI-7', 'issue.title': 'Broken build' },
+      })
+      expect(fired).toBeDefined()
+      runId = fired!.id
+      expect(fired!.goal).toBe('Fix LI-7: Broken build')
+      expect(fired!.source).toBe('tracker')
+      expect(fired!.sourceRef).toBe(trigger.id)
+      expect(fired!.approvalMode).toBe('plan')
+      // The trigger.fired run event was appended to the created run.
+      const detail = await first.runDetail(runId)
+      expect(detail.events.some(event => event.type === 'trigger.fired')).toBe(true)
+    } finally {
+      firstTriggers.stop()
+      await first.stop()
+    }
+    await facility.closeAll()
+
+    // --- boot 2: fresh instances over the same medium ---
+    const second = new ProjectRunService(ctx, catalogFixture(), clock)
+    await second.start()
+    const secondTriggers = new ProjectTriggerService(ctx, catalogFixture(), second, sources, clock)
+    secondTriggers.start()
+    try {
+      // The trigger + its lastFiredAt/lastRunId survive the restart.
+      const restored = secondTriggers.get(triggerId)
+      expect(restored).toBeDefined()
+      expect(restored!.goalTemplate).toBe('Fix {{issue.key}}: {{issue.title}}')
+      expect(restored!.lastRunId).toBe(runId)
+      expect(restored!.lastFiredAt).toBe(clock())
+      // The created run survives too.
+      const run = await second.runDetail(runId)
+      expect(run.run.sourceRef).toBe(triggerId)
+      // Re-firing the same (triggerId, sourceEventKey) is a no-op (idempotent
+      // across the restart — the trigger_fires record survived).
+      const again = await secondTriggers.fire(triggerId, {
+        sourceEventKey: 'linear:LI-7:ready',
+        data: { 'issue.key': 'LI-7', 'issue.title': 'Broken build' },
+      })
+      expect(again!.id).toBe(runId)
+      const summary = await second.listForSnapshot({ mode: 'project', projectId: PROJECT_ID })
+      expect(summary.total).toBe(1)
+    } finally {
+      secondTriggers.stop()
+      await second.stop()
+    }
+
+    // The domain stays format version 0 (additive) and the trigger tables are
+    // present with exactly one trigger + one fire record.
+    const entries = await readdir(root, { recursive: true })
+    const mediumFile = entries.find(entry => String(entry).includes('dsh_projects') && String(entry).endsWith('.json'))
+    expect(mediumFile).toBeDefined()
+    const medium = JSON.parse(await readFile(join(root, String(mediumFile)), 'utf8')) as {
+      unit: { name: string; version: number }
+      tables: Record<string, Record<string, unknown>>
+    }
+    expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'project_artifacts', 'project_triggers', 'run_events', 'runs', 'tasks', 'trigger_fires'])
+    expect(Object.keys(medium.tables.project_triggers ?? {})).toHaveLength(1)
+    expect(Object.keys(medium.tables.trigger_fires ?? {})).toHaveLength(1)
+    const persistedTrigger = Object.values(medium.tables.project_triggers ?? {})[0] as Record<string, unknown>
+    expect(persistedTrigger).toMatchObject({
+      id: triggerId,
+      projectId: PROJECT_ID,
+      type: 'tracker',
+      enabled: true,
+      goalTemplate: 'Fix {{issue.key}}: {{issue.title}}',
+      approvalMode: 'plan',
+      lastRunId: runId,
+    })
+    const persistedFire = Object.values(medium.tables.trigger_fires ?? {})[0] as Record<string, unknown>
+    expect(persistedFire).toMatchObject({ triggerId, sourceEventKey: 'linear:LI-7:ready', runId })
+
+    dispose()
+  })
 })

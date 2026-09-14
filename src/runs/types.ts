@@ -2,6 +2,7 @@
 
 import type { ApprovalMode, ApprovalRequestRecord } from '../approvals/types.ts'
 import type { ProjectArtifactRecord } from '../artifacts/types.ts'
+import type { ProjectTriggerRecord } from '../triggers/types.ts'
 import type { ProjectId } from '../catalog/types.ts'
 import type { TokenTotals } from '../runtime/types.ts'
 import type { ProjectTaskView, TaskCountsView, TaskWorkerKindView } from '../tasks/types.ts'
@@ -122,6 +123,8 @@ export type ProjectRunEventType =
   | 'artifact.created'
   // Additive (Phase 8): final-report generation failure (spec §6.5).
   | 'run.report.failed'
+  // Additive (Phase 9): a trigger created a run (spec §3.4).
+  | 'trigger.fired'
 
 /** High-level Run event; detailed agent activity stays in Harness session logs. */
 export interface ProjectRunEventRecord {
@@ -207,6 +210,8 @@ export interface RunDetailView {
   readonly artifacts?: readonly ProjectArtifactRecord[]
   /** Additive (Phase 8): the run's `final-report` artifact, when present. */
   readonly finalReport?: ProjectArtifactRecord
+  /** Additive (Phase 9): the run's originating trigger (resolved from `sourceRef`), when present. */
+  readonly trigger?: ProjectTriggerRecord
 }
 
 export interface CreateRunInput {

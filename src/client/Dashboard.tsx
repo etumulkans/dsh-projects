@@ -30,7 +30,7 @@ import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
 import type { CreateRunInput, ProjectRunEventView, ProjectRunPhase, ProjectRunView, RunBudget, RunDetailView } from '../runs/types.ts'
 import type { CreatePlanInput, PlannedTaskInput, RunPlanPattern, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
 import type { ProjectTaskView, TaskWorkerKindView } from '../tasks/types.ts'
-import { CLIENT_MEMORY_KINDS, CLIENT_APPROVAL_MODES, CLIENT_ARTIFACT_KINDS } from './controller.ts'
+import { CLIENT_MEMORY_KINDS, CLIENT_APPROVAL_MODES, CLIENT_ARTIFACT_KINDS, CLIENT_TRIGGER_TYPES } from './controller.ts'
 import type {
   ApprovalRequestView,
   ArtifactCreateInput,
@@ -46,6 +46,10 @@ import type {
   MemoryListPayload,
   MemorySetStatusInput,
   MemoryUpdateInput,
+  ClientTriggerType,
+  TriggerCreateInput,
+  TriggerUpdateInput,
+  TriggerView,
 } from './controller.ts'
 import { DashboardUiController } from './controller.ts'
 import { dashboardErrorMessage, DashboardRequestError } from './errors.ts'
@@ -171,6 +175,11 @@ export function DashboardOverlay({ ui, data, openSession, t }: DashboardOverlayP
           onGenerateReport={runId => data.generateReport(runId)}
           onLoadArtifacts={input => data.loadArtifacts(input)}
           onCreateArtifact={input => data.createArtifact(input)}
+          onLoadTriggers={projectId => data.loadTriggers(projectId)}
+          onCreateTrigger={input => data.createTrigger(input)}
+          onSetTriggerEnabled={(id, enabled) => data.setTriggerEnabled(id, enabled)}
+          onDeleteTrigger={id => data.deleteTrigger(id)}
+          onFireTrigger={id => data.fireTrigger(id)}
           onResolveApproval={(id, decision, expectedVersion) => data.resolveApproval(id, decision, expectedVersion)}
           onOpenSession={(sessionId) => { ui.close(); openSession(sessionId) }}
         />
@@ -232,10 +241,20 @@ export interface DashboardSurfaceProps {
   readonly onLoadArtifacts?: ((input: { readonly runId?: string; readonly projectId?: string; readonly kind?: ClientArtifactKind }) => Promise<readonly ArtifactView[]>) | undefined
   /** Phase 8: create an artifact (the Add artifact dialog). */
   readonly onCreateArtifact?: ((input: ArtifactCreateInput) => Promise<ArtifactView>) | undefined
+  /** Phase 9: load a project's triggers for the Automations tab. */
+  readonly onLoadTriggers?: ((projectId: string) => Promise<readonly TriggerView[]>) | undefined
+  /** Phase 9: persist a new trigger rule (the Add trigger dialog). */
+  readonly onCreateTrigger?: ((input: TriggerCreateInput) => Promise<TriggerView>) | undefined
+  /** Phase 9: toggle a trigger's enabled flag. */
+  readonly onSetTriggerEnabled?: ((id: string, enabled: boolean) => Promise<TriggerView>) | undefined
+  /** Phase 9: delete a trigger. */
+  readonly onDeleteTrigger?: ((id: string) => Promise<void>) | undefined
+  /** Phase 9: fire a trigger (the "Run now" affordance). */
+  readonly onFireTrigger?: ((id: string) => Promise<{ readonly id: string; readonly source: string } | undefined>) | undefined
   readonly onOpenSession: (sessionId: string) => void
 }
 
-type Tab = 'board' | 'runtime' | 'runs' | 'projects' | 'memory' | 'artifacts' | 'configuration'
+type Tab = 'board' | 'runtime' | 'runs' | 'projects' | 'memory' | 'artifacts' | 'automations' | 'configuration'
 type RuntimePhaseFilter = Extract<IssueRuntimeView['phase'], 'running' | 'retrying' | 'blocked'>
 type RuntimeFilter = RuntimePhaseFilter | 'attention'
 type ActionToastState = { readonly tone: 'success' | 'error'; readonly message: string }
@@ -284,6 +303,11 @@ export function DashboardSurface({
   onGenerateReport,
   onLoadArtifacts,
   onCreateArtifact,
+  onLoadTriggers,
+  onCreateTrigger,
+  onSetTriggerEnabled,
+  onDeleteTrigger,
+  onFireTrigger,
   onOpenSession,
 }: DashboardSurfaceProps) {
   const t = useDashboardTranslation()
@@ -509,6 +533,7 @@ export function DashboardSurface({
             <TabButton active={tab === 'projects'} onClick={() => setTab('projects')}>{t('tab.projects')}</TabButton>
             <TabButton active={tab === 'memory'} onClick={() => setTab('memory')}>{t('tab.memory')}</TabButton>
             <TabButton active={tab === 'artifacts'} onClick={() => setTab('artifacts')}>{t('tab.artifacts')}</TabButton>
+            <TabButton active={tab === 'automations'} onClick={() => setTab('automations')}>{t('automations')}</TabButton>
             <TabButton active={tab === 'configuration'} onClick={() => setTab('configuration')}>{t('tab.configuration')}</TabButton>
           </nav>
         </header>
@@ -602,6 +627,18 @@ export function DashboardSurface({
               busy={loading}
               onLoadArtifacts={onLoadArtifacts}
               onCreateArtifact={onCreateArtifact}
+              onOpenRun={runId => setSelectedRunId(runId)}
+            />
+          ) : null}
+          {tab === 'automations' ? (
+            <AutomationsView
+              projects={snapshot?.catalog.projects ?? []}
+              busy={loading}
+              onLoadTriggers={onLoadTriggers}
+              onCreateTrigger={onCreateTrigger}
+              onSetTriggerEnabled={onSetTriggerEnabled}
+              onDeleteTrigger={onDeleteTrigger}
+              onFireTrigger={onFireTrigger}
               onOpenRun={runId => setSelectedRunId(runId)}
             />
           ) : null}
@@ -4529,6 +4566,351 @@ function MemoryEditDialog({ entry, onClose, onSubmit }: {
           <button type="button" onClick={onClose}>{t('common.cancel')}</button>
           <button type="button" className="dshd-primary" disabled={busy || blocked} aria-busy={busy} onClick={() => { void submit() }}>
             <span>{busy ? t('memory.saving') : t('memory.save')}</span>
+          </button>
+        </footer>
+      </div>
+    </div>
+  )
+}
+
+
+/**
+ * Phase 9 (spec §9.2): the Automations tab. Lists a project's trigger rules
+ * (newest first), with enable/disable, "Run now" (fire), delete, and an Add
+ * trigger dialog. The config projection is credential-free (a secret is a ref,
+ * never a value).
+ */
+function AutomationsView({ projects, busy, onLoadTriggers, onCreateTrigger, onSetTriggerEnabled, onDeleteTrigger, onFireTrigger, onOpenRun }: {
+  readonly projects: readonly ProjectView[]
+  readonly busy: boolean
+  readonly onLoadTriggers?: ((projectId: string) => Promise<readonly TriggerView[]>) | undefined
+  readonly onCreateTrigger?: ((input: TriggerCreateInput) => Promise<TriggerView>) | undefined
+  readonly onSetTriggerEnabled?: ((id: string, enabled: boolean) => Promise<TriggerView>) | undefined
+  readonly onDeleteTrigger?: ((id: string) => Promise<void>) | undefined
+  readonly onFireTrigger?: ((id: string) => Promise<{ readonly id: string; readonly source: string } | undefined>) | undefined
+  readonly onOpenRun: (runId: string) => void
+}) {
+  const t = useDashboardTranslation()
+  const [projectId, setProjectId] = useState<string | undefined>(projects[0]?.id)
+  const [result, setResult] = useState<readonly TriggerView[] | undefined>()
+  const [fetching, setFetching] = useState(false)
+  const [loadError, setLoadError] = useState<unknown>()
+  const [actionError, setActionError] = useState<unknown>()
+  const [pendingKey, setPendingKey] = useState<string | undefined>()
+  const [addOpen, setAddOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<TriggerView | undefined>()
+  const [reloadKey, setReloadKey] = useState(0)
+  const reload = (): void => setReloadKey(current => current + 1)
+
+  // The catalog can load or change after mount; the default selection is the first project.
+  useEffect(() => {
+    if (projects.length === 0) {
+      if (projectId !== undefined) setProjectId(undefined)
+      return
+    }
+    if (projectId === undefined || !projects.some(project => project.id === projectId)) setProjectId(projects[0]!.id)
+  }, [projects, projectId])
+
+  const loadRef = useRef(onLoadTriggers)
+  loadRef.current = onLoadTriggers
+
+  useEffect(() => {
+    if (projectId === undefined) {
+      setResult(undefined)
+      setLoadError(undefined)
+      return
+    }
+    const load = loadRef.current
+    if (load === undefined) return
+    let cancelled = false
+    setFetching(true)
+    setLoadError(undefined)
+    load(projectId).then(value => {
+      if (!cancelled) setResult(value)
+    }).catch(failedLoad => {
+      if (!cancelled) { setResult(undefined); setLoadError(failedLoad) }
+    }).finally(() => {
+      if (!cancelled) setFetching(false)
+    })
+    return () => { cancelled = true }
+  }, [projectId, reloadKey])
+
+  const triggers = result ?? []
+
+  const mutate = async (key: string, action: () => Promise<void>): Promise<void> => {
+    if (pendingKey !== undefined) return
+    setPendingKey(key)
+    setActionError(undefined)
+    try {
+      await action()
+    } catch (error) {
+      setActionError(error)
+    } finally {
+      setPendingKey(undefined)
+    }
+  }
+
+  return (
+    <div className="dshd-memory-view">
+      <header className="dshd-memory-heading">
+        <div><h2>{t('automations')}</h2><p>{t('automations.description')}</p></div>
+        <div className="dshd-memory-controls">
+          <select
+            aria-label={t('automations.projectSelectAria')}
+            value={projectId ?? ''}
+            disabled={busy || projects.length === 0}
+            onChange={event => setProjectId(event.currentTarget.value)}
+          >
+            {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+          <button
+            type="button"
+            className="dshd-memory-primary"
+            disabled={busy || fetching || projectId === undefined || onCreateTrigger === undefined || pendingKey !== undefined}
+            onClick={() => setAddOpen(true)}
+          >
+            <PlusIcon size={16} />{t('trigger.add')}
+          </button>
+        </div>
+      </header>
+      {projects.length === 0 ? (
+        <div className="dshd-empty">{t('memory.noProjects')}</div>
+      ) : (
+        <>
+          {loadError !== undefined ? <div className="dshd-error" role="alert">{dashboardErrorMessage(loadError, t)}</div> : null}
+          {actionError !== undefined ? <div className="dshd-error" role="alert">{dashboardErrorMessage(actionError, t)}</div> : null}
+          {triggers.length === 0 && !fetching ? (
+            <div className="dshd-empty">{t('trigger.empty')}</div>
+          ) : null}
+          <div className="dshd-memory-list" role="table" aria-label={t('automations.tableAria')}>
+            {triggers.map(trigger => (
+              <div className="dshd-memory-entry" role="row" key={trigger.id} data-type={trigger.type}>
+                <div className="dshd-memory-main">
+                  <div className="dshd-memory-titleline">
+                    <span className="dshd-memory-kind">{t(`trigger.type.${trigger.type}`)}</span>
+                    <span className={`dshd-trigger-status ${trigger.enabled ? 'enabled' : 'paused'}`}>
+                      {trigger.enabled ? t('trigger.status.enabled') : t('trigger.status.paused')}
+                    </span>
+                  </div>
+                  <div className="dshd-memory-meta">
+                    <span className="dshd-trigger-goal">{trigger.goalTemplate}</span>
+                  </div>
+                  <div className="dshd-memory-meta">
+                    <span>{t('trigger.lastRun')}: {trigger.lastFiredAt !== undefined ? relativeTime(trigger.lastFiredAt, t) : t('trigger.never')}</span>
+                    {trigger.lastRunId !== undefined ? (
+                      <button type="button" className="dshd-memory-source" onClick={() => onOpenRun(trigger.lastRunId!)}>{t('artifact.openRun')}</button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="dshd-memory-actions">
+                  <button
+                    type="button"
+                    disabled={onSetTriggerEnabled === undefined || pendingKey !== undefined}
+                    aria-pressed={trigger.enabled}
+                    onClick={() => { void mutate(`trigger:toggle:${trigger.id}`, async () => {
+                      await onSetTriggerEnabled!(trigger.id, !trigger.enabled)
+                      reload()
+                    }) }}
+                  >
+                    {trigger.enabled ? t('trigger.disable') : t('trigger.enable')}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={onFireTrigger === undefined || pendingKey !== undefined}
+                    onClick={() => { void mutate(`trigger:fire:${trigger.id}`, async () => {
+                      const run = await onFireTrigger!(trigger.id)
+                      if (run !== undefined) onOpenRun(run.id)
+                      reload()
+                    }) }}
+                  >
+                    {t('trigger.runNow')}
+                  </button>
+                  <button
+                    type="button"
+                    className="dshd-danger"
+                    disabled={onDeleteTrigger === undefined || pendingKey !== undefined}
+                    onClick={() => setDeleteTarget(trigger)}
+                  >
+                    {t('trigger.delete')}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      {addOpen && onCreateTrigger !== undefined && projectId !== undefined ? (
+        <AddTriggerDialog
+          projectId={projectId}
+          onClose={() => setAddOpen(false)}
+          onSubmit={async input => {
+            await mutate('trigger:create', async () => {
+              await onCreateTrigger(input)
+              reload()
+            })
+            setAddOpen(false)
+          }}
+        />
+      ) : null}
+      {deleteTarget !== undefined && onDeleteTrigger !== undefined ? (
+        <div className="dshd-modal" role="dialog" aria-modal="true" aria-label={t('trigger.delete')} onKeyDown={(event) => { if (event.key === 'Escape') event.stopPropagation() }}>
+          <div className="dshd-modal-card">
+            <header>
+              <h3>{t('trigger.delete')}</h3>
+              <button type="button" aria-label={t('common.close')} onClick={() => setDeleteTarget(undefined)}><CloseIcon size={16} /></button>
+            </header>
+            <p>{t('trigger.deleteConfirm')}</p>
+            <footer>
+              <button type="button" onClick={() => setDeleteTarget(undefined)}>{t('common.cancel')}</button>
+              <button
+                type="button"
+                className="dshd-primary"
+                disabled={pendingKey !== undefined}
+                aria-busy={pendingKey !== undefined}
+                onClick={() => { void mutate(`trigger:delete:${deleteTarget.id}`, async () => {
+                  await onDeleteTrigger(deleteTarget.id)
+                  setDeleteTarget(undefined)
+                  reload()
+                }) }}
+              >
+                {t('trigger.delete')}
+              </button>
+            </footer>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * Phase 9 (spec §9.2): the Add trigger dialog. The config is credential-free —
+ * a secret is a ref (e.g. a token name), never a value. The per-type config
+ * shape is validated server-side.
+ */
+function AddTriggerDialog({ projectId, onClose, onSubmit }: {
+  readonly projectId: string
+  readonly onClose: () => void
+  readonly onSubmit: (input: TriggerCreateInput) => Promise<void>
+}) {
+  const t = useDashboardTranslation()
+  // `manual` is the implicit runCreate path (never persisted) — excluded from the picker.
+  const [type, setType] = useState<ClientTriggerType>('tracker')
+  const [goalTemplate, setGoalTemplate] = useState('')
+  const [sourceKind, setSourceKind] = useState('')
+  const [states, setStates] = useState('ready')
+  const [scheduleMode, setScheduleMode] = useState<'every' | 'cron'>('every')
+  const [everyMs, setEveryMs] = useState('3600000')
+  const [cron, setCron] = useState('')
+  const [systemEvent, setSystemEvent] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<unknown>()
+
+  const buildConfig = (): Record<string, unknown> => {
+    switch (type) {
+      case 'tracker':
+        return {
+          sourceKind: sourceKind.trim(),
+          readyStates: states.split(',').map(state => state.trim()).filter(state => state !== ''),
+        }
+      case 'schedule':
+        return scheduleMode === 'every'
+          ? { mode: 'every', everyMs: Number(everyMs) }
+          : { mode: 'cron', cron: cron.trim() }
+      case 'system':
+        return { event: systemEvent.trim() }
+      default:
+        return {}
+    }
+  }
+
+  const submit = async (): Promise<void> => {
+    if (submitting) return
+    setSubmitting(true)
+    setError(undefined)
+    try {
+      await onSubmit({
+        projectId,
+        type,
+        config: buildConfig(),
+        goalTemplate: goalTemplate.trim(),
+      })
+    } catch (submitError) {
+      setError(submitError)
+      setSubmitting(false)
+    }
+  }
+
+  const needsTracker = type === 'tracker'
+  const needsSchedule = type === 'schedule'
+  const needsSystem = type === 'system'
+
+  return (
+    <div className="dshd-modal" role="dialog" aria-modal="true" aria-label={t('trigger.add')} onKeyDown={(event) => { if (event.key === 'Escape') event.stopPropagation() }}>
+      <div className="dshd-modal-card">
+        <header>
+          <h3>{t('trigger.add')}</h3>
+          <button type="button" aria-label={t('common.close')} onClick={onClose}><CloseIcon size={16} /></button>
+        </header>
+        {error !== undefined ? (
+          <div className="dshd-error" role="alert">{dashboardErrorMessage(error, t)}</div>
+        ) : null}
+        <label>
+          {t('trigger.addType')}
+          <select value={type} onChange={event => setType(event.currentTarget.value as ClientTriggerType)}>
+            {(['tracker', 'schedule', 'webhook', 'repository-event', 'pr-event', 'system'] as readonly ClientTriggerType[]).map(candidate => (
+              <option key={candidate} value={candidate}>{t(`trigger.type.${candidate}`)}</option>
+            ))}
+          </select>
+        </label>
+        {needsTracker ? (
+          <>
+            <label>
+              {t('trigger.config.sourceKind')}
+              <input value={sourceKind} onChange={event => setSourceKind(event.currentTarget.value)} placeholder="linear" />
+            </label>
+            <label>
+              {t('trigger.config.states')}
+              <input value={states} onChange={event => setStates(event.currentTarget.value)} placeholder="ready" />
+            </label>
+          </>
+        ) : null}
+        {needsSchedule ? (
+          <>
+            <label>
+              {t('trigger.config.mode')}
+              <select value={scheduleMode} onChange={event => setScheduleMode(event.currentTarget.value as 'every' | 'cron')}>
+                <option value="every">{t('trigger.config.every')}</option>
+                <option value="cron">{t('trigger.config.cron')}</option>
+              </select>
+            </label>
+            {scheduleMode === 'every' ? (
+              <label>
+                {t('trigger.config.everyMs')}
+                <input value={everyMs} onChange={event => setEveryMs(event.currentTarget.value)} inputMode="numeric" />
+              </label>
+            ) : (
+              <label>
+                {t('trigger.config.cron')}
+                <input value={cron} onChange={event => setCron(event.currentTarget.value)} placeholder="*/5 * * * *" />
+              </label>
+            )}
+          </>
+        ) : null}
+        {needsSystem ? (
+          <label>
+            {t('trigger.config.event')}
+            <input value={systemEvent} onChange={event => setSystemEvent(event.currentTarget.value)} placeholder="dsh-projects/run/completed" />
+          </label>
+        ) : null}
+        <label>
+          {t('trigger.addGoal')}
+          <textarea value={goalTemplate} onChange={event => setGoalTemplate(event.currentTarget.value)} rows={3} />
+        </label>
+        <footer>
+          <button type="button" onClick={onClose}>{t('trigger.addCancel')}</button>
+          <button type="button" className="dshd-primary" disabled={submitting || goalTemplate.trim() === ''} aria-busy={submitting} onClick={() => { void submit() }}>
+            <span>{submitting ? t('memory.saving') : t('trigger.addSubmit')}</span>
           </button>
         </footer>
       </div>

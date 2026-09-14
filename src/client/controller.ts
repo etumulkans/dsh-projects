@@ -161,6 +161,44 @@ export interface ArtifactView {
   readonly createdAt: string
 }
 
+/** Phase 9: the seven trigger types (master spec §27). `manual` is the implicit runCreate path. */
+export const CLIENT_TRIGGER_TYPES = [
+  'manual', 'tracker', 'schedule', 'webhook', 'repository-event', 'pr-event', 'system',
+] as const
+export type ClientTriggerType = (typeof CLIENT_TRIGGER_TYPES)[number]
+
+/** Phase 9: client-side shape of a durable trigger rule (spec §3.1 wire format). */
+export interface TriggerView {
+  readonly id: string
+  readonly projectId: string
+  readonly type: ClientTriggerType
+  readonly enabled: boolean
+  /** The credential-free config projection (a secret is a ref, never a value). */
+  readonly config: Record<string, unknown>
+  readonly goalTemplate: string
+  readonly approvalMode?: string
+  readonly lastFiredAt?: string
+  readonly lastRunId?: string
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+/** Phase 9: client-side `triggerCreate` input. */
+export interface TriggerCreateInput {
+  readonly projectId: string
+  readonly type: string
+  readonly config: Record<string, unknown>
+  readonly goalTemplate: string
+  readonly approvalMode?: string
+}
+
+/** Phase 9: client-side `triggerUpdate` patch (a partial). */
+export interface TriggerUpdateInput {
+  readonly goalTemplate?: string
+  readonly config?: Record<string, unknown>
+  readonly approvalMode?: string
+}
+
 export interface ArtifactListPayload {
   readonly artifacts: readonly ArtifactView[]
 }
@@ -238,6 +276,20 @@ export interface DashboardDataPort {
   loadArtifact(id: string): Promise<ArtifactView>
   /** Phase 8: (re)generate the run's final report on demand (terminal runs only). */
   generateReport(runId: string): Promise<ArtifactView>
+  /** Phase 9: fetch a project's triggers (newest first). */
+  loadTriggers(projectId: string): Promise<readonly TriggerView[]>
+  /** Phase 9: persist a new trigger rule. */
+  createTrigger(input: TriggerCreateInput): Promise<TriggerView>
+  /** Phase 9: fetch one trigger by id (the detail view). */
+  loadTrigger(id: string): Promise<TriggerView>
+  /** Phase 9: update a trigger's goal template / config / approval mode. */
+  updateTrigger(id: string, patch: TriggerUpdateInput): Promise<TriggerView>
+  /** Phase 9: toggle a trigger's enabled flag. */
+  setTriggerEnabled(id: string, enabled: boolean): Promise<TriggerView>
+  /** Phase 9: delete a trigger (its fire records are kept). */
+  deleteTrigger(id: string): Promise<void>
+  /** Phase 9: fire a trigger (the "Run now" affordance when `event` is absent). */
+  fireTrigger(id: string, event?: { readonly sourceEventKey: string; readonly data?: Record<string, string> }): Promise<{ readonly id: string; readonly source: string } | undefined>
 }
 
 /** Root overlay visibility shared by the sidebar trigger and shell-overlay entry. */
@@ -616,6 +668,100 @@ export class DashboardDataController implements DashboardDataPort {
     }
   }
 
+  async loadTriggers(projectId: string): Promise<readonly TriggerView[]> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'triggerList', { projectId }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseTriggerList(result.value).triggers
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async createTrigger(input: TriggerCreateInput): Promise<TriggerView> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'triggerCreate', input) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseTrigger(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async loadTrigger(id: string): Promise<TriggerView> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'triggerGet', { id }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseTrigger(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async updateTrigger(id: string, patch: TriggerUpdateInput): Promise<TriggerView> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'triggerUpdate', { id, ...patch }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseTrigger(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async setTriggerEnabled(id: string, enabled: boolean): Promise<TriggerView> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'triggerSetEnabled', { id, enabled }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseTrigger(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async deleteTrigger(id: string): Promise<void> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'triggerDelete', { id }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async fireTrigger(id: string, event?: { readonly sourceEventKey: string; readonly data?: Record<string, string> }): Promise<{ readonly id: string; readonly source: string } | undefined> {
+    this.activeRequests += 1
+    try {
+      const payload: Record<string, unknown> = { id }
+      if (event !== undefined) payload.event = event
+      const result = await this.rpc.call('/dsh-dashboard', 'triggerFire', payload) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      if (result.value === null || result.value === undefined) return undefined
+      const run = result.value as Record<string, unknown>
+      return { id: String(run['id'] ?? ''), source: String(run['source'] ?? 'manual') }
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
   private async readState(): Promise<void> {
     await this.call('state', {}, false)
   }
@@ -782,6 +928,45 @@ function isArtifactView(value: unknown): boolean {
     && (artifact.url === undefined || typeof artifact.url === 'string')
     && (artifact.metadata === undefined || (typeof artifact.metadata === 'object' && artifact.metadata !== null && !Array.isArray(artifact.metadata)))
     && typeof artifact.createdAt === 'string'
+}
+
+interface TriggerListPayload {
+  readonly triggers: readonly TriggerView[]
+}
+
+function parseTriggerList(value: unknown): TriggerListPayload {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported trigger list data')
+  }
+  const list = value as { triggers?: unknown }
+  if (!Array.isArray(list.triggers) || !list.triggers.every(isTriggerView)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported trigger list data')
+  }
+  return value as TriggerListPayload
+}
+
+function parseTrigger(value: unknown): TriggerView {
+  if (!isTriggerView(value)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported trigger data')
+  }
+  return value as TriggerView
+}
+
+function isTriggerView(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const trigger = value as Record<string, unknown>
+  return typeof trigger.id === 'string'
+    && typeof trigger.projectId === 'string'
+    && typeof trigger.type === 'string'
+    && (CLIENT_TRIGGER_TYPES as readonly string[]).includes(trigger.type)
+    && typeof trigger.enabled === 'boolean'
+    && (trigger.config === undefined || (typeof trigger.config === 'object' && trigger.config !== null && !Array.isArray(trigger.config)))
+    && typeof trigger.goalTemplate === 'string'
+    && (trigger.approvalMode === undefined || typeof trigger.approvalMode === 'string')
+    && (trigger.lastFiredAt === undefined || typeof trigger.lastFiredAt === 'string')
+    && (trigger.lastRunId === undefined || typeof trigger.lastRunId === 'string')
+    && typeof trigger.createdAt === 'string'
+    && typeof trigger.updatedAt === 'string'
 }
 
 function parseRunPlan(value: unknown): RunPlanRecord {

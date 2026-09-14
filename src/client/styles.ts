@@ -803,6 +803,12 @@ export const DASHBOARD_STYLES = String.raw`
 .dshd-memory-actions button { min-width: 92px; min-height: 26px; padding: 0 10px; border: 1px solid #ccd5e3; border-radius: 6px; background: #fff; color: #33415a; font-size: 11px; white-space: nowrap; }
 .dshd-memory-actions button:hover:not(:disabled) { border-color: #aeb9ca; background: #f9fbfe; }
 .dshd-memory-pinned-toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: #33415a; }
+.dshd-trigger-status { flex: 0 0 auto; padding: 1px 8px; border-radius: 999px; font-size: 10px; font-weight: 620; }
+.dshd-trigger-status.enabled { background: #e6f4ea; color: #1d7a3d; }
+.dshd-trigger-status.paused { background: #fbf0e0; color: #875b00; }
+.dshd-trigger-goal { color: #33415a; font-size: 12px; line-height: 1.55; }
+.dshd-memory-actions .dshd-danger { color: #c52b3a; border-color: #e5b6bc; }
+.dshd-memory-actions .dshd-danger:hover:not(:disabled) { background: #fff2f4; border-color: #d68f99; }
 `
 
 /** Install once per browser plugin lifetime. */

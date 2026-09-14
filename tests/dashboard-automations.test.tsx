@@ -1,0 +1,203 @@
+// @vitest-environment jsdom
+
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import type { ComponentProps } from 'react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { DashboardSurface } from '../src/client/Dashboard.tsx'
+import { DashboardI18nProvider, createDashboardTranslator } from '../src/client/i18n.tsx'
+import type { TriggerCreateInput, TriggerView } from '../src/client/controller.ts'
+import { fixtureSnapshot } from '../src/client/fixture.ts'
+
+afterEach(cleanup)
+
+const FIRST_PROJECT = '08b8e62d-5a7c-4a3a-a582-b63278347db0'
+
+function trigger(overrides: Partial<TriggerView> = {}): TriggerView {
+  return {
+    id: 'trigger-1',
+    projectId: FIRST_PROJECT,
+    type: 'tracker',
+    enabled: true,
+    config: { sourceKind: 'linear', readyStates: ['ready'] },
+    goalTemplate: 'Fix {{issue.key}}',
+    createdAt: '2026-08-14T02:30:00.000Z',
+    updatedAt: '2026-08-14T02:30:00.000Z',
+    ...overrides,
+  }
+}
+
+function renderAutomationsDashboard(
+  overrides: Partial<ComponentProps<typeof DashboardSurface>> = {},
+): void {
+  render(
+    <DashboardSurface
+      snapshot={fixtureSnapshot}
+      onRefresh={async () => {}}
+      onPause={async () => {}}
+      onStop={async () => {}}
+      onCreateTask={async () => {}}
+      onUpdateTask={async () => {}}
+      onDeleteTask={async () => {}}
+      onSwitchProject={async () => {}}
+      onAddDiscoveryRoot={async () => {}}
+      onRemoveDiscoveryRoot={async () => {}}
+      onScanProjects={async () => ({ root: fixtureSnapshot.catalog.discoveryRoots[0]!, candidates: [], truncated: false })}
+      onRegisterProjectCandidate={async () => {}}
+      onRegisterProject={async () => {}}
+      onOpenSession={() => {}}
+      onLoadTriggers={async () => [trigger()]}
+      onCreateTrigger={async (input: TriggerCreateInput) => trigger({ id: 'trigger-new', type: input.type as TriggerView['type'], goalTemplate: input.goalTemplate })}
+      onSetTriggerEnabled={async (id: string, enabled: boolean) => trigger({ id, enabled })}
+      onDeleteTrigger={async () => {}}
+      onFireTrigger={async () => ({ id: 'run-fired', source: 'tracker' })}
+      {...overrides}
+    />,
+  )
+}
+
+describe('Dashboard Automations tab (Phase 9, spec §10.5)', () => {
+  it('renders the automations tab between artifacts and configuration in zh', () => {
+    renderAutomationsDashboard()
+    const tab = screen.getByRole('button', { name: '自动化' })
+    expect(tab).toBeTruthy()
+    const tabs = Array.from(document.querySelectorAll('button')).map(button => button.textContent)
+    expect(tabs.indexOf('自动化')).toBeGreaterThan(tabs.indexOf('项目产物'))
+    expect(tabs.indexOf('自动化')).toBeLessThan(tabs.indexOf('配置'))
+  })
+
+  it('renders the automations tab label in English under the en locale', () => {
+    render(
+      <DashboardI18nProvider t={createDashboardTranslator('en')}>
+        <DashboardSurface
+          snapshot={fixtureSnapshot}
+          onRefresh={async () => {}}
+          onPause={async () => {}}
+          onStop={async () => {}}
+          onCreateTask={async () => {}}
+          onUpdateTask={async () => {}}
+          onDeleteTask={async () => {}}
+          onSwitchProject={async () => {}}
+          onAddDiscoveryRoot={async () => {}}
+          onRemoveDiscoveryRoot={async () => {}}
+          onScanProjects={async () => ({ root: fixtureSnapshot.catalog.discoveryRoots[0]!, candidates: [], truncated: false })}
+          onRegisterProjectCandidate={async () => {}}
+          onRegisterProject={async () => {}}
+          onOpenSession={() => {}}
+        />
+      </DashboardI18nProvider>,
+    )
+    expect(screen.getByRole('button', { name: 'Automations' })).toBeTruthy()
+  })
+
+  it('fetches the first project on demand when the tab opens', async () => {
+    const onLoadTriggers = vi.fn(async () => [trigger()])
+    renderAutomationsDashboard({ onLoadTriggers })
+    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    await waitFor(() => expect(onLoadTriggers).toHaveBeenCalledTimes(1))
+    expect(onLoadTriggers).toHaveBeenCalledWith(FIRST_PROJECT)
+  })
+
+  it('shows the empty marker when a project has no triggers', async () => {
+    renderAutomationsDashboard({ onLoadTriggers: async () => [] })
+    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    await waitFor(() => expect(screen.getByText('暂无触发器')).toBeTruthy())
+  })
+
+  it('lists a trigger with its type, status, and goal template', async () => {
+    renderAutomationsDashboard()
+    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    await waitFor(() => expect(screen.getByText('Fix {{issue.key}}')).toBeTruthy())
+    // The type badge + enabled status.
+    expect(screen.getByText('跟踪源')).toBeTruthy()
+    expect(screen.getByText('已启用')).toBeTruthy()
+  })
+
+  it('toggles a trigger enabled/disabled with busy gating', async () => {
+    const onSetTriggerEnabled = vi.fn(async (_id: string, enabled: boolean) => trigger({ id: 'trigger-1', enabled }))
+    renderAutomationsDashboard({ onSetTriggerEnabled, onLoadTriggers: async () => [trigger({ enabled: true })] })
+    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    await waitFor(() => expect(screen.getByText('Fix {{issue.key}}')).toBeTruthy())
+
+    // Scope to the trigger row (the global pause control is also labelled "暂停").
+    const row = document.querySelector<HTMLElement>('.dshd-memory-entry[data-type="tracker"]')!
+    const disableButton = within(row).getByRole('button', { name: '暂停' })
+    fireEvent.click(disableButton)
+    await waitFor(() => expect(onSetTriggerEnabled).toHaveBeenCalledWith('trigger-1', false))
+  })
+
+  it('fires a trigger (Run now) and opens the resulting run', async () => {
+    const onFireTrigger = vi.fn(async () => ({ id: 'run-fired', source: 'tracker' }))
+    const onOpenRun = vi.fn()
+    // The DashboardSurface wires onOpenRun internally (setSelectedRunId), so we
+    // assert the fire dispatch here; the run navigation is a snapshot update.
+    renderAutomationsDashboard({ onFireTrigger, onLoadTriggers: async () => [trigger()] })
+    void onOpenRun
+    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    await waitFor(() => expect(screen.getByText('Fix {{issue.key}}')).toBeTruthy())
+
+    const runNow = screen.getByRole('button', { name: '立即运行' })
+    fireEvent.click(runNow)
+    await waitFor(() => expect(onFireTrigger).toHaveBeenCalledWith('trigger-1'))
+  })
+
+  it('opens the Add trigger dialog with the per-type fields (tracker default)', async () => {
+    renderAutomationsDashboard()
+    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    await waitFor(() => expect(screen.getByText('Fix {{issue.key}}')).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: '添加触发器' }))
+    await waitFor(() => expect(screen.getByRole('dialog', { name: '添加触发器' })).toBeTruthy())
+
+    // The tracker type is the default — its config fields are shown.
+    const dialog = screen.getByRole('dialog', { name: '添加触发器' })
+    expect(within(dialog).getByText('跟踪源类型')).toBeTruthy()
+    expect(within(dialog).getByText('状态（逗号分隔）')).toBeTruthy()
+    // The submit is disabled until a goal template is provided.
+    const submit = within(dialog).getByRole('button', { name: '添加' })
+    expect((submit as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('submits a tracker trigger with the rendered config (readyStates) + goal template', async () => {
+    const onCreateTrigger = vi.fn(async (input: TriggerCreateInput) => trigger({ id: 'trigger-new', type: input.type as TriggerView['type'], goalTemplate: input.goalTemplate }))
+    renderAutomationsDashboard({ onCreateTrigger, onLoadTriggers: async () => [] })
+    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    await waitFor(() => expect(screen.getByText('暂无触发器')).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: '添加触发器' }))
+    await waitFor(() => expect(screen.getByRole('dialog', { name: '添加触发器' })).toBeTruthy())
+    const dialog = screen.getByRole('dialog', { name: '添加触发器' })
+
+    // Fill the tracker sourceKind (first textbox) + the goal template (the textarea).
+    const inputs = within(dialog).getAllByRole('textbox')
+    fireEvent.change(inputs[0]!, { target: { value: 'linear' } })
+    const textarea = within(dialog).getByRole('textbox', { name: /目标模板/ })
+    fireEvent.change(textarea, { target: { value: 'Fix {{issue.key}}' } })
+
+    const submit = within(dialog).getByRole('button', { name: '添加' })
+    expect((submit as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(submit)
+    await waitFor(() => expect(onCreateTrigger).toHaveBeenCalledTimes(1))
+    expect(onCreateTrigger).toHaveBeenCalledWith({
+      projectId: FIRST_PROJECT,
+      type: 'tracker',
+      config: { sourceKind: 'linear', readyStates: ['ready'] },
+      goalTemplate: 'Fix {{issue.key}}',
+    })
+  })
+
+  it('deletes a trigger through the confirm modal', async () => {
+    const onDeleteTrigger = vi.fn(async () => undefined)
+    renderAutomationsDashboard({ onDeleteTrigger, onLoadTriggers: async () => [trigger()] })
+    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    await waitFor(() => expect(screen.getByText('Fix {{issue.key}}')).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: '删除' }))
+    await waitFor(() => expect(screen.getByRole('dialog', { name: '删除' })).toBeTruthy())
+    // The confirm modal shows the confirmation copy + a confirm button.
+    const dialog = screen.getByRole('dialog', { name: '删除' })
+    expect(within(dialog).getByText('删除此触发器？其触发记录将保留。')).toBeTruthy()
+    const confirm = within(dialog).getAllByRole('button', { name: '删除' }).at(-1)!
+    fireEvent.click(confirm)
+    await waitFor(() => expect(onDeleteTrigger).toHaveBeenCalledWith('trigger-1'))
+  })
+})

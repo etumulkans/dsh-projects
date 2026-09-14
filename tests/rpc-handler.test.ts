@@ -10,6 +10,7 @@ import type { ProjectTaskService } from '../src/tasks/task-service.ts'
 import type { ProjectCatalogSelection } from '../src/catalog/types.ts'
 import type { ApprovalService } from '../src/approvals/approval-service.ts'
 import type { ProjectArtifactService } from '../src/artifacts/artifact-service.ts'
+import type { ProjectTriggerService } from '../src/triggers/trigger-service.ts'
 
 describe('Dashboard RPC project switching', () => {
   it('loads a validated timeline page without refreshing the Dashboard snapshot', async () => {
@@ -1319,5 +1320,187 @@ describe('Dashboard RPC Artifacts (Phase 8, spec §11.4)', () => {
     const bare = await handleDashboardRpc(runtime, 'runDetail', { runId: RUN_ID }, signal(), Promise.resolve(), runs)
     expect(bare).toMatchObject({ ok: true, value: { run: { id: RUN_ID } } })
     expect((bare as { value: Record<string, unknown> }).value.artifacts).toBeUndefined()
+  })
+})
+
+describe('trigger endpoints (Phase 9, spec §10.4)', () => {
+  const signal = () => new AbortController().signal
+  const RUN_ID = '123e4567-e89b-42d3-a456-426614174000'
+  const TRIGGER_ID = '123e4567-e89b-42d3-a456-426614174001'
+  const NO_SERVICES = [undefined, undefined, undefined, undefined, undefined, undefined] as const
+
+  function fakeTriggerService(overrides: Record<string, unknown> = {}) {
+    return {
+      list: vi.fn(() => []),
+      create: vi.fn(async (input: Record<string, unknown>) => ({ id: TRIGGER_ID, ...input })),
+      get: vi.fn(() => ({ id: TRIGGER_ID })),
+      update: vi.fn(async (id: string, patch: Record<string, unknown>) => ({ id, ...patch })),
+      setEnabled: vi.fn(async (id: string, enabled: boolean) => ({ id, enabled })),
+      delete: vi.fn(async () => undefined),
+      fire: vi.fn(async () => ({ id: RUN_ID, sourceRef: TRIGGER_ID })),
+      ...overrides,
+    } as unknown as ProjectTriggerService
+  }
+
+  it('triggerList requires a non-empty projectId and returns the project triggers', async () => {
+    const list = vi.fn(() => [{ id: TRIGGER_ID }])
+    const triggers = fakeTriggerService({ list })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const ok = await handleDashboardRpc(runtime, 'triggerList', { projectId: 'p1' }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers)
+    expect(ok).toMatchObject({ ok: true, value: { triggers: [{ id: TRIGGER_ID }] } })
+    expect(list).toHaveBeenCalledWith('p1')
+
+    const missing = await handleDashboardRpc(runtime, 'triggerList', {}, signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers)
+    expect(missing).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
+
+  it('triggerCreate dispatches a validated input and surfaces the service rejections', async () => {
+    const create = vi.fn(async (input: Record<string, unknown>) => ({ id: TRIGGER_ID, ...input }))
+    const triggers = fakeTriggerService({ create })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const ok = await handleDashboardRpc(
+      runtime, 'triggerCreate',
+      { projectId: 'p1', type: 'schedule', goalTemplate: 'Nightly', config: { everyMs: 1000 } },
+      signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers,
+    )
+    expect(ok).toMatchObject({ ok: true, value: { id: TRIGGER_ID, type: 'schedule' } })
+    expect(create).toHaveBeenCalledWith({ projectId: 'p1', type: 'schedule', goalTemplate: 'Nightly', config: { everyMs: 1000 } })
+
+    // A malformed payload (missing goalTemplate) is a structured bad-request.
+    const bad = await handleDashboardRpc(
+      runtime, 'triggerCreate', { projectId: 'p1', type: 'schedule', config: { everyMs: 1000 } },
+      signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers,
+    )
+    expect(bad).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    // A service rejection (e.g. a manual type) surfaces the structured error.
+    const manual = fakeTriggerService({ create: vi.fn(async () => { throw new DashboardDomainError('trigger.manualReserved', 'manual is implicit', { reason: 'manual-reserved' }) }) })
+    const rejected = await handleDashboardRpc(
+      runtime, 'triggerCreate', { projectId: 'p1', type: 'manual', goalTemplate: 'x', config: {} },
+      signal(), Promise.resolve(), undefined, ...NO_SERVICES, manual,
+    )
+    expect(rejected).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (rejected.ok === false) {
+      expect(decodeDashboardError(rejected.error.message)).toMatchObject({ dashboardCode: 'trigger.manualReserved', params: { reason: 'manual-reserved' } })
+    }
+  })
+
+  it('triggerGet requires a uuid id and surfaces trigger.unknown for a missing record', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const found = await handleDashboardRpc(runtime, 'triggerGet', { id: TRIGGER_ID }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, fakeTriggerService())
+    expect(found).toMatchObject({ ok: true, value: { id: TRIGGER_ID } })
+
+    const notUuid = await handleDashboardRpc(runtime, 'triggerGet', { id: 'nope' }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, fakeTriggerService())
+    expect(notUuid).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+
+    const unknown = fakeTriggerService({ get: vi.fn(() => undefined) })
+    const missing = await handleDashboardRpc(runtime, 'triggerGet', { id: TRIGGER_ID }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, unknown)
+    expect(missing).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (missing.ok === false) {
+      expect(decodeDashboardError(missing.error.message)).toMatchObject({ dashboardCode: 'trigger.unknown', params: { id: TRIGGER_ID } })
+    }
+  })
+
+  it('triggerUpdate dispatches a validated patch and rejects an empty patch', async () => {
+    const update = vi.fn(async (id: string, patch: Record<string, unknown>) => ({ id, ...patch }))
+    const triggers = fakeTriggerService({ update })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const ok = await handleDashboardRpc(runtime, 'triggerUpdate', { id: TRIGGER_ID, goalTemplate: 'new' }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers)
+    expect(ok).toMatchObject({ ok: true, value: { id: TRIGGER_ID, goalTemplate: 'new' } })
+    expect(update).toHaveBeenCalledWith(TRIGGER_ID, { goalTemplate: 'new' })
+
+    // An empty patch (no updatable field) is a structured bad-request.
+    const empty = await handleDashboardRpc(runtime, 'triggerUpdate', { id: TRIGGER_ID }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers)
+    expect(empty).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
+
+  it('triggerSetEnabled dispatches the uuid id + boolean enabled (defaulting to false)', async () => {
+    const setEnabled = vi.fn(async (id: string, enabled: boolean) => ({ id, enabled }))
+    const triggers = fakeTriggerService({ setEnabled })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const disabled = await handleDashboardRpc(runtime, 'triggerSetEnabled', { id: TRIGGER_ID, enabled: false }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers)
+    expect(disabled).toMatchObject({ ok: true, value: { id: TRIGGER_ID, enabled: false } })
+    expect(setEnabled).toHaveBeenCalledWith(TRIGGER_ID, false)
+
+    // A missing `enabled` defaults to false.
+    const defaulted = await handleDashboardRpc(runtime, 'triggerSetEnabled', { id: TRIGGER_ID }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers)
+    expect(defaulted).toMatchObject({ ok: true, value: { id: TRIGGER_ID, enabled: false } })
+    expect(setEnabled).toHaveBeenLastCalledWith(TRIGGER_ID, false)
+  })
+
+  it('triggerDelete requires a uuid id and returns ok', async () => {
+    const del = vi.fn(async () => undefined)
+    const triggers = fakeTriggerService({ delete: del })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const ok = await handleDashboardRpc(runtime, 'triggerDelete', { id: TRIGGER_ID }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers)
+    expect(ok).toMatchObject({ ok: true, value: { ok: true } })
+    expect(del).toHaveBeenCalledWith(TRIGGER_ID)
+
+    const notUuid = await handleDashboardRpc(runtime, 'triggerDelete', { id: 'nope' }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers)
+    expect(notUuid).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
+
+  it('triggerFire dispatches the uuid id + an optional event (synthesizing a manual fire when absent)', async () => {
+    const fire = vi.fn(async (_id: string, _event?: unknown) => ({ id: RUN_ID, sourceRef: TRIGGER_ID }))
+    const triggers = fakeTriggerService({ fire })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    // An explicit event is passed through verbatim.
+    const withEvent = await handleDashboardRpc(
+      runtime, 'triggerFire', { id: TRIGGER_ID, event: { sourceEventKey: 'linear:LI-1:ready', data: { 'issue.key': 'LI-1' } } },
+      signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers,
+    )
+    expect(withEvent).toMatchObject({ ok: true, value: { id: RUN_ID } })
+    expect(fire).toHaveBeenCalledWith(TRIGGER_ID, { sourceEventKey: 'linear:LI-1:ready', data: { 'issue.key': 'LI-1' } })
+
+    // An absent event synthesizes a manual fire (a `manual:<uuid>` key).
+    const manual = await handleDashboardRpc(runtime, 'triggerFire', { id: TRIGGER_ID }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers)
+    expect(manual).toMatchObject({ ok: true, value: { id: RUN_ID } })
+    const lastCall = fire.mock.calls.at(-1)![1] as { sourceEventKey: string; data: Record<string, string> }
+    expect(lastCall.sourceEventKey).toMatch(/^manual:/)
+    expect(lastCall.data).toEqual({})
+  })
+
+  it('the trigger endpoints are unavailable without a Trigger service', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    for (const [endpoint, payload] of [
+      ['triggerList', { projectId: 'p1' }],
+      ['triggerCreate', { projectId: 'p1', type: 'schedule', goalTemplate: 'g', config: { everyMs: 1000 } }],
+      ['triggerGet', { id: TRIGGER_ID }],
+      ['triggerUpdate', { id: TRIGGER_ID, goalTemplate: 'g' }],
+      ['triggerSetEnabled', { id: TRIGGER_ID, enabled: false }],
+      ['triggerDelete', { id: TRIGGER_ID }],
+      ['triggerFire', { id: TRIGGER_ID }],
+    ] as const) {
+      const result = await handleDashboardRpc(runtime, endpoint, payload, signal(), Promise.resolve())
+      expect(result, endpoint).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('not mounted') } })
+    }
+  })
+
+  it('runDetail attaches the originating trigger (resolved from sourceRef) when the Trigger service is mounted', async () => {
+    const runDetail = vi.fn(async () => ({ run: { id: RUN_ID, sourceRef: TRIGGER_ID }, events: [], truncated: false }))
+    const runs = fakeRunService({ runDetail })
+    const get = vi.fn(() => ({ id: TRIGGER_ID, type: 'tracker' }))
+    const triggers = fakeTriggerService({ get })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const withTrigger = await handleDashboardRpc(
+      runtime, 'runDetail', { runId: RUN_ID }, signal(), Promise.resolve(), runs, undefined, undefined, undefined, undefined, undefined, undefined, triggers,
+    )
+    expect(withTrigger).toMatchObject({ ok: true, value: { run: { id: RUN_ID }, trigger: { id: TRIGGER_ID, type: 'tracker' } } })
+    expect(get).toHaveBeenCalledWith(TRIGGER_ID)
+
+    // A run without a sourceRef does not attach a trigger.
+    const bare = await handleDashboardRpc(
+      runtime, 'runDetail', { runId: RUN_ID }, signal(), Promise.resolve(), fakeRunService({ runDetail: vi.fn(async () => ({ run: { id: RUN_ID }, events: [], truncated: false })) }),
+    )
+    expect(bare).toMatchObject({ ok: true, value: { run: { id: RUN_ID } } })
+    expect((bare as { value: Record<string, unknown> }).value.trigger).toBeUndefined()
   })
 })

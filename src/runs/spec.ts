@@ -14,6 +14,8 @@ import { projectApprovalRecordSchema } from '../approvals/spec.ts'
 import type { ApprovalId, ApprovalRequestRecord } from '../approvals/types.ts'
 import { projectArtifactRecordSchema } from '../artifacts/spec.ts'
 import type { ArtifactId, ProjectArtifactRecord } from '../artifacts/types.ts'
+import { projectTriggerRecordSchema, triggerFireRecordSchema } from '../triggers/spec.ts'
+import type { ProjectTriggerRecord, TriggerFireRecord, TriggerId } from '../triggers/types.ts'
 import type { ProjectRunEventRecord, ProjectRunRecord, RunBudget, RunEventId, RunId } from './types.ts'
 
 // Re-exported for existing importers (the schema lives in `tasks/spec.ts` so
@@ -110,6 +112,8 @@ export const RUN_EVENT_TYPES = [
   'artifact.created',
   // Additive (Phase 8): final-report generation failure (spec §6.5).
   'run.report.failed',
+  // Additive (Phase 9): a trigger created a run (spec §3.4).
+  'trigger.fired',
 ] as const satisfies readonly ProjectRunEventRecord['type'][]
 
 export const projectRunEventRecordSchema = z.object({
@@ -142,5 +146,9 @@ export const dshProjectsDomainSpec = defineDomain({
     project_approvals: domainTable<ApprovalId, ApprovalRequestRecord>(projectApprovalRecordSchema),
     // Additive (Phase 8): durable run artifacts (master spec §26, spec §3.1).
     project_artifacts: domainTable<ArtifactId, ProjectArtifactRecord>(projectArtifactRecordSchema),
+    // Additive (Phase 9): durable trigger rules (master spec §27, spec §3.1).
+    project_triggers: domainTable<TriggerId, ProjectTriggerRecord>(projectTriggerRecordSchema),
+    // Additive (Phase 9): the trigger idempotency dedupe records (spec §4.2).
+    trigger_fires: domainTable<string, TriggerFireRecord>(triggerFireRecordSchema),
   },
 })

@@ -34,6 +34,8 @@ import type { PlanApprovalEvent } from './approvals/types.ts'
 import { HarnessMemoryDistillationDriver } from './memory/distillation.ts'
 import { ProjectMemoryService } from './memory/memory-service.ts'
 import { ProjectArtifactService } from './artifacts/artifact-service.ts'
+import { ProjectTriggerService } from './triggers/trigger-service.ts'
+import { PUSH_ADAPTERS } from './triggers/adapters/index.ts'
 import { LocalTaskWorker } from './tasks/local-adapter.ts'
 import { TaskWorktreeManager } from './tasks/git-workspace.ts'
 import { resolveTeamTaskWorker } from './tasks/team-adapter.ts'
@@ -52,6 +54,9 @@ export type { DashboardSnapshot, IssueDetailView } from './runtime/types.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'dsh-dashboard'
+
+/** Phase 9: the trigger poll tick cadence (spec §5.6) — drives the pull-based adapters. */
+const TRIGGER_POLL_INTERVAL_MS = 30_000
 
 /** Harness-native capabilities required by the Web bundle. */
 export const inject = [
@@ -158,6 +163,12 @@ export function apply(ctx: Context, config: PluginConfig): void {
   })
   const coordinator = new CoordinatorService(ctx, catalog, runService, planService, agentProfile, undefined, undefined, memoryService)
   const sourceRegistry = new TaskSourceRegistry(ctx)
+  // Phase 9 (spec §5/§9): the Trigger service borrows the shared domain tables
+  // (the sibling-service pattern); it starts after the Run service and stops
+  // before it. The pull-based adapters (tracker + schedule) are driven by a
+  // periodic poll; the push-based adapters (webhook + repository-event +
+  // pr-event + system) register `ctx.on` listeners.
+  const triggerService = new ProjectTriggerService(ctx, catalog, runService, sourceRegistry)
   const runner = new HarnessAgentRunner(ctx, {
     permissionPreset: agentProfile.permissionPreset,
     ...(agentProfile.agentPreset === undefined ? {} : { agentPreset: agentProfile.agentPreset }),
@@ -213,6 +224,10 @@ export function apply(ctx: Context, config: PluginConfig): void {
     memoryService.start()
     approvalService.start()
     artifactService.start()
+    // Phase 9: start the Trigger service (after the Run service) and register
+    // the push-based adapters (their `ctx.on` listeners are wired here).
+    triggerService.start()
+    for (const adapter of PUSH_ADAPTERS) triggerService.registerAdapter(adapter)
     planService.start()
     coordinator.start()
     taskService.start()
@@ -221,7 +236,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
   ctx.connection.rpc.handle(
     '/dsh-dashboard',
-    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup, runService, planService, coordinator, taskService, memoryService, approvalService, artifactService),
+    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup, runService, planService, coordinator, taskService, memoryService, approvalService, artifactService, triggerService),
     { authority: 'trusted-host' },
   )
 
@@ -229,9 +244,23 @@ export function apply(ctx: Context, config: PluginConfig): void {
     void startup.catch((error: unknown) => {
       ctx.logger.error('dsh-dashboard: runtime failed to start: %s', error instanceof Error ? error.message : String(error))
     })
+    // Phase 9 (spec §5.6): the lightweight poll tick drives the pull-based
+    // adapters (tracker + schedule). It starts once the services are up and is
+    // cleared on teardown. A failed poll never tears down the tick (it logs and
+    // retries on the next beat).
+    let pollTimer: ReturnType<typeof setInterval> | undefined
+    void startup.then(() => {
+      if (disposed || pollTimer !== undefined) return
+      pollTimer = setInterval(() => {
+        void triggerService.pollDueTriggers().catch((error: unknown) => {
+          ctx.logger.warn('dsh-dashboard: trigger poll failed: %s', error instanceof Error ? error.message : String(error))
+        })
+      }, TRIGGER_POLL_INTERVAL_MS)
+    })
     return async () => {
       disposed = true
       await startup.catch(() => undefined)
+      if (pollTimer !== undefined) clearInterval(pollTimer)
       await runtime.stop()
       taskService.stop()
       coordinator.stop()
@@ -239,6 +268,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
       memoryService.stop()
       approvalService.stop()
       artifactService.stop()
+      triggerService.stop()
       await runService.stop()
       await catalog.stop()
     }
