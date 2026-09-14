@@ -724,6 +724,28 @@ export const DASHBOARD_STYLES = String.raw`
 .dshd-approval-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 10px; color: #65738b; }
 .dshd-approval-actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
 .dshd-approval-actions button { white-space: nowrap; }
+/* Phase 8: run artifacts (RunInspector section). */
+.dshd-artifact-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.dshd-artifact-row { display: flex; align-items: flex-start; gap: 10px; border: 1px solid #dde4ee; border-radius: 8px; padding: 10px 12px; background: #fff; }
+.dshd-artifact-row-final-report { border-color: #c9d8f5; background: #f7faff; }
+.dshd-artifact-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.dshd-artifact-main strong { font-size: 11px; font-weight: 600; color: #1d2b43; overflow-wrap: anywhere; }
+.dshd-artifact-kind { display: inline-flex; align-items: center; padding: 1px 7px; border: 1px solid #ccd5e3; border-radius: 999px; background: #f4f7fc; color: #4a5a75; font-size: 10px; width: fit-content; }
+.dshd-artifact-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 10px; color: #65738b; }
+.dshd-artifact-detail { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.dshd-artifact-content { margin: 0; padding: 8px 10px; border-radius: 6px; background: #f6f8fc; border: 1px solid #e6ebf3; font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
+.dshd-artifact-ref { display: flex; align-items: baseline; gap: 6px; font-size: 10px; color: #65738b; }
+.dshd-artifact-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; color: #273750; background: #eef2f8; padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.dshd-artifact-url { font-size: 10px; color: var(--dshd-blue); overflow-wrap: anywhere; }
+.dshd-artifact-actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+.dshd-artifact-actions button { white-space: nowrap; }
+.dshd-artifact-report-unavailable { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; padding: 8px 11px; border: 1px dashed #e0b98a; border-radius: 6px; background: #fffaf0; font-size: 11px; color: #9a6b00; }
+/* Phase 8: the final report rendered as a readable document. */
+.dshd-final-report { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.dshd-final-report-section { display: flex; flex-direction: column; gap: 3px; }
+.dshd-final-report-section h4 { margin: 0; font-size: 10px; font-weight: 620; text-transform: uppercase; letter-spacing: .04em; color: #52617a; }
+.dshd-final-report-empty { margin: 0; font-size: 11px; color: #8a97ab; font-style: italic; }
+.dshd-final-report-body { margin: 0; padding: 8px 10px; border-radius: 6px; background: #fff; border: 1px solid #e6ebf3; font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dshd-budget-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .dshd-budget-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 11px; }
 .dshd-budget-label { color: #42506a; display: inline-flex; align-items: center; gap: 6px; }

@@ -42,7 +42,12 @@ export type MemoryInvalidReason =
   | 'empty-patch'
   | 'contains-secrets'
 
-const SECRET_PATTERNS: readonly RegExp[] = [
+/**
+ * Secret-detection patterns (Phase 6). Exported so the Phase 8 artifact
+ * service reuses the same single source (spec §4.3) — an artifact never
+ * becomes a secret leak, the same hard-rejection rule as memory.
+ */
+export const SECRET_PATTERNS: readonly RegExp[] = [
   /(api[_-]?key|apikey|token|secret|password)\s*[:=]\s*\S{8,}/i,
   /AKIA[0-9A-Z]{16}/,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,

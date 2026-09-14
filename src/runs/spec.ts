@@ -12,6 +12,8 @@ import { projectMemoryRecordSchema } from '../memory/spec.ts'
 import type { MemoryId, ProjectMemoryRecord } from '../memory/types.ts'
 import { projectApprovalRecordSchema } from '../approvals/spec.ts'
 import type { ApprovalId, ApprovalRequestRecord } from '../approvals/types.ts'
+import { projectArtifactRecordSchema } from '../artifacts/spec.ts'
+import type { ArtifactId, ProjectArtifactRecord } from '../artifacts/types.ts'
 import type { ProjectRunEventRecord, ProjectRunRecord, RunBudget, RunEventId, RunId } from './types.ts'
 
 // Re-exported for existing importers (the schema lives in `tasks/spec.ts` so
@@ -104,6 +106,10 @@ export const RUN_EVENT_TYPES = [
   'run.approval.requested', 'run.approval.resolved',
   // Additive (Phase 7): budget enforcement (spec §5.2).
   'run.budget.warning', 'run.budget.exceeded',
+  // Additive (Phase 8): the artifact projection (spec §3.2).
+  'artifact.created',
+  // Additive (Phase 8): final-report generation failure (spec §6.5).
+  'run.report.failed',
 ] as const satisfies readonly ProjectRunEventRecord['type'][]
 
 export const projectRunEventRecordSchema = z.object({
@@ -134,5 +140,7 @@ export const dshProjectsDomainSpec = defineDomain({
     memory: domainTable<MemoryId, ProjectMemoryRecord>(projectMemoryRecordSchema),
     // Additive (Phase 7): durable approval requests (master spec §19, spec §3.1).
     project_approvals: domainTable<ApprovalId, ApprovalRequestRecord>(projectApprovalRecordSchema),
+    // Additive (Phase 8): durable run artifacts (master spec §26, spec §3.1).
+    project_artifacts: domainTable<ArtifactId, ProjectArtifactRecord>(projectArtifactRecordSchema),
   },
 })

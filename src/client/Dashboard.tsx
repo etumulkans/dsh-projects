@@ -30,10 +30,13 @@ import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
 import type { CreateRunInput, ProjectRunEventView, ProjectRunPhase, ProjectRunView, RunBudget, RunDetailView } from '../runs/types.ts'
 import type { CreatePlanInput, PlannedTaskInput, RunPlanPattern, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
 import type { ProjectTaskView, TaskWorkerKindView } from '../tasks/types.ts'
-import { CLIENT_MEMORY_KINDS, CLIENT_APPROVAL_MODES } from './controller.ts'
+import { CLIENT_MEMORY_KINDS, CLIENT_APPROVAL_MODES, CLIENT_ARTIFACT_KINDS } from './controller.ts'
 import type {
   ApprovalRequestView,
+  ArtifactCreateInput,
+  ArtifactView,
   ClientApprovalMode,
+  ClientArtifactKind,
   ClientMemoryKind,
   DashboardDataPort,
   MemoryCreateInput,
@@ -47,6 +50,7 @@ import type {
 import { DashboardUiController } from './controller.ts'
 import { dashboardErrorMessage, DashboardRequestError } from './errors.ts'
 import { DashboardI18nProvider, useDashboardTranslation } from './i18n.tsx'
+import type { DashboardTranslate } from './i18n.tsx'
 import { buildAttentionSummary } from './attention.ts'
 import type { AttentionAlert, AttentionSummary } from './attention.ts'
 import {
@@ -164,6 +168,9 @@ export function DashboardOverlay({ ui, data, openSession, t }: DashboardOverlayP
           onCreateMemory={input => data.createMemory(input)}
           onUpdateMemory={input => data.updateMemory(input)}
           onSetMemoryStatus={input => data.setMemoryStatus(input)}
+          onGenerateReport={runId => data.generateReport(runId)}
+          onLoadArtifacts={input => data.loadArtifacts(input)}
+          onCreateArtifact={input => data.createArtifact(input)}
           onResolveApproval={(id, decision, expectedVersion) => data.resolveApproval(id, decision, expectedVersion)}
           onOpenSession={(sessionId) => { ui.close(); openSession(sessionId) }}
         />
@@ -219,10 +226,16 @@ export interface DashboardSurfaceProps {
   readonly onSetMemoryStatus?: ((input: MemorySetStatusInput) => Promise<MemoryEntryView>) | undefined
   /** Phase 7: resolve a pending approval (approve/reject) from the Run inspector. */
   readonly onResolveApproval?: ((id: string, decision: 'approved' | 'rejected', expectedVersion: number) => Promise<void>) | undefined
+  /** Phase 8: (re)generate a run's final report on demand (terminal runs only). */
+  readonly onGenerateReport?: ((runId: string) => Promise<unknown>) | undefined
+  /** Phase 8: load a project's (or run's) artifacts for the Artifacts tab. */
+  readonly onLoadArtifacts?: ((input: { readonly runId?: string; readonly projectId?: string; readonly kind?: ClientArtifactKind }) => Promise<readonly ArtifactView[]>) | undefined
+  /** Phase 8: create an artifact (the Add artifact dialog). */
+  readonly onCreateArtifact?: ((input: ArtifactCreateInput) => Promise<ArtifactView>) | undefined
   readonly onOpenSession: (sessionId: string) => void
 }
 
-type Tab = 'board' | 'runtime' | 'runs' | 'projects' | 'memory' | 'configuration'
+type Tab = 'board' | 'runtime' | 'runs' | 'projects' | 'memory' | 'artifacts' | 'configuration'
 type RuntimePhaseFilter = Extract<IssueRuntimeView['phase'], 'running' | 'retrying' | 'blocked'>
 type RuntimeFilter = RuntimePhaseFilter | 'attention'
 type ActionToastState = { readonly tone: 'success' | 'error'; readonly message: string }
@@ -268,6 +281,9 @@ export function DashboardSurface({
   onUpdateMemory,
   onSetMemoryStatus,
   onResolveApproval,
+  onGenerateReport,
+  onLoadArtifacts,
+  onCreateArtifact,
   onOpenSession,
 }: DashboardSurfaceProps) {
   const t = useDashboardTranslation()
@@ -492,6 +508,7 @@ export function DashboardSurface({
             <TabButton active={tab === 'runs'} onClick={() => setTab('runs')}>{t('tab.runs')}</TabButton>
             <TabButton active={tab === 'projects'} onClick={() => setTab('projects')}>{t('tab.projects')}</TabButton>
             <TabButton active={tab === 'memory'} onClick={() => setTab('memory')}>{t('tab.memory')}</TabButton>
+            <TabButton active={tab === 'artifacts'} onClick={() => setTab('artifacts')}>{t('tab.artifacts')}</TabButton>
             <TabButton active={tab === 'configuration'} onClick={() => setTab('configuration')}>{t('tab.configuration')}</TabButton>
           </nav>
         </header>
@@ -579,6 +596,15 @@ export function DashboardSurface({
               onOpenRun={runId => setSelectedRunId(runId)}
             />
           ) : null}
+          {tab === 'artifacts' ? (
+            <ArtifactsView
+              projects={snapshot?.catalog.projects ?? []}
+              busy={loading}
+              onLoadArtifacts={onLoadArtifacts}
+              onCreateArtifact={onCreateArtifact}
+              onOpenRun={runId => setSelectedRunId(runId)}
+            />
+          ) : null}
           {tab === 'configuration' ? <ConfigurationView snapshot={snapshot} /> : null}
         </div>
       </section>
@@ -634,6 +660,7 @@ export function DashboardSurface({
           onPlanTransition={onPlanTransition}
           onTaskRetry={onTaskRetry}
           onResolveApproval={onResolveApproval}
+          onGenerateReport={onGenerateReport}
           worker={snapshot?.runs?.worker}
           project={snapshot?.catalog.projects.find(candidate => candidate.id === selectedRun.projectId)}
         />
@@ -1796,6 +1823,103 @@ function InspectorRow({ label, children }: { readonly label: string; readonly ch
   return <div className="dshd-inspector-row"><span>{label}</span><div>{children}</div></div>
 }
 
+/**
+ * Phase 8 (spec §9.1): split the deterministic final-report `content` (the
+ * master spec §64 layout) into its sections. The generator writes the English
+ * section headers; the UI re-renders each with the localized `report.*` key
+ * (zh/en parity). Unknown text before the first known header is ignored.
+ */
+const FINAL_REPORT_SECTION_HEADERS = [
+  'Goal', 'Outcome', 'Changes', 'Validation', 'Git', 'Agents', 'Usage',
+  'Project knowledge learned', 'Remaining risks',
+] as const
+
+function splitFinalReport(content: string): readonly (readonly [string, readonly string[]])[] {
+  const lines = content.split('\n')
+  const sections: (readonly [string, readonly string[]])[] = []
+  let current: [string, string[]] | undefined
+  for (const line of lines) {
+    if ((FINAL_REPORT_SECTION_HEADERS as readonly string[]).includes(line)) {
+      if (current !== undefined) sections.push([current[0], current[1]])
+      current = [line, []]
+    } else if (current !== undefined) {
+      current[1].push(line)
+    }
+  }
+  if (current !== undefined) sections.push([current[0], current[1]])
+  return sections
+}
+
+/** The localized `report.*` key for a final-report section header. */
+const FINAL_REPORT_SECTION_KEYS: Record<string, 'report.goal' | 'report.outcome' | 'report.changes' | 'report.validation' | 'report.git' | 'report.agents' | 'report.usage' | 'report.knowledge' | 'report.risks'> = {
+  'Goal': 'report.goal',
+  'Outcome': 'report.outcome',
+  'Changes': 'report.changes',
+  'Validation': 'report.validation',
+  'Git': 'report.git',
+  'Agents': 'report.agents',
+  'Usage': 'report.usage',
+  'Project knowledge learned': 'report.knowledge',
+  'Remaining risks': 'report.risks',
+}
+
+function finalReportSectionKey(header: string): 'report.goal' | 'report.outcome' | 'report.changes' | 'report.validation' | 'report.git' | 'report.agents' | 'report.usage' | 'report.knowledge' | 'report.risks' {
+  const key = FINAL_REPORT_SECTION_KEYS[header]
+  if (key === undefined) return 'report.goal'
+  return key
+}
+
+/**
+ * Phase 8 (spec §9.1): the `final-report` rendered as a readable document —
+ * the §64 sections, each with its localized header (not a raw code block).
+ */
+function FinalReportDocument({ content, t }: { readonly content: string; readonly t: DashboardTranslate }) {
+  const sections = splitFinalReport(content)
+  if (sections.length === 0) return <pre className="dshd-artifact-content">{content}</pre>
+  return (
+    <div className="dshd-final-report">
+      {sections.map(([header, lines]) => {
+        const body = lines.join('\n').trim()
+        return (
+          <div key={header} className="dshd-final-report-section">
+            <h4>{t(finalReportSectionKey(header))}</h4>
+            {body === '' ? <p className="dshd-final-report-empty">{t('report.none')}</p> : (
+              <pre className="dshd-final-report-body">{body}</pre>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * Phase 8 (spec §9.1): the detail view for a non-final-report artifact — the
+ * inline `content` (when present) or a `path`/`url` reference (a `path` renders
+ * as a workspace reference; a `url` as a clickable link).
+ */
+function ArtifactDetail({ artifact, t }: { readonly artifact: ArtifactView; readonly t: DashboardTranslate }) {
+  return (
+    <div className="dshd-artifact-detail">
+      {artifact.content !== undefined && artifact.content !== '' ? (
+        <pre className="dshd-artifact-content">{artifact.content}</pre>
+      ) : null}
+      {artifact.path !== undefined ? (
+        <div className="dshd-artifact-ref">
+          <span>{t('artifact.path')}:</span>
+          <code className="dshd-artifact-path">{artifact.path}</code>
+        </div>
+      ) : null}
+      {artifact.url !== undefined ? (
+        <div className="dshd-artifact-ref">
+          <span>{t('artifact.url')}:</span>
+          <a className="dshd-artifact-url" href={artifact.url} target="_blank" rel="noreferrer">{artifact.url}</a>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function TokenCell({ label, value }: { readonly label: string; readonly value: number }) {
   const t = useDashboardTranslation()
   return <div><span>{label}</span><strong>{value.toLocaleString(t('meta.locale'))}</strong></div>
@@ -2116,7 +2240,7 @@ function RunListView({ summary, runs, global, busy, selectedRunId, onSelect, onN
   )
 }
 
-function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cancelPending, pausePending, resumePending, onRefresh, refreshPending, onLoadDetail, onCoordinateRun, onLoadPlans, onPlanCreate, onPlanTransition, onTaskRetry, onResolveApproval, worker, project }: {
+function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cancelPending, pausePending, resumePending, onRefresh, refreshPending, onLoadDetail, onCoordinateRun, onLoadPlans, onPlanCreate, onPlanTransition, onTaskRetry, onResolveApproval, onGenerateReport, worker, project }: {
   readonly run: ProjectRunView
   readonly global: boolean
   readonly onClose: () => void
@@ -2142,6 +2266,8 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
   readonly onTaskRetry?: ((taskId: string) => Promise<void>) | undefined
   /** Phase 7: resolve a pending approval (approve/reject). */
   readonly onResolveApproval?: ((id: string, decision: 'approved' | 'rejected', expectedVersion: number) => Promise<void>) | undefined
+  /** Phase 8: (re)generate the run's final report on demand (terminal runs only). */
+  readonly onGenerateReport?: ((runId: string) => Promise<unknown>) | undefined
   /** Phase 4: the worker kind the Host can currently execute tasks with. */
   readonly worker?: TaskWorkerKindView | undefined
   /** Phase 5: the run's project (workspace-isolation notice + integration panel). */
@@ -2206,6 +2332,26 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
       setApprovalNotice({ tone: 'error', message: dashboardErrorMessage(resolveError, t) })
     } finally {
       setResolvingApprovalIds(current => current.filter(id => id !== approval.id))
+    }
+  }
+
+  // Phase 8: regenerate the run's final report on demand (terminal runs only).
+  // The section re-renders from the next detail load after the report lands.
+  const [regeneratingReport, setRegeneratingReport] = useState(false)
+  const [artifactNotice, setArtifactNotice] = useState<{ readonly tone: 'success' | 'error'; readonly message: string } | undefined>()
+  const regenerateReport = async (): Promise<void> => {
+    if (onGenerateReport === undefined) return
+    setArtifactNotice(undefined)
+    setRegeneratingReport(true)
+    try {
+      await onGenerateReport(run.id)
+      setArtifactNotice({ tone: 'success', message: t('feedback.artifactReportGenerated') })
+      await onRefresh(run.id)
+      void loadDetail()
+    } catch (reportError) {
+      setArtifactNotice({ tone: 'error', message: dashboardErrorMessage(reportError, t) })
+    } finally {
+      setRegeneratingReport(false)
     }
   }
 
@@ -2310,6 +2456,10 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
   // Phase 7: approvals come from the additive `runDetail.approvals` field
   // (newest first); the client mirrors the record shape (spec §3.1).
   const approvals = detail?.approvals
+  // Phase 8: artifacts come from the additive `runDetail.artifacts` field
+  // (newest first); the `final-report` is surfaced separately (spec §7).
+  const artifacts = detail?.artifacts
+  const finalReport = detail?.finalReport
   const taskById = useMemo(() => {
     const map = new Map<string, ProjectTaskView>()
     for (const task of detail?.tasks ?? []) map.set(task.id, task)
@@ -2677,6 +2827,67 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
               })}
             </ul>
           )}
+        </InspectorSection>
+        <InspectorSection title={t('run.artifacts')}>
+          {artifactNotice !== undefined ? (
+            <div className="dshd-plan-notice" data-tone={artifactNotice.tone} role="status">{artifactNotice.message}</div>
+          ) : null}
+          {artifacts === undefined ? (
+            <div className="dshd-inspector-runtime-empty">{detailLoading ? t('runs.tasks.loading') : t('run.artifacts.empty')}</div>
+          ) : artifacts.length === 0 ? (
+            <div className="dshd-tasks-empty">{t('run.artifacts.empty')}</div>
+          ) : (
+            <ul className="dshd-artifact-list">
+              {artifacts.map(artifact => (
+                <li key={artifact.id} className={`dshd-artifact-row dshd-artifact-row-${artifact.kind}`}>
+                  <div className="dshd-artifact-main">
+                    <span className="dshd-artifact-kind">{t(`artifact.kind.${artifact.kind}`)}</span>
+                    <strong>{artifact.title}</strong>
+                    <div className="dshd-artifact-meta">
+                      <span>{t('artifact.createdAt')}: {relativeTime(artifact.createdAt, t)}</span>
+                    </div>
+                    {artifact.kind === 'final-report' && artifact.content !== undefined ? (
+                      <FinalReportDocument content={artifact.content} t={t} />
+                    ) : null}
+                    {artifact.kind !== 'final-report' ? (
+                      <ArtifactDetail artifact={artifact} t={t} />
+                    ) : null}
+                  </div>
+                  {artifact.kind === 'final-report' && onGenerateReport !== undefined ? (
+                    <div className="dshd-artifact-actions">
+                      <button
+                        type="button"
+                        className="dshd-plain-control"
+                        disabled={regeneratingReport}
+                        aria-busy={regeneratingReport}
+                        onClick={() => { void regenerateReport() }}
+                      >
+                        <span>{t('artifact.regenerate')}</span>
+                      </button>
+                    </div>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+          {/* A terminal run whose report generation failed (or hasn't run yet)
+              has no `final-report` artifact: surface the marker + Regenerate. */}
+          {terminal && artifacts !== undefined && finalReport === undefined ? (
+            <div className="dshd-artifact-report-unavailable" role="status">
+              <span>{t('artifact.reportUnavailable')}</span>
+              {onGenerateReport !== undefined ? (
+                <button
+                  type="button"
+                  className="dshd-plain-control"
+                  disabled={regeneratingReport}
+                  aria-busy={regeneratingReport}
+                  onClick={() => { void regenerateReport() }}
+                >
+                  <span>{t('artifact.regenerate')}</span>
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </InspectorSection>
         {run.budget !== undefined ? (
           <InspectorSection title={t('run.budget')}>
@@ -3897,7 +4108,267 @@ function MemoryView({ projects, busy, onLoadMemory, onCreateMemory, onUpdateMemo
   )
 }
 
-/** The structured "service not mounted" RPC failure (never a swallowed promise). */
+/**
+ * Phase 8 (spec §9.2): the project-level Artifacts tab. Artifacts are fetched
+ * on demand through `artifactList` (the runDetail pattern) — no snapshot
+ * projection. Append-only: there is no edit/delete, only the Add dialog.
+ */
+function ArtifactsView({ projects, busy, onLoadArtifacts, onCreateArtifact, onOpenRun }: {
+  readonly projects: readonly ProjectView[]
+  readonly busy: boolean
+  readonly onLoadArtifacts?: ((input: { readonly runId?: string; readonly projectId?: string; readonly kind?: ClientArtifactKind }) => Promise<readonly ArtifactView[]>) | undefined
+  readonly onCreateArtifact?: ((input: ArtifactCreateInput) => Promise<ArtifactView>) | undefined
+  readonly onOpenRun: (runId: string) => void
+}) {
+  const t = useDashboardTranslation()
+  const [projectId, setProjectId] = useState<string | undefined>(projects[0]?.id)
+  const [kind, setKind] = useState<ClientArtifactKind | undefined>(undefined)
+  const [result, setResult] = useState<readonly ArtifactView[] | undefined>()
+  const [fetching, setFetching] = useState(false)
+  const [loadError, setLoadError] = useState<unknown>()
+  const [actionError, setActionError] = useState<unknown>()
+  const [pendingKey, setPendingKey] = useState<string | undefined>()
+  const [addOpen, setAddOpen] = useState(false)
+  const [reloadKey, setReloadKey] = useState(0)
+  const reload = (): void => setReloadKey(current => current + 1)
+
+  // The catalog can load or change after mount; the default selection is the first project.
+  useEffect(() => {
+    if (projects.length === 0) {
+      if (projectId !== undefined) setProjectId(undefined)
+      return
+    }
+    if (projectId === undefined || !projects.some(project => project.id === projectId)) setProjectId(projects[0]!.id)
+  }, [projects, projectId])
+
+  const loadRef = useRef(onLoadArtifacts)
+  loadRef.current = onLoadArtifacts
+
+  useEffect(() => {
+    if (projectId === undefined) {
+      setResult(undefined)
+      setLoadError(undefined)
+      return
+    }
+    const load = loadRef.current
+    if (load === undefined) return
+    let cancelled = false
+    setFetching(true)
+    setLoadError(undefined)
+    load({
+      projectId,
+      ...(kind === undefined ? {} : { kind }),
+    }).then(value => {
+      if (!cancelled) setResult(value)
+    }).catch(failedLoad => {
+      if (!cancelled) { setResult(undefined); setLoadError(failedLoad) }
+    }).finally(() => {
+      if (!cancelled) setFetching(false)
+    })
+    return () => { cancelled = true }
+  }, [projectId, kind, reloadKey])
+
+  const artifacts = result ?? []
+  // Kind chips: the kinds present in the current result (the list is newest first).
+  const presentKinds = (CLIENT_ARTIFACT_KINDS as readonly ClientArtifactKind[]).filter(candidate =>
+    artifacts.some(artifact => artifact.kind === candidate))
+
+  const mutate = async (key: string, action: () => Promise<void>): Promise<void> => {
+    if (pendingKey !== undefined) return
+    setPendingKey(key)
+    setActionError(undefined)
+    try {
+      await action()
+    } catch (error) {
+      setActionError(error)
+    } finally {
+      setPendingKey(undefined)
+    }
+  }
+
+  return (
+    <div className="dshd-memory-view">
+      <header className="dshd-memory-heading">
+        <div><h2>{t('tab.artifacts')}</h2><p>{t('artifacts.description')}</p></div>
+        <div className="dshd-memory-controls">
+          <select
+            aria-label={t('artifacts.projectSelectAria')}
+            value={projectId ?? ''}
+            disabled={busy || projects.length === 0}
+            onChange={event => setProjectId(event.currentTarget.value)}
+          >
+            {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+          </select>
+          <button
+            type="button"
+            className="dshd-memory-primary"
+            disabled={busy || fetching || projectId === undefined || onCreateArtifact === undefined || pendingKey !== undefined}
+            onClick={() => setAddOpen(true)}
+          >
+            <PlusIcon size={16} />{t('artifact.add')}
+          </button>
+        </div>
+      </header>
+      {projects.length === 0 ? (
+        <div className="dshd-empty">{t('memory.noProjects')}</div>
+      ) : (
+        <>
+          {loadError !== undefined ? <div className="dshd-error" role="alert">{dashboardErrorMessage(loadError, t)}</div> : null}
+          {actionError !== undefined ? <div className="dshd-error" role="alert">{dashboardErrorMessage(actionError, t)}</div> : null}
+          {presentKinds.length > 0 ? (
+            <div className="dshd-memory-toolbar">
+              <div className="dshd-memory-chips" role="group" aria-label={t('artifacts.countsAria')}>
+                {presentKinds.map(candidate => (
+                  <button
+                    key={candidate}
+                    type="button"
+                    aria-pressed={kind === candidate}
+                    onClick={() => setKind(current => current === candidate ? undefined : candidate)}
+                  >
+                    {t(`artifact.kind.${candidate}`)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {artifacts.length === 0 && !fetching ? (
+            <div className="dshd-empty">{t('run.artifacts.empty')}</div>
+          ) : null}
+          <div className="dshd-memory-list" role="table" aria-label={t('artifacts.tableAria')}>
+            {artifacts.map(artifact => (
+              <div className="dshd-memory-entry" role="row" key={artifact.id} data-kind={artifact.kind}>
+                <div className="dshd-memory-main">
+                  <div className="dshd-memory-titleline">
+                    <span className="dshd-memory-kind">{t(`artifact.kind.${artifact.kind}`)}</span>
+                    <strong>{artifact.title}</strong>
+                  </div>
+                  <div className="dshd-memory-meta">
+                    <span>{t('artifact.createdAt')}: {relativeTime(artifact.createdAt, t)}</span>
+                    {artifact.runId !== undefined ? (
+                      <button type="button" className="dshd-memory-source" onClick={() => onOpenRun(artifact.runId!)}>{t('artifact.openRun')}</button>
+                    ) : null}
+                  </div>
+                  {artifact.kind === 'final-report' && artifact.content !== undefined ? (
+                    <FinalReportDocument content={artifact.content} t={t} />
+                  ) : null}
+                  {artifact.kind !== 'final-report' ? (
+                    <ArtifactDetail artifact={artifact} t={t} />
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      {addOpen && onCreateArtifact !== undefined && projectId !== undefined ? (
+        <AddArtifactDialog
+          projectId={projectId}
+          onClose={() => setAddOpen(false)}
+          onSubmit={async input => {
+            await mutate('artifact:create', async () => {
+              await onCreateArtifact(input)
+              reload()
+            })
+            setAddOpen(false)
+          }}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * Phase 8 (spec §9.2): the Add artifact dialog. The `final-report` kind is
+ * disabled (generator-only); `pull-request`/`external-link`/`screenshot`
+ * require a URL.
+ */
+function AddArtifactDialog({ projectId, onClose, onSubmit }: {
+  readonly projectId: string
+  readonly onClose: () => void
+  readonly onSubmit: (input: ArtifactCreateInput) => Promise<void>
+}) {
+  const t = useDashboardTranslation()
+  const [kind, setKind] = useState<ClientArtifactKind>('plan')
+  const [title, setTitle] = useState('')
+  const [content, setContent] = useState('')
+  const [path, setPath] = useState('')
+  const [url, setUrl] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<unknown>()
+
+  const needsUrl = kind === 'pull-request' || kind === 'external-link' || kind === 'screenshot'
+
+  const submit = async (): Promise<void> => {
+    if (submitting) return
+    setSubmitting(true)
+    setError(undefined)
+    try {
+      await onSubmit({
+        projectId,
+        kind,
+        title: title.trim(),
+        ...(content.trim() === '' ? {} : { content: content.trim() }),
+        ...(path.trim() === '' ? {} : { path: path.trim() }),
+        ...(url.trim() === '' ? {} : { url: url.trim() }),
+      })
+    } catch (submitError) {
+      setError(submitError)
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="dshd-modal" role="dialog" aria-modal="true" aria-label={t('artifact.add')} onKeyDown={(event) => { if (event.key === 'Escape') event.stopPropagation() }}>
+      <div className="dshd-modal-card">
+        <header>
+          <h3>{t('artifact.add')}</h3>
+          <button type="button" aria-label={t('common.close')} onClick={onClose}><CloseIcon size={16} /></button>
+        </header>
+        {error !== undefined ? (
+          <div className="dshd-error" role="alert">{dashboardErrorMessage(error, t)}</div>
+        ) : null}
+        <label>
+          {t('artifact.addKind')}
+          <select value={kind} onChange={event => setKind(event.currentTarget.value as ClientArtifactKind)}>
+            {(CLIENT_ARTIFACT_KINDS as readonly ClientArtifactKind[]).map(candidate => (
+              <option key={candidate} value={candidate} disabled={candidate === 'final-report'}>
+                {t(`artifact.kind.${candidate}`)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          {t('artifact.addTitle')}
+          <input value={title} onChange={event => setTitle(event.currentTarget.value)} />
+        </label>
+        <label>
+          {t('artifact.addContent')}
+          <textarea value={content} onChange={event => setContent(event.currentTarget.value)} rows={4} />
+        </label>
+        <label>
+          {t('artifact.addPath')}
+          <input value={path} onChange={event => setPath(event.currentTarget.value)} />
+        </label>
+        <label>
+          {t('artifact.addUrl')}
+          <input value={url} onChange={event => setUrl(event.currentTarget.value)} />
+        </label>
+        <footer>
+          <button type="button" onClick={onClose}>{t('artifact.addCancel')}</button>
+          <button
+            type="button"
+            className="dshd-primary"
+            disabled={submitting || title.trim() === '' || (needsUrl && url.trim() === '')}
+            onClick={() => { void submit() }}
+          >
+            {t('artifact.addSubmit')}
+          </button>
+        </footer>
+      </div>
+    </div>
+  )
+}
+
 function isMemoryUnavailable(error: unknown): boolean {
   return error instanceof DashboardRequestError
     && error.rpcCode === 'bad-request'

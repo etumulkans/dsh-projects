@@ -1,6 +1,7 @@
 /** Durable Project Run records and lossless Host-to-client projections (Phase 1). */
 
 import type { ApprovalMode, ApprovalRequestRecord } from '../approvals/types.ts'
+import type { ProjectArtifactRecord } from '../artifacts/types.ts'
 import type { ProjectId } from '../catalog/types.ts'
 import type { TokenTotals } from '../runtime/types.ts'
 import type { ProjectTaskView, TaskCountsView, TaskWorkerKindView } from '../tasks/types.ts'
@@ -117,6 +118,10 @@ export type ProjectRunEventType =
   // Additive (Phase 7): budget enforcement (spec §5.2).
   | 'run.budget.warning'
   | 'run.budget.exceeded'
+  // Additive (Phase 8): the artifact projection (spec §3.2).
+  | 'artifact.created'
+  // Additive (Phase 8): final-report generation failure (spec §6.5).
+  | 'run.report.failed'
 
 /** High-level Run event; detailed agent activity stays in Harness session logs. */
 export interface ProjectRunEventRecord {
@@ -198,6 +203,10 @@ export interface RunDetailView {
   readonly tasks?: readonly ProjectTaskView[]
   /** Additive (Phase 7): the run's approval objects (newest first); absent when the Host has no approval service. */
   readonly approvals?: readonly ApprovalRequestRecord[]
+  /** Additive (Phase 8): the run's artifacts (newest first); absent when the Host has no artifact service. */
+  readonly artifacts?: readonly ProjectArtifactRecord[]
+  /** Additive (Phase 8): the run's `final-report` artifact, when present. */
+  readonly finalReport?: ProjectArtifactRecord
 }
 
 export interface CreateRunInput {

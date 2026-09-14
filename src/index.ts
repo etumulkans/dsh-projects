@@ -33,6 +33,7 @@ import { ApprovalService } from './approvals/approval-service.ts'
 import type { PlanApprovalEvent } from './approvals/types.ts'
 import { HarnessMemoryDistillationDriver } from './memory/distillation.ts'
 import { ProjectMemoryService } from './memory/memory-service.ts'
+import { ProjectArtifactService } from './artifacts/artifact-service.ts'
 import { LocalTaskWorker } from './tasks/local-adapter.ts'
 import { TaskWorktreeManager } from './tasks/git-workspace.ts'
 import { resolveTeamTaskWorker } from './tasks/team-adapter.ts'
@@ -108,6 +109,10 @@ export function apply(ctx: Context, config: PluginConfig): void {
   // through it. `onApprovalResolved` is not wired to a side effect here — the
   // resolution is durable and surfaced through the run event stream.
   const approvalService = new ApprovalService(ctx, catalog, runService)
+  // Phase 8 (spec §6/§7): the Artifact service borrows the shared domain
+  // tables; its `run/completed` listener generates the final report at the
+  // run's terminal transition (fire-and-forget, never a run failure).
+  const artifactService = new ProjectArtifactService(ctx, catalog, runService)
   const taskService = new ProjectTaskService(
     ctx,
     catalog,
@@ -207,6 +212,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
     await runService.start()
     memoryService.start()
     approvalService.start()
+    artifactService.start()
     planService.start()
     coordinator.start()
     taskService.start()
@@ -215,7 +221,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
   ctx.connection.rpc.handle(
     '/dsh-dashboard',
-    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup, runService, planService, coordinator, taskService, memoryService, approvalService),
+    (endpoint, payload, signal) => handleDashboardRpc(runtime, endpoint, payload, signal, startup, runService, planService, coordinator, taskService, memoryService, approvalService, artifactService),
     { authority: 'trusted-host' },
   )
 
@@ -232,6 +238,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
       planService.stop()
       memoryService.stop()
       approvalService.stop()
+      artifactService.stop()
       await runService.stop()
       await catalog.stop()
     }

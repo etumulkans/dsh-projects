@@ -23,6 +23,7 @@ import type {
   CoordinatorDriverResult,
 } from '../src/coordinator/session-driver.ts'
 import { ApprovalService } from '../src/approvals/approval-service.ts'
+import { ProjectArtifactService } from '../src/artifacts/artifact-service.ts'
 import { RunPlanService } from '../src/plans/plan-service.ts'
 import type { PlanStatusChangedEvent } from '../src/plans/plan-service.ts'
 import { dshProjectsDomainSpec } from '../src/runs/spec.ts'
@@ -235,10 +236,11 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    // Phase 4 adds the `tasks` table, Phase 6 the `memory` table, and Phase 7
-    // the `project_approvals` table (empty here — no approvals in this leg);
-    // every declared table is created on domain open.
-    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'run_events', 'runs', 'tasks'])
+    // Phase 4 adds the `tasks` table, Phase 6 the `memory` table, Phase 7 the
+    // `project_approvals` table, and Phase 8 the `project_artifacts` table
+    // (empty here — no artifacts in this leg); every declared table is created
+    // on domain open. The domain stays format version 0 (additive).
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'project_artifacts', 'run_events', 'runs', 'tasks'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(2)
     // 10 boot-1 events + 3 boot-2 events (resume, finalize, completed)
@@ -347,6 +349,91 @@ describe('ProjectRunService against real JSON storage', () => {
     dispose()
   })
 
+  it('persists Phase 8 artifacts (run-scoped + project-scoped + final report) across a domain reopen', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projects-run-it-'))
+    temporaryRoots.push(root)
+    const { ctx, facility, dispose } = await boot(root)
+    const clock = () => new Date(Date.UTC(2026, 8, 10, 4, 0, 0)).toISOString()
+
+    // --- boot 1: create a run, a run-scoped + a project-scoped artifact, and
+    // the final report (via the on-demand generator) ---
+    const first = new ProjectRunService(ctx, catalogFixture(), clock)
+    await first.start()
+    const firstArtifacts = new ProjectArtifactService(ctx, catalogFixture(), first, clock)
+    firstArtifacts.start()
+    const run = await first.createRun(
+      { goal: 'Phase 8: artifacts survive a restart', sourceRef: 'IT-8' },
+      { mode: 'project', projectId: PROJECT_ID },
+    )
+    const runScoped = await firstArtifacts.create({
+      projectId: PROJECT_ID,
+      runId: run.id,
+      kind: 'plan',
+      title: 'The plan',
+      content: 'step one\nstep two',
+    })
+    const projectScoped = await firstArtifacts.create({
+      projectId: PROJECT_ID,
+      kind: 'research-report',
+      title: 'Research',
+      path: '/tmp/research.md',
+    })
+    // Stop the service (drops the run/completed listener) so the terminal
+    // transition below does not fire the fire-and-forget generator; the report
+    // is produced deterministically via the on-demand call.
+    firstArtifacts.stop()
+    let terminal = run
+    for (const phase of ['planning', 'executing', 'finalizing', 'succeeded'] as const) {
+      terminal = await first.transitionRun(terminal.id, phase, { resultSummary: 'done' })
+    }
+    const restarted = new ProjectArtifactService(ctx, catalogFixture(), first, clock)
+    restarted.start()
+    const report = await restarted.generateFinalReport(terminal.id, 'on-demand')
+    expect(report).toBeDefined()
+    restarted.stop()
+    await first.stop()
+    await facility.closeAll()
+
+    // --- boot 2: reopen; every artifact must come back validated ---
+    const second = new ProjectRunService(ctx, catalogFixture(), clock)
+    await second.start()
+    try {
+      const secondArtifacts = new ProjectArtifactService(ctx, catalogFixture(), second, clock)
+      secondArtifacts.start()
+      try {
+        const byRun = secondArtifacts.list({ runId: run.id })
+        expect(byRun.map(record => record.id).sort()).toEqual([runScoped.id, report!.id].sort())
+        const byProject = secondArtifacts.list({ projectId: PROJECT_ID })
+        expect(byProject.map(record => record.id).sort()).toEqual([runScoped.id, projectScoped.id, report!.id].sort())
+        // The run-scoped artifact round-trips its content verbatim.
+        const detail = secondArtifacts.get(runScoped.id)
+        expect(detail).toMatchObject({ kind: 'plan', title: 'The plan', content: 'step one\nstep two' })
+        // The final report carries the deterministic §64 layout.
+        const reportDetail = secondArtifacts.get(report!.id)
+        expect(reportDetail).toMatchObject({ kind: 'final-report', title: 'Final report' })
+        expect(reportDetail?.content).toContain('Goal')
+        expect(reportDetail?.content).toContain('Remaining risks')
+      } finally {
+        secondArtifacts.stop()
+      }
+    } finally {
+      await second.stop()
+    }
+
+    // The medium carries the artifacts table with the three records.
+    const entries = await readdir(root, { recursive: true })
+    const mediumFile = entries.find(entry => String(entry).endsWith('.json') && String(entry).includes('dsh_projects'))
+    expect(mediumFile).toBeDefined()
+    const medium = JSON.parse(await readFile(join(root, String(mediumFile)), 'utf8')) as {
+      unit: { name: string; version: number }
+      tables: Record<string, Record<string, unknown>>
+    }
+    expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
+    expect(Object.keys(medium.tables.project_artifacts ?? {})).toHaveLength(3)
+
+    dispose()
+  })
+
   it('persists coordinator state (session id, plan, phase, events) across a domain reopen', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-projects-run-it-'))
     temporaryRoots.push(root)
@@ -437,7 +524,7 @@ describe('ProjectRunService against real JSON storage', () => {
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
     // Phase 4 adds the `tasks` table to the domain (empty here — no tasks in
     // this leg); every declared table is created on domain open.
-    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'project_artifacts', 'run_events', 'runs', 'tasks'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(1)
     // 7 boot-1 events + 2 boot-2 events (approve, phase change to executing)
@@ -592,7 +679,7 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'project_artifacts', 'run_events', 'runs', 'tasks'])
     expect(Object.keys(medium.tables.runs ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.plans ?? {})).toHaveLength(1)
     expect(Object.keys(medium.tables.tasks ?? {})).toHaveLength(2)
@@ -717,7 +804,7 @@ describe('ProjectRunService against real JSON storage', () => {
       tables: Record<string, Record<string, unknown>>
     }
     expect(medium.unit).toEqual({ name: dshProjectsDomainSpec.name, version: dshProjectsDomainSpec.version })
-    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'run_events', 'runs', 'tasks'])
+    expect(Object.keys(medium.tables).sort()).toEqual(['memory', 'plans', 'project_approvals', 'project_artifacts', 'run_events', 'runs', 'tasks'])
     const persistedTasks = Object.values(medium.tables.tasks ?? {})
     expect(persistedTasks).toHaveLength(2)
     const persistedTask = persistedTasks[0] as Record<string, unknown>

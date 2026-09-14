@@ -9,6 +9,7 @@ import type { ProjectMemoryService } from '../src/memory/memory-service.ts'
 import type { ProjectTaskService } from '../src/tasks/task-service.ts'
 import type { ProjectCatalogSelection } from '../src/catalog/types.ts'
 import type { ApprovalService } from '../src/approvals/approval-service.ts'
+import type { ProjectArtifactService } from '../src/artifacts/artifact-service.ts'
 
 describe('Dashboard RPC project switching', () => {
   it('loads a validated timeline page without refreshing the Dashboard snapshot', async () => {
@@ -1151,5 +1152,117 @@ describe('Dashboard RPC Approvals + budgets (Phase 7, spec §6.2)', () => {
     const bare = await handleDashboardRpc(runtime, 'runDetail', { runId: RUN_ID }, signal(), Promise.resolve(), runs)
     expect(bare).toMatchObject({ ok: true, value: { run: { id: RUN_ID } } })
     expect((bare as { value: Record<string, unknown> }).value.approvals).toBeUndefined()
+  })
+})
+
+function fakeArtifactService(overrides: Partial<Record<'list' | 'create' | 'get' | 'generateFinalReport', unknown>> = {}) {
+  return {
+    list: vi.fn(() => []),
+    create: vi.fn(async () => ({ id: 'artifact-1', kind: 'plan', title: 'Plan' })),
+    get: vi.fn(() => undefined),
+    generateFinalReport: vi.fn(async () => ({ id: 'artifact-final', kind: 'final-report', title: 'Final report' })),
+    ...overrides,
+  } as unknown as ProjectArtifactService
+}
+
+describe('Dashboard RPC Artifacts (Phase 8, spec §11.4)', () => {
+  const signal = () => new AbortController().signal
+  const RUN_ID = '123e4567-e89b-42d3-a456-426614174000'
+  const ARTIFACT_ID = '9b1deb4d-3b7d-4bad-9bdd-2d06a2985a57'
+  const NO_SERVICES = [undefined, undefined, undefined, undefined, undefined, undefined] as const
+
+  it('artifactList requires a runId or projectId and passes filters through', async () => {
+    const list = vi.fn(() => [{ id: ARTIFACT_ID, kind: 'plan', title: 'Plan' }])
+    const artifacts = fakeArtifactService({ list })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const none = await handleDashboardRpc(runtime, 'artifactList', {}, signal(), Promise.resolve(), ...NO_SERVICES, artifacts)
+    expect(none).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(list).not.toHaveBeenCalled()
+
+    const byRun = await handleDashboardRpc(runtime, 'artifactList', { runId: RUN_ID }, signal(), Promise.resolve(), ...NO_SERVICES, artifacts)
+    expect(byRun).toMatchObject({ ok: true, value: { artifacts: [{ id: ARTIFACT_ID }] } })
+    expect(list).toHaveBeenLastCalledWith({ runId: RUN_ID })
+
+    const byProject = await handleDashboardRpc(runtime, 'artifactList', { projectId: 'p1', kind: 'plan' }, signal(), Promise.resolve(), ...NO_SERVICES, artifacts)
+    expect(byProject).toMatchObject({ ok: true })
+    expect(list).toHaveBeenLastCalledWith({ projectId: 'p1', kind: 'plan' })
+  })
+
+  it('artifactList is unavailable without an Artifact service', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const result = await handleDashboardRpc(runtime, 'artifactList', { runId: RUN_ID }, signal(), Promise.resolve())
+    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('not mounted') } })
+  })
+
+  it('artifactCreate dispatches a validated input', async () => {
+    const create = vi.fn(async () => ({ id: ARTIFACT_ID, kind: 'plan', title: 'Plan' }))
+    const artifacts = fakeArtifactService({ create })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const ok = await handleDashboardRpc(
+      runtime, 'artifactCreate', { projectId: 'p1', kind: 'plan', title: 'Plan' }, signal(), Promise.resolve(), ...NO_SERVICES, artifacts,
+    )
+    expect(ok).toMatchObject({ ok: true, value: { id: ARTIFACT_ID } })
+    expect(create).toHaveBeenCalledWith({ projectId: 'p1', kind: 'plan', title: 'Plan' })
+
+    const missingTitle = await handleDashboardRpc(
+      runtime, 'artifactCreate', { projectId: 'p1', kind: 'plan' }, signal(), Promise.resolve(), ...NO_SERVICES, artifacts,
+    )
+    expect(missingTitle).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
+
+  it('artifactGet returns the record or a structured unknown error', async () => {
+    const get = vi.fn(() => ({ id: ARTIFACT_ID, kind: 'plan', title: 'Plan' }))
+    const artifacts = fakeArtifactService({ get })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const found = await handleDashboardRpc(runtime, 'artifactGet', { id: ARTIFACT_ID }, signal(), Promise.resolve(), ...NO_SERVICES, artifacts)
+    expect(found).toMatchObject({ ok: true, value: { id: ARTIFACT_ID } })
+    expect(get).toHaveBeenCalledWith(ARTIFACT_ID)
+
+    const missing = vi.fn(() => undefined)
+    const missingService = fakeArtifactService({ get: missing })
+    const notFound = await handleDashboardRpc(runtime, 'artifactGet', { id: ARTIFACT_ID }, signal(), Promise.resolve(), ...NO_SERVICES, missingService)
+    expect(notFound).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
+
+  it('runGenerateReport dispatches in on-demand mode', async () => {
+    const generateFinalReport = vi.fn(async () => ({ id: 'artifact-final', kind: 'final-report', title: 'Final report' }))
+    const artifacts = fakeArtifactService({ generateFinalReport })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const result = await handleDashboardRpc(runtime, 'runGenerateReport', { runId: RUN_ID }, signal(), Promise.resolve(), ...NO_SERVICES, artifacts)
+    expect(result).toMatchObject({ ok: true, value: { kind: 'final-report' } })
+    expect(generateFinalReport).toHaveBeenCalledWith(RUN_ID, 'on-demand')
+
+    const badRun = await handleDashboardRpc(runtime, 'runGenerateReport', { runId: 'nope' }, signal(), Promise.resolve(), ...NO_SERVICES, artifacts)
+    expect(badRun).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
+
+  it('runDetail attaches the run artifacts + final report when the Artifact service is mounted', async () => {
+    const finalReport = { id: 'artifact-final', kind: 'final-report', title: 'Final report', content: 'Goal\nx' }
+    const list = vi.fn(() => [{ id: ARTIFACT_ID, kind: 'plan', title: 'Plan' }, finalReport])
+    const runDetail = vi.fn(async () => ({ run: { id: RUN_ID }, events: [], truncated: false }))
+    const runs = fakeRunService({ runDetail })
+    const artifacts = fakeArtifactService({ list })
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const withArtifacts = await handleDashboardRpc(
+      runtime, 'runDetail', { runId: RUN_ID }, signal(), Promise.resolve(), runs, undefined, undefined, undefined, undefined, undefined, artifacts,
+    )
+    expect(withArtifacts).toMatchObject({
+      ok: true,
+      value: {
+        run: { id: RUN_ID },
+        artifacts: [{ id: ARTIFACT_ID }, finalReport],
+        finalReport,
+      },
+    })
+    expect(list).toHaveBeenCalledWith({ runId: RUN_ID })
+
+    const bare = await handleDashboardRpc(runtime, 'runDetail', { runId: RUN_ID }, signal(), Promise.resolve(), runs)
+    expect(bare).toMatchObject({ ok: true, value: { run: { id: RUN_ID } } })
+    expect((bare as { value: Record<string, unknown> }).value.artifacts).toBeUndefined()
   })
 })

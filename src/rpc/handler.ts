@@ -14,6 +14,8 @@ import { MEMORY_KINDS, MEMORY_STATUSES, type MemoryKind, type MemoryStatus } fro
 import type { ProjectTaskService } from '../tasks/task-service.ts'
 import type { ApprovalService } from '../approvals/approval-service.ts'
 import { APPROVAL_MODES } from '../approvals/types.ts'
+import type { ProjectArtifactService } from '../artifacts/artifact-service.ts'
+import { ARTIFACT_KINDS, type ArtifactKind } from '../artifacts/types.ts'
 import type { RunBudget } from '../runs/types.ts'
 import { runBudgetSchema } from '../runs/spec.ts'
 import type { DashboardSnapshot } from '../runtime/types.ts'
@@ -31,6 +33,7 @@ export async function handleDashboardRpc(
   tasks?: ProjectTaskService,
   memory?: ProjectMemoryService,
   approvals?: ApprovalService,
+  artifacts?: ProjectArtifactService,
 ): Promise<RpcResult<unknown>> {
   if (signal.aborted) {
     return failure('cancelled', localizedError('request.cancelled', 'Dashboard request was cancelled'))
@@ -155,13 +158,19 @@ export async function handleDashboardRpc(
         // Additive (Phase 4): attach the run's tasks when a task service is mounted.
         // Additive (Phase 7): attach the run's approvals when the Approval
         // service is mounted (the on-demand pattern, §6.2).
+        // Additive (Phase 8): attach the run's artifacts + final report when the
+        // Artifact service is mounted (the on-demand pattern, §7).
         const tasksList = tasks === undefined ? undefined : tasks.taskList(detail.run.id)
         const approvalsList = approvals === undefined ? undefined : approvals.listApprovals(detail.run.id)
-        if (tasksList === undefined && approvalsList === undefined) return success(detail)
+        const artifactsList = artifacts === undefined ? undefined : artifacts.list({ runId: detail.run.id })
+        if (tasksList === undefined && approvalsList === undefined && artifactsList === undefined) return success(detail)
+        const finalReport = artifactsList === undefined ? undefined : artifactsList.find(artifact => artifact.kind === 'final-report')
         return success({
           ...detail,
           ...(tasksList === undefined ? {} : { tasks: tasksList }),
           ...(approvalsList === undefined ? {} : { approvals: approvalsList }),
+          ...(artifactsList === undefined ? {} : { artifacts: artifactsList }),
+          ...(finalReport === undefined ? {} : { finalReport }),
         })
       }
       case 'runTransition': {
@@ -346,6 +355,48 @@ export async function handleDashboardRpc(
           ...(expectedVersion === undefined ? {} : { expectedVersion }),
         }))
       }
+      case 'artifactList': {
+        if (artifacts === undefined) return badRequest('artifactList is unavailable: the Artifact service is not mounted')
+        const runId = readUuidField(payload, 'runId')
+        const projectId = readOptionalString(payload, 'projectId')
+        if (projectId === false) return badRequest('artifactList `projectId` must be a non-empty string when provided')
+        const kind = readArtifactKind(payload)
+        if (kind === false) return badRequest('artifactList `kind` must be a valid artifact kind when provided')
+        if (runId === undefined && projectId === undefined) {
+          return badRequest('artifactList requires a uuid `runId` or a non-empty `projectId`')
+        }
+        const list = artifacts.list({
+          ...(runId === undefined ? {} : { runId }),
+          ...(runId === undefined && projectId !== undefined ? { projectId } : {}),
+          ...(kind === undefined ? {} : { kind }),
+        })
+        return success({ artifacts: list })
+      }
+      case 'artifactCreate': {
+        if (artifacts === undefined) return badRequest('artifactCreate is unavailable: the Artifact service is not mounted')
+        const input = readCreateArtifact(payload)
+        if (typeof input === 'string') return badRequest(input)
+        return success(await artifacts.create(input))
+      }
+      case 'artifactGet': {
+        if (artifacts === undefined) return badRequest('artifactGet is unavailable: the Artifact service is not mounted')
+        const id = readUuidField(payload, 'id')
+        if (id === undefined) return badRequest('artifactGet requires a uuid `id`')
+        const record = artifacts.get(id)
+        if (record === undefined) {
+          throw new DashboardDomainError('artifact.unknown', `Unknown artifact ${id}`, { id })
+        }
+        return success(record)
+      }
+      case 'runGenerateReport': {
+        if (artifacts === undefined) return badRequest('runGenerateReport is unavailable: the Artifact service is not mounted')
+        const runId = readUuidField(payload, 'runId')
+        if (runId === undefined) return badRequest('runGenerateReport requires a uuid `runId`')
+        // on-demand mode: the service throws the structured artifact.runUnknown /
+        // artifact.reportFailed error (the outer catch encodes it for the client).
+        const report = await artifacts.generateFinalReport(runId, 'on-demand')
+        return success(report)
+      }
       case 'runSetBudget': {
         if (runs === undefined) return badRequest('runSetBudget is unavailable: the Project Run service is not mounted')
         const runId = readUuidField(payload, 'runId')
@@ -492,6 +543,54 @@ function readApprovalDecision(value: unknown): 'approved' | 'rejected' | undefin
   const object = readObject(value)
   const field = object?.['decision']
   return field === 'approved' || field === 'rejected' ? field : undefined
+}
+
+/** Phase 8: an artifact kind. `false` = present but invalid. */
+function readArtifactKind(value: unknown): ArtifactKind | undefined | false {
+  const object = readObject(value)
+  if (object === undefined || !('kind' in object)) return undefined
+  const field = object['kind']
+  return typeof field === 'string' && (ARTIFACT_KINDS as readonly string[]).includes(field)
+    ? (field as ArtifactKind)
+    : false
+}
+
+/**
+ * Phase 8: read the `artifactCreate` input. Returns `undefined`-free input when
+ * well-formed, or an error string. The semantic validation (the §5.3 reasons,
+ * the 64 KB bound, the secrets scan) happens in the service, which throws the
+ * structured `artifact.*` errors.
+ */
+function readCreateArtifact(value: unknown): import('../artifacts/types.ts').ArtifactCreateInput | string {
+  const object = readObject(value)
+  const projectId = readStringField(object, 'projectId')
+  if (projectId === undefined) return 'artifactCreate requires a non-empty `projectId`'
+  const runId = readUuidField(object, 'runId')
+  if (runId !== undefined && !UUID_PATTERN.test(runId)) return 'artifactCreate `runId` must be a uuid when provided'
+  const taskId = readUuidField(object, 'taskId')
+  if (taskId !== undefined && !UUID_PATTERN.test(taskId)) return 'artifactCreate `taskId` must be a uuid when provided'
+  const kind = readArtifactKind(object)
+  if (kind === false) return 'artifactCreate `kind` must be a valid artifact kind'
+  if (kind === undefined) return 'artifactCreate requires a `kind`'
+  const title = readStringField(object, 'title')
+  if (title === undefined) return 'artifactCreate requires a non-empty `title`'
+  // Optional reference/content fields: present-but-empty is dropped (treated as
+  // absent) — the service's §5.3 rules then apply to whatever is provided.
+  const content = readOptionalString(object, 'content')
+  const path = readOptionalString(object, 'path')
+  const url = readOptionalString(object, 'url')
+  const metadata = readObjectField(object, 'metadata')
+  return {
+    projectId,
+    ...(runId === undefined ? {} : { runId }),
+    ...(taskId === undefined ? {} : { taskId }),
+    kind,
+    title,
+    ...(content === undefined || content === false ? {} : { content }),
+    ...(path === undefined || path === false ? {} : { path }),
+    ...(url === undefined || url === false ? {} : { url }),
+    ...(metadata === undefined ? {} : { metadata: metadata as Record<string, unknown> }),
+  }
 }
 
 /** Phase 7: `runCreate` approval mode. `false` = present but invalid. */

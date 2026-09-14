@@ -137,6 +137,47 @@ export interface ApprovalListPayload {
   readonly approvals: readonly ApprovalRequestView[]
 }
 
+// Phase 8: client-side artifact mirror types (spec §9). The client never
+// imports src/artifacts/** (the isolation invariant) — it carries these shapes.
+export const CLIENT_ARTIFACT_KINDS = [
+  'plan', 'research-report', 'architecture-note', 'patch', 'diff', 'test-report',
+  'validation-report', 'review-report', 'screenshot', 'log-reference', 'pull-request',
+  'external-link', 'final-report',
+] as const
+export type ClientArtifactKind = (typeof CLIENT_ARTIFACT_KINDS)[number]
+
+/** Phase 8: client-side shape of a durable artifact (spec §3.1 wire format). */
+export interface ArtifactView {
+  readonly id: string
+  readonly projectId: string
+  readonly runId?: string
+  readonly taskId?: string
+  readonly kind: ClientArtifactKind
+  readonly title: string
+  readonly content?: string
+  readonly path?: string
+  readonly url?: string
+  readonly metadata?: Record<string, unknown>
+  readonly createdAt: string
+}
+
+export interface ArtifactListPayload {
+  readonly artifacts: readonly ArtifactView[]
+}
+
+/** Phase 8: the `artifactCreate` RPC input (the client-side shape). */
+export interface ArtifactCreateInput {
+  readonly projectId: string
+  readonly runId?: string
+  readonly taskId?: string
+  readonly kind: ClientArtifactKind
+  readonly title: string
+  readonly content?: string
+  readonly path?: string
+  readonly url?: string
+  readonly metadata?: Record<string, unknown>
+}
+
 export interface DashboardDataPort {
   getSnapshot(): DashboardDataState
   subscribe(listener: () => void): () => void
@@ -189,6 +230,14 @@ export interface DashboardDataPort {
   expireApproval(id: string, expectedVersion?: number): Promise<void>
   /** Phase 7: wholesale-replace a paused/blocked run's budget limits. */
   setRunBudget(runId: string, budget: RunBudget, expectedVersion?: number): Promise<void>
+  /** Phase 8: fetch artifacts for a run or project (newest first; optional kind filter). */
+  loadArtifacts(input: { readonly runId?: string; readonly projectId?: string; readonly kind?: ClientArtifactKind }): Promise<readonly ArtifactView[]>
+  /** Phase 8: manually attach an artifact (the `final-report` kind is rejected server-side). */
+  createArtifact(input: ArtifactCreateInput): Promise<ArtifactView>
+  /** Phase 8: fetch one artifact by id (the detail view). */
+  loadArtifact(id: string): Promise<ArtifactView>
+  /** Phase 8: (re)generate the run's final report on demand (terminal runs only). */
+  generateReport(runId: string): Promise<ArtifactView>
 }
 
 /** Root overlay visibility shared by the sidebar trigger and shell-overlay entry. */
@@ -515,6 +564,58 @@ export class DashboardDataController implements DashboardDataPort {
     }
   }
 
+  async loadArtifacts(input: { readonly runId?: string; readonly projectId?: string; readonly kind?: ClientArtifactKind }): Promise<readonly ArtifactView[]> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'artifactList', input) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseArtifactList(result.value).artifacts
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async createArtifact(input: ArtifactCreateInput): Promise<ArtifactView> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'artifactCreate', input) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseArtifact(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async loadArtifact(id: string): Promise<ArtifactView> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'artifactGet', { id }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseArtifact(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
+  async generateReport(runId: string): Promise<ArtifactView> {
+    this.activeRequests += 1
+    try {
+      const result = await this.rpc.call('/dsh-dashboard', 'runGenerateReport', { runId }) as RpcResult<unknown>
+      if (!result.ok) throw dashboardRpcError(result.error.code, result.error.message)
+      return parseArtifact(result.value)
+    } catch (error) {
+      throw normalizeDashboardError(error)
+    } finally {
+      this.activeRequests -= 1
+    }
+  }
+
   private async readState(): Promise<void> {
     await this.call('state', {}, false)
   }
@@ -604,13 +705,15 @@ function parseRunDetail(value: unknown): RunDetailView {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run detail data')
   }
-  const detail = value as { run?: unknown; events?: unknown; truncated?: unknown; tasks?: unknown; approvals?: unknown }
+  const detail = value as { run?: unknown; events?: unknown; truncated?: unknown; tasks?: unknown; approvals?: unknown; artifacts?: unknown; finalReport?: unknown }
   if (!isRunView(detail.run)
     || !Array.isArray(detail.events)
     || !detail.events.every(isRunEventView)
     || typeof detail.truncated !== 'boolean'
     || (detail.tasks !== undefined && (!Array.isArray(detail.tasks) || !detail.tasks.every(isTaskView)))
-    || (detail.approvals !== undefined && (!Array.isArray(detail.approvals) || !detail.approvals.every(isApprovalRequestView)))) {
+    || (detail.approvals !== undefined && (!Array.isArray(detail.approvals) || !detail.approvals.every(isApprovalRequestView)))
+    || (detail.artifacts !== undefined && (!Array.isArray(detail.artifacts) || !detail.artifacts.every(isArtifactView)))
+    || (detail.finalReport !== undefined && !isArtifactView(detail.finalReport))) {
     throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported Run detail data')
   }
   return value as RunDetailView
@@ -644,6 +747,41 @@ function isApprovalRequestView(value: unknown): boolean {
     && typeof approval.createdAt === 'string'
     && typeof approval.updatedAt === 'string'
     && typeof approval.version === 'number'
+}
+
+function parseArtifactList(value: unknown): ArtifactListPayload {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported artifact list data')
+  }
+  const list = value as { artifacts?: unknown }
+  if (!Array.isArray(list.artifacts) || !list.artifacts.every(isArtifactView)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported artifact list data')
+  }
+  return value as ArtifactListPayload
+}
+
+function parseArtifact(value: unknown): ArtifactView {
+  if (!isArtifactView(value)) {
+    throw dashboardProtocolError('response.unsupportedState', 'Dashboard Host returned unsupported artifact data')
+  }
+  return value as ArtifactView
+}
+
+function isArtifactView(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const artifact = value as Record<string, unknown>
+  return typeof artifact.id === 'string'
+    && typeof artifact.projectId === 'string'
+    && (artifact.runId === undefined || typeof artifact.runId === 'string')
+    && (artifact.taskId === undefined || typeof artifact.taskId === 'string')
+    && typeof artifact.kind === 'string'
+    && (CLIENT_ARTIFACT_KINDS as readonly string[]).includes(artifact.kind)
+    && typeof artifact.title === 'string'
+    && (artifact.content === undefined || typeof artifact.content === 'string')
+    && (artifact.path === undefined || typeof artifact.path === 'string')
+    && (artifact.url === undefined || typeof artifact.url === 'string')
+    && (artifact.metadata === undefined || (typeof artifact.metadata === 'object' && artifact.metadata !== null && !Array.isArray(artifact.metadata)))
+    && typeof artifact.createdAt === 'string'
 }
 
 function parseRunPlan(value: unknown): RunPlanRecord {
