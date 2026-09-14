@@ -20,7 +20,7 @@ const { activePlanId: _omitActivePlan, ...executingRunBase } = executingRun
 const planningRun: ProjectRunView = {
   ...executingRunBase,
   id: PLANNING_RUN_ID,
-  goal: '需要协调的运行',
+  goal: 'Run that needs coordination',
   phase: 'planning',
   coordinatorSessionId: 'dsh-coordinator-12345678-1234-4123-8123-123456789abc',
   version: 3,
@@ -35,10 +35,10 @@ const planningSnapshot: NonNullable<typeof fixtureSnapshot> = {
 }
 
 async function openRunInspector(run: ProjectRunView): Promise<HTMLElement> {
-  fireEvent.click(screen.getByRole('button', { name: '项目运行' }))
-  const table = screen.getByRole('table', { name: '项目运行列表' })
+  fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
+  const table = screen.getByRole('table', { name: 'Project Run list' })
   fireEvent.click(within(table).getByRole('row', { name: new RegExp(run.goal.slice(0, 12)) }))
-  return screen.getByRole('complementary', { name: /运行详情/u })
+  return screen.getByRole('complementary', { name: /Run details/u })
 }
 
 describe('Dashboard Coordinator interactions (Phase 3, zh)', () => {
@@ -47,7 +47,7 @@ describe('Dashboard Coordinator interactions (Phase 3, zh)', () => {
     renderDashboard({ snapshot: planningSnapshot, onCoordinateRun })
 
     const inspector = await openRunInspector(planningRun)
-    expect(within(inspector).getByRole('button', { name: '协调' })).toBeTruthy()
+    expect(within(inspector).getByRole('button', { name: 'Coordinate' })).toBeTruthy()
   })
 
   it('hides the Coordinate action for executing and terminal runs', async () => {
@@ -55,7 +55,7 @@ describe('Dashboard Coordinator interactions (Phase 3, zh)', () => {
     renderDashboard({ snapshot: planningSnapshot, onCoordinateRun })
 
     const executingInspector = await openRunInspector(executingRun)
-    expect(within(executingInspector).queryByRole('button', { name: '协调' })).toBeNull()
+    expect(within(executingInspector).queryByRole('button', { name: 'Coordinate' })).toBeNull()
   })
 
   it('hides the Coordinate action for a terminal run', async () => {
@@ -63,7 +63,7 @@ describe('Dashboard Coordinator interactions (Phase 3, zh)', () => {
     renderDashboard({ snapshot: planningSnapshot, onCoordinateRun })
 
     const inspector = await openRunInspector(terminalRun)
-    expect(within(inspector).queryByRole('button', { name: '协调' })).toBeNull()
+    expect(within(inspector).queryByRole('button', { name: 'Coordinate' })).toBeNull()
   })
 
   it('calls onCoordinateRun and shows the pending state until it settles', async () => {
@@ -75,18 +75,18 @@ describe('Dashboard Coordinator interactions (Phase 3, zh)', () => {
     renderDashboard({ snapshot: planningSnapshot, onCoordinateRun, onRefresh })
 
     const inspector = await openRunInspector(planningRun)
-    const button = within(inspector).getByRole('button', { name: '协调' }) as HTMLButtonElement
+    const button = within(inspector).getByRole('button', { name: 'Coordinate' }) as HTMLButtonElement
     fireEvent.click(button)
     await waitFor(() => expect(onCoordinateRun).toHaveBeenCalledWith(PLANNING_RUN_ID))
 
-    const pending = within(inspector).getByRole('button', { name: '协调中…' }) as HTMLButtonElement
+    const pending = within(inspector).getByRole('button', { name: 'Coordinating…' }) as HTMLButtonElement
     expect(pending.disabled).toBe(true)
 
     release?.()
     // The surface-level refresh prop is argumentless; the run id is consumed
     // by the inspector wrapper before it reaches the surface.
     await waitFor(() => expect(onRefresh).toHaveBeenCalled())
-    await waitFor(() => expect(within(inspector).getByRole('button', { name: '协调' })).toBeTruthy())
+    await waitFor(() => expect(within(inspector).getByRole('button', { name: 'Coordinate' })).toBeTruthy())
     expect(within(inspector).getByRole('status')).toBeTruthy()
   })
 
@@ -97,12 +97,12 @@ describe('Dashboard Coordinator interactions (Phase 3, zh)', () => {
     renderDashboard({ snapshot: planningSnapshot, onCoordinateRun })
 
     const inspector = await openRunInspector(planningRun)
-    const button = within(inspector).getByRole('button', { name: '协调' }) as HTMLButtonElement
+    const button = within(inspector).getByRole('button', { name: 'Coordinate' }) as HTMLButtonElement
     fireEvent.click(button)
 
     await waitFor(() => expect(onCoordinateRun).toHaveBeenCalledWith(PLANNING_RUN_ID))
     await waitFor(() => expect(within(inspector).getByRole('status')).toBeTruthy())
-    expect((within(inspector).getByRole('button', { name: '协调' }) as HTMLButtonElement).disabled).toBe(false)
+    expect((within(inspector).getByRole('button', { name: 'Coordinate' }) as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('renders the Coordinator section with the completed summary and session tail', async () => {
@@ -112,7 +112,7 @@ describe('Dashboard Coordinator interactions (Phase 3, zh)', () => {
         run: planningRun,
         truncated: false,
         events: [
-          { id: 'ce2', type: 'run.coordinator.completed', title: 'Coordinator planning complete', detail: '采用 supervisor 模式，两个并行任务后统一验收。', seq: 3, at: '2026-08-14T03:00:00.000Z' },
+          { id: 'ce2', type: 'run.coordinator.completed', title: 'Coordinator planning complete', detail: 'Adopted supervisor mode, with unified acceptance after two parallel tasks.', seq: 3, at: '2026-08-14T03:00:00.000Z' },
           { id: 'ce1', type: 'run.coordinator.started', title: 'Coordinator started', detail: 'dsh-coordinator-12345678-1234-4123-8123-123456789abc', seq: 2, at: '2026-08-14T02:58:00.000Z' },
           { id: 'e1', type: 'run.created', title: 'Run created', seq: 1, at: '2026-08-14T02:50:00.000Z' },
         ],
@@ -121,11 +121,11 @@ describe('Dashboard Coordinator interactions (Phase 3, zh)', () => {
     renderDashboard({ snapshot: planningSnapshot, onLoadRunDetail })
 
     const inspector = await openRunInspector(planningRun)
-    await waitFor(() => expect(within(inspector).getByText('已完成')).toBeTruthy())
+    await waitFor(() => expect(within(inspector).getByText('complete')).toBeTruthy())
     expect(within(inspector).getByText('56789abc')).toBeTruthy()
-    expect(within(inspector).getByText('规划摘要')).toBeTruthy()
+    expect(within(inspector).getByText('Planning summary')).toBeTruthy()
     // The summary detail renders both in the timeline event and the section.
-    expect(within(inspector).getAllByText('采用 supervisor 模式，两个并行任务后统一验收。').length).toBeGreaterThanOrEqual(1)
+    expect(within(inspector).getAllByText('Adopted supervisor mode, with unified acceptance after two parallel tasks.').length).toBeGreaterThanOrEqual(1)
   })
 
   it('renders the Coordinator section as in progress while only the started event exists', async () => {
@@ -143,8 +143,8 @@ describe('Dashboard Coordinator interactions (Phase 3, zh)', () => {
     renderDashboard({ snapshot: planningSnapshot, onLoadRunDetail })
 
     const inspector = await openRunInspector(planningRun)
-    await waitFor(() => expect(within(inspector).getByText('进行中')).toBeTruthy())
-    expect(within(inspector).queryByText('规划摘要')).toBeNull()
+    await waitFor(() => expect(within(inspector).getByText('in progress')).toBeTruthy())
+    expect(within(inspector).queryByText('Planning summary')).toBeNull()
   })
 })
 

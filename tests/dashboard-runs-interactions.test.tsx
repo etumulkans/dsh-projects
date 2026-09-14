@@ -43,35 +43,35 @@ describe('Dashboard Project Run interactions', () => {
     const onLoadRunDetail = vi.fn(async (runId: string) => runDetailFixture(runId))
     renderDashboard({ onLoadRunDetail })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目运行' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
 
-    const table = screen.getByRole('table', { name: '项目运行列表' })
-    expect(table.textContent).toContain('为本地任务源实现健康检查端点并补齐单元测试')
-    expect(table.textContent).toContain('执行中')
-    expect(table.textContent).toContain('已成功')
+    const table = screen.getByRole('table', { name: 'Project Run list' })
+    expect(table.textContent).toContain('Implement health check endpoint for the local task source and add unit tests')
+    expect(table.textContent).toContain('Executing')
+    expect(table.textContent).toContain('Succeeded')
 
-    fireEvent.click(within(table).getByRole('row', { name: /为本地任务源实现健康检查端点并补齐单元测试/u }))
+    fireEvent.click(within(table).getByRole('row', { name: /Implement health check endpoint for the local task source and add unit tests/u }))
 
-    const inspector = screen.getByRole('complementary', { name: /运行详情/u })
-    expect(inspector.textContent).toContain('执行中')
-    expect(inspector.textContent).toContain('手动')
+    const inspector = screen.getByRole('complementary', { name: /Run details/u })
+    expect(inspector.textContent).toContain('Executing')
+    expect(inspector.textContent).toContain('Manual')
 
     await waitFor(() => expect(onLoadRunDetail).toHaveBeenCalledWith(executingRun.id))
     expect(await within(inspector).findByText('Run created → planning')).toBeTruthy()
     expect(within(inspector).getByText('Run created')).toBeTruthy()
-    expect(within(inspector).queryByText('暂无事件。')).toBeNull()
+    expect(within(inspector).queryByText('No events yet.')).toBeNull()
   })
 
   it('pauses a running Run with the current version guard', async () => {
     const onRunTransition = vi.fn(async () => {})
     renderDashboard({ onRunTransition, onLoadRunDetail: async runId => runDetailFixture(runId) })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目运行' }))
-    const table = screen.getByRole('table', { name: '项目运行列表' })
-    fireEvent.click(within(table).getByRole('row', { name: /为本地任务源实现健康检查端点并补齐单元测试/u }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
+    const table = screen.getByRole('table', { name: 'Project Run list' })
+    fireEvent.click(within(table).getByRole('row', { name: /Implement health check endpoint for the local task source and add unit tests/u }))
 
-    const inspector = screen.getByRole('complementary', { name: /运行详情/u })
-    fireEvent.click(within(inspector).getByRole('button', { name: '暂停' }))
+    const inspector = screen.getByRole('complementary', { name: /Run details/u })
+    fireEvent.click(within(inspector).getByRole('button', { name: 'Pause' }))
 
     await waitFor(() => expect(onRunTransition).toHaveBeenCalledWith({
       runId: executingRun.id,
@@ -84,13 +84,13 @@ describe('Dashboard Project Run interactions', () => {
     const onRunTransition = vi.fn(async () => {})
     renderDashboard({ onRunTransition, onLoadRunDetail: async runId => runDetailFixture(runId) })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目运行' }))
-    const table = screen.getByRole('table', { name: '项目运行列表' })
-    fireEvent.click(within(table).getByRole('row', { name: /调研 Agent Teams 实验能力并输出适配层方案/u }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
+    const table = screen.getByRole('table', { name: 'Project Run list' })
+    fireEvent.click(within(table).getByRole('row', { name: /Research Agent Teams experimental capabilities and produce an adapter layer plan/u }))
 
-    const inspector = screen.getByRole('complementary', { name: /运行详情/u })
-    expect(within(inspector).getByText('已暂停')).toBeTruthy()
-    fireEvent.click(within(inspector).getByRole('button', { name: '继续' }))
+    const inspector = screen.getByRole('complementary', { name: /Run details/u })
+    expect(within(inspector).getByText('Paused')).toBeTruthy()
+    fireEvent.click(within(inspector).getByRole('button', { name: 'Resume' }))
 
     await waitFor(() => expect(onRunTransition).toHaveBeenCalledWith({
       runId: pausedRun.id,
@@ -104,15 +104,15 @@ describe('Dashboard Project Run interactions', () => {
     const onRunTransition = vi.fn(async () => {})
     renderDashboard({ onRunTransition, onLoadRunDetail: async runId => runDetailFixture(runId) })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目运行' }))
-    const table = screen.getByRole('table', { name: '项目运行列表' })
-    fireEvent.click(within(table).getByRole('row', { name: /修复全局看板跨项目状态归一化/u }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
+    const table = screen.getByRole('table', { name: 'Project Run list' })
+    fireEvent.click(within(table).getByRole('row', { name: /Fix global board cross-project state normalization/u }))
 
-    const inspector = screen.getByRole('complementary', { name: /运行详情/u })
-    expect(within(inspector).getByText('已成功')).toBeTruthy()
-    expect(within(inspector).queryByRole('button', { name: '暂停' })).toBeNull()
-    expect(within(inspector).queryByRole('button', { name: '取消运行' })).toBeNull()
-    expect(within(inspector).getByText('已修复并补充回归测试。')).toBeTruthy()
+    const inspector = screen.getByRole('complementary', { name: /Run details/u })
+    expect(within(inspector).getByText('Succeeded')).toBeTruthy()
+    expect(within(inspector).queryByRole('button', { name: 'Pause' })).toBeNull()
+    expect(within(inspector).queryByRole('button', { name: 'Cancel Run' })).toBeNull()
+    expect(within(inspector).getByText('Fixed and added regression tests.')).toBeTruthy()
     expect(onRunTransition).not.toHaveBeenCalled()
     expect(terminalRun.phase).toBe('succeeded')
   })
@@ -121,16 +121,16 @@ describe('Dashboard Project Run interactions', () => {
     const onCreateRun = vi.fn(async () => {})
     renderDashboard({ onCreateRun })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目运行' }))
-    fireEvent.click(screen.getByRole('button', { name: '新建运行' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
+    fireEvent.click(screen.getByRole('button', { name: 'New Run' }))
 
-    const dialog = screen.getByRole('dialog', { name: '新建项目运行' })
-    fireEvent.change(within(dialog).getByLabelText('目标'), { target: { value: '  实现运行详情视图  ' } })
-    fireEvent.change(within(dialog).getByLabelText('来源引用（可选）'), { target: { value: 'JIRA-12' } })
-    fireEvent.click(within(dialog).getByRole('button', { name: '创建运行' }))
+    const dialog = screen.getByRole('dialog', { name: 'New Project Run' })
+    fireEvent.change(within(dialog).getByLabelText('Goal'), { target: { value: '  Implement run detail view  ' } })
+    fireEvent.change(within(dialog).getByLabelText('Source reference (optional)'), { target: { value: 'JIRA-12' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create Run' }))
 
-    await waitFor(() => expect(onCreateRun).toHaveBeenCalledWith({ goal: '实现运行详情视图', sourceRef: 'JIRA-12' }))
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建项目运行' })).toBeNull())
+    await waitFor(() => expect(onCreateRun).toHaveBeenCalledWith({ goal: 'Implement run detail view', sourceRef: 'JIRA-12' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New Project Run' })).toBeNull())
   })
 
   it('keeps the dialog open when creation fails', async () => {
@@ -139,23 +139,23 @@ describe('Dashboard Project Run interactions', () => {
     })
     renderDashboard({ onCreateRun })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目运行' }))
-    fireEvent.click(screen.getByRole('button', { name: '新建运行' }))
-    const dialog = screen.getByRole('dialog', { name: '新建项目运行' })
-    fireEvent.change(within(dialog).getByLabelText('目标'), { target: { value: 'will fail' } })
-    fireEvent.click(within(dialog).getByRole('button', { name: '创建运行' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
+    fireEvent.click(screen.getByRole('button', { name: 'New Run' }))
+    const dialog = screen.getByRole('dialog', { name: 'New Project Run' })
+    fireEvent.change(within(dialog).getByLabelText('Goal'), { target: { value: 'will fail' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create Run' }))
 
     await waitFor(() => expect(onCreateRun).toHaveBeenCalledTimes(1))
-    expect(screen.getByRole('dialog', { name: '新建项目运行' })).toBeTruthy()
+    expect(screen.getByRole('dialog', { name: 'New Project Run' })).toBeTruthy()
   })
 
   it('renders the empty state when the snapshot has no runs section', async () => {
     const { runs: _runs, ...withoutRuns } = fixtureSnapshot
     renderDashboard({ snapshot: withoutRuns, onCreateRun: async () => {} })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目运行' }))
-    expect(screen.getByText('尚无项目运行。')).toBeTruthy()
-    expect(screen.getByRole('button', { name: '新建运行' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
+    expect(screen.getByText('No project Runs yet.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'New Run' })).toBeTruthy()
   })
 
   it('shows project names and hides manual creation in the global view', async () => {
@@ -166,10 +166,10 @@ describe('Dashboard Project Run interactions', () => {
     }
     renderDashboard({ snapshot })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目运行' }))
-    const table = screen.getByRole('table', { name: '项目运行列表' })
+    fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
+    const table = screen.getByRole('table', { name: 'Project Run list' })
     expect(table.textContent).toContain('dsh-dashboard')
-    expect(screen.queryByRole('button', { name: '新建运行' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'New Run' })).toBeNull()
   })
 })
 

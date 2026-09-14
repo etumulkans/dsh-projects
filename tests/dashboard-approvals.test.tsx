@@ -78,68 +78,68 @@ function renderDashboard(locale: DashboardLocale, overrides: Partial<ComponentPr
 }
 
 async function openRunInspector(): Promise<HTMLElement> {
-  fireEvent.click(screen.getByRole('button', { name: /项目运行|Project Runs/u }))
-  const table = screen.getByRole('table', { name: /项目运行列表|Project Run list/u })
-  fireEvent.click(within(table).getByRole('row', { name: /为本地任务源实现健康检查端点并补齐单元测试/u }))
-  return screen.getByRole('complementary', { name: /运行详情|Run details/u })
+  fireEvent.click(screen.getByRole('button', { name: /Project Runs/u }))
+  const table = screen.getByRole('table', { name: /Project Run list/u })
+  fireEvent.click(within(table).getByRole('row', { name: /Implement health check endpoint for the local task source and add unit tests/u }))
+  return screen.getByRole('complementary', { name: /Run details/u })
 }
 
 describe('Dashboard Approvals + budgets (Phase 7, spec §7)', () => {
   it('renders a pending approval with approve/reject actions and resolves it (zh)', async () => {
     const onResolveApproval = vi.fn(async () => {})
-    renderDashboard('zh', { onResolveApproval, onLoadRunDetail: async () => ({ run: executingRun, events: [], truncated: false, approvals: [approvalFixture()] }) })
+    renderDashboard('en', { onResolveApproval, onLoadRunDetail: async () => ({ run: executingRun, events: [], truncated: false, approvals: [approvalFixture()] }) })
 
     const inspector = await openRunInspector()
     // The approval-mode chip (from the snapshot run) and the Approvals section.
-    expect(within(inspector).getByText('计划')).toBeTruthy()
-    expect(within(inspector).getByText('审批')).toBeTruthy()
+    expect(within(inspector).getByText('Plan')).toBeTruthy()
+    expect(within(inspector).getByText('Approvals')).toBeTruthy()
     // The pending merge approval object (detail loads async, so wait for it).
     expect(await within(inspector).findByText('Merge 3 task branch(es) into dsh/integrate')).toBeTruthy()
-    expect(await within(inspector).findByText('待处理')).toBeTruthy()
-    expect(await within(inspector).findByText('合并')).toBeTruthy()
+    expect(await within(inspector).findByText('Pending')).toBeTruthy()
+    expect(await within(inspector).findByText('Merge')).toBeTruthy()
 
     // Approve dispatches the decision with the object's version guard.
-    fireEvent.click(await within(inspector).findByRole('button', { name: '批准' }))
+    fireEvent.click(await within(inspector).findByRole('button', { name: 'Approve' }))
     await waitFor(() => expect(onResolveApproval).toHaveBeenCalledWith(
       'a1b2c3d4-0000-4000-8000-000000000001',
       'approved',
       1,
     ))
-    expect(await within(inspector).findByText('审批已批准')).toBeTruthy()
+    expect(await within(inspector).findByText('Approval approved')).toBeTruthy()
   })
 
   it('rejects a pending approval (zh)', async () => {
     const onResolveApproval = vi.fn(async () => {})
-    renderDashboard('zh', { onResolveApproval, onLoadRunDetail: async () => ({ run: executingRun, events: [], truncated: false, approvals: [approvalFixture()] }) })
+    renderDashboard('en', { onResolveApproval, onLoadRunDetail: async () => ({ run: executingRun, events: [], truncated: false, approvals: [approvalFixture()] }) })
 
     const inspector = await openRunInspector()
-    fireEvent.click(await within(inspector).findByRole('button', { name: '拒绝' }))
+    fireEvent.click(await within(inspector).findByRole('button', { name: 'Reject' }))
     await waitFor(() => expect(onResolveApproval).toHaveBeenCalledWith(
       'a1b2c3d4-0000-4000-8000-000000000001',
       'rejected',
       1,
     ))
-    expect(await within(inspector).findByText('审批已拒绝')).toBeTruthy()
+    expect(await within(inspector).findByText('Approval rejected')).toBeTruthy()
   })
 
   it('shows the empty approvals state when the run has no approval objects (zh)', async () => {
-    renderDashboard('zh', { onLoadRunDetail: async () => ({ run: executingRun, events: [], truncated: false, approvals: [] }) })
+    renderDashboard('en', { onLoadRunDetail: async () => ({ run: executingRun, events: [], truncated: false, approvals: [] }) })
 
     const inspector = await openRunInspector()
-    expect(await within(inspector).findByText('此运行没有审批对象。')).toBeTruthy()
-    expect(within(inspector).queryByRole('button', { name: '批准' })).toBeNull()
+    expect(await within(inspector).findByText('No approval objects for this run.')).toBeTruthy()
+    expect(within(inspector).queryByRole('button', { name: 'Approve' })).toBeNull()
   })
 
   it('renders the budget panel with limits, usage, and the 80% warning (zh)', async () => {
-    renderDashboard('zh', { onLoadRunDetail: async () => ({ run: executingRun, events: [], truncated: false, approvals: [] }) })
+    renderDashboard('en', { onLoadRunDetail: async () => ({ run: executingRun, events: [], truncated: false, approvals: [] }) })
 
     const inspector = await openRunInspector()
     // The budget section title and the two configured keys.
-    expect(within(inspector).getByText('预算')).toBeTruthy()
-    expect(within(inspector).getByText('最大总 token')).toBeTruthy()
-    expect(within(inspector).getByText('最大运行时长（分钟）')).toBeTruthy()
+    expect(within(inspector).getByText('Budget')).toBeTruthy()
+    expect(within(inspector).getByText('Max total tokens')).toBeTruthy()
+    expect(within(inspector).getByText('Max runtime (min)')).toBeTruthy()
     // The 80% warning marker sits on the maxTotalTokens row.
-    const budgetList = within(inspector).getAllByRole('list').find(list => list.textContent?.includes('最大总 token'))!
+    const budgetList = within(inspector).getAllByRole('list').find(list => list.textContent?.includes('Max total tokens'))!
     expect(budgetList.querySelector('.dshd-budget-warning')).not.toBeNull()
     // Token usage is rendered as "used / limit" (compact numbers).
     expect(budgetList.textContent).toContain('/ ')
@@ -147,10 +147,10 @@ describe('Dashboard Approvals + budgets (Phase 7, spec §7)', () => {
 
   it('hides the budget panel when the run has no budget (zh)', async () => {
     // The plain fixture snapshot has no budget on the run.
-    renderDashboard('zh', { snapshot: fixtureSnapshot, onLoadRunDetail: async () => ({ run: executingRun, events: [], truncated: false, approvals: [] }) })
+    renderDashboard('en', { snapshot: fixtureSnapshot, onLoadRunDetail: async () => ({ run: executingRun, events: [], truncated: false, approvals: [] }) })
 
     const inspector = await openRunInspector()
-    expect(within(inspector).queryByText('预算')).toBeNull()
+    expect(within(inspector).queryByText('Budget')).toBeNull()
   })
 
   it('renders the Approvals + Budget sections in English (en)', async () => {
@@ -176,28 +176,28 @@ describe('Dashboard Approvals + budgets (Phase 7, spec §7)', () => {
 describe('Dashboard New Run dialog (Phase 7, spec §7.3)', () => {
   it('submits a goal with an approval mode and budget fields (zh)', async () => {
     const onCreateRun = vi.fn(async () => {})
-    renderDashboard('zh', { snapshot: fixtureSnapshot, onCreateRun })
+    renderDashboard('en', { snapshot: fixtureSnapshot, onCreateRun })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目运行' }))
-    fireEvent.click(screen.getByRole('button', { name: '新建运行' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
+    fireEvent.click(screen.getByRole('button', { name: 'New Run' }))
 
-    const dialog = screen.getByRole('dialog', { name: '新建项目运行' })
+    const dialog = screen.getByRole('dialog', { name: 'New Project Run' })
     // The approval-mode select is present with the four modes.
-    const modeSelect = within(dialog).getByLabelText('审批模式')
+    const modeSelect = within(dialog).getByLabelText('Approval mode')
     expect(modeSelect).toBeTruthy()
-    expect(within(dialog).getByText('使用默认')).toBeTruthy()
+    expect(within(dialog).getByText('Use default')).toBeTruthy()
     // The nine budget fields are present.
-    expect(within(dialog).getByLabelText('最大总 token')).toBeTruthy()
-    expect(within(dialog).getByLabelText('最大运行时长（分钟）')).toBeTruthy()
-    expect(within(dialog).getByLabelText('最大成本')).toBeTruthy()
+    expect(within(dialog).getByLabelText('Max total tokens')).toBeTruthy()
+    expect(within(dialog).getByLabelText('Max runtime (min)')).toBeTruthy()
+    expect(within(dialog).getByLabelText('Max cost')).toBeTruthy()
 
     // Fill the goal, pick a mode, and set two budget limits.
-    fireEvent.change(within(dialog).getByLabelText('目标'), { target: { value: 'Ship the feature' } })
+    fireEvent.change(within(dialog).getByLabelText('Goal'), { target: { value: 'Ship the feature' } })
     fireEvent.change(modeSelect, { target: { value: 'guarded' } })
-    fireEvent.change(within(dialog).getByLabelText('最大总 token'), { target: { value: '5000' } })
-    fireEvent.change(within(dialog).getByLabelText('最大运行时长（分钟）'), { target: { value: '30' } })
+    fireEvent.change(within(dialog).getByLabelText('Max total tokens'), { target: { value: '5000' } })
+    fireEvent.change(within(dialog).getByLabelText('Max runtime (min)'), { target: { value: '30' } })
 
-    fireEvent.click(within(dialog).getByRole('button', { name: '创建运行' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create Run' }))
     await waitFor(() => expect(onCreateRun).toHaveBeenCalledWith({
       goal: 'Ship the feature',
       approvalMode: 'guarded',
@@ -207,14 +207,14 @@ describe('Dashboard New Run dialog (Phase 7, spec §7.3)', () => {
 
   it('omits approval mode and budget when left empty (zh)', async () => {
     const onCreateRun = vi.fn(async () => {})
-    renderDashboard('zh', { snapshot: fixtureSnapshot, onCreateRun })
+    renderDashboard('en', { snapshot: fixtureSnapshot, onCreateRun })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目运行' }))
-    fireEvent.click(screen.getByRole('button', { name: '新建运行' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
+    fireEvent.click(screen.getByRole('button', { name: 'New Run' }))
 
-    const dialog = screen.getByRole('dialog', { name: '新建项目运行' })
-    fireEvent.change(within(dialog).getByLabelText('目标'), { target: { value: 'Just a goal' } })
-    fireEvent.click(within(dialog).getByRole('button', { name: '创建运行' }))
+    const dialog = screen.getByRole('dialog', { name: 'New Project Run' })
+    fireEvent.change(within(dialog).getByLabelText('Goal'), { target: { value: 'Just a goal' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create Run' }))
     await waitFor(() => expect(onCreateRun).toHaveBeenCalledWith({ goal: 'Just a goal' }))
   })
 

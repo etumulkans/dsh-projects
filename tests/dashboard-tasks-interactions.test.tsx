@@ -32,12 +32,12 @@ const succeededTask: ProjectTaskView = {
   ...taskBase,
   id: TASK_SUCCEEDED,
   planTaskId: 't1',
-  title: '实现健康检查端点',
+  title: 'Implement health check endpoint',
   status: 'succeeded',
   dependencies: [],
   attempt: 1,
   maxAttempts: 3,
-  outputSummary: '端点已上线，测试全部通过。',
+  outputSummary: 'Endpoint is live; all tests pass.',
   completedAt: '2026-08-14T02:25:00.000Z',
 }
 
@@ -45,7 +45,7 @@ const runningTask: ProjectTaskView = {
   ...taskBase,
   id: TASK_RUNNING,
   planTaskId: 't2',
-  title: '补齐单元测试',
+  title: 'Add unit tests',
   status: 'running',
   dependencies: [TASK_SUCCEEDED],
   attempt: 1,
@@ -58,19 +58,19 @@ const failedTask: ProjectTaskView = {
   ...taskBase,
   id: TASK_FAILED,
   planTaskId: 't3',
-  title: '修复 CI 配置',
+  title: 'Fix CI configuration',
   status: 'failed',
   dependencies: [],
   attempt: 3,
   maxAttempts: 3,
-  error: 'CI 在解析配置时失败',
+  error: 'CI failed while parsing the configuration',
 }
 
 const blockedTask: ProjectTaskView = {
   ...taskBase,
   id: TASK_BLOCKED,
   planTaskId: 't4',
-  title: '补充端到端覆盖',
+  title: 'Add end-to-end coverage',
   status: 'blocked',
   dependencies: [TASK_FAILED],
   attempt: 0,
@@ -80,7 +80,7 @@ const pendingTask: ProjectTaskView = {
   ...taskBase,
   id: TASK_PENDING,
   planTaskId: 't5',
-  title: '撰写发布说明',
+  title: 'Write release notes',
   status: 'pending',
   dependencies: [TASK_BLOCKED],
   attempt: 0,
@@ -93,10 +93,10 @@ const detailView: RunDetailView = {
   tasks: [succeededTask, runningTask, failedTask, blockedTask, pendingTask],
 }
 
-async function openRunInspector(run: ProjectRunView, locale: 'zh' | 'en' = 'zh'): Promise<HTMLElement> {
+async function openRunInspector(run: ProjectRunView, locale: 'en' = 'en'): Promise<HTMLElement> {
   const names = locale === 'en'
     ? { tab: 'Project Runs', table: 'Project Run list', inspector: /Run details/u }
-    : { tab: '项目运行', table: '项目运行列表', inspector: /运行详情/u }
+    : { tab: 'Project Runs', table: 'Project Run list', inspector: /Run details/u }
   fireEvent.click(screen.getByRole('button', { name: names.tab }))
   const table = screen.getByRole('table', { name: names.table })
   fireEvent.click(within(table).getByRole('row', { name: new RegExp(run.goal.slice(0, 12)) }))
@@ -113,30 +113,30 @@ describe('Dashboard Task execution interactions', () => {
     await waitFor(() => expect(onLoadRunDetail).toHaveBeenCalledWith(executingRun.id))
 
     // section + worker kind from the snapshot + the counts chip from the run view
-    expect(within(inspector).getByText('任务')).toBeTruthy()
-    expect(within(inspector).getByText('本地代理')).toBeTruthy()
-    expect(within(inspector).getByText('任务 0/5 完成')).toBeTruthy()
+    expect(within(inspector).getByText('Tasks')).toBeTruthy()
+    expect(within(inspector).getByText('Local agent')).toBeTruthy()
+    expect(within(inspector).getByText('Tasks 0/5 done')).toBeTruthy()
 
     // one row per status with its zh status pill
-    expect(within(inspector).getByText('已完成')).toBeTruthy()
-    expect(within(inspector).getByText('运行中')).toBeTruthy()
-    expect(within(inspector).getByText('失败')).toBeTruthy()
-    expect(within(inspector).getByText('受阻')).toBeTruthy()
-    expect(within(inspector).getByText('待调度')).toBeTruthy()
+    expect(within(inspector).getByText('Succeeded')).toBeTruthy()
+    expect(within(inspector).getByText('Running')).toBeTruthy()
+    expect(within(inspector).getByText('Failed')).toBeTruthy()
+    expect(within(inspector).getByText('Blocked')).toBeTruthy()
+    expect(within(inspector).getByText('Pending')).toBeTruthy()
 
     // dependency labels resolve the dependency's plan position; the blocked row
     // names its failed dependency explicitly
-    expect(within(inspector).getAllByText('依赖：t1').length).toBeGreaterThanOrEqual(1)
-    expect(within(inspector).getByText('受阻于：t3')).toBeTruthy()
+    expect(within(inspector).getAllByText('Depends on: t1').length).toBeGreaterThanOrEqual(1)
+    expect(within(inspector).getByText('Blocked by: t3')).toBeTruthy()
 
     // attempt counters and the failure error text
-    expect(within(inspector).getAllByText('第 1/3 次')).toHaveLength(2)
-    expect(within(inspector).getByText('第 3/3 次')).toBeTruthy()
-    expect(within(inspector).getByText('CI 在解析配置时失败')).toBeTruthy()
-    expect(within(inspector).getByText('端点已上线，测试全部通过。')).toBeTruthy()
+    expect(within(inspector).getAllByText('Attempt 1/3')).toHaveLength(2)
+    expect(within(inspector).getByText('Attempt 3/3')).toBeTruthy()
+    expect(within(inspector).getByText('CI failed while parsing the configuration')).toBeTruthy()
+    expect(within(inspector).getByText('Endpoint is live; all tests pass.')).toBeTruthy()
 
     // the retry action exists only on the failed row
-    expect(within(inspector).getByRole('button', { name: '重试' })).toBeTruthy()
+    expect(within(inspector).getByRole('button', { name: 'Retry' })).toBeTruthy()
   })
 
   it('retries a failed task: pending state, then the success notice and a refresh', async () => {
@@ -149,14 +149,14 @@ describe('Dashboard Task execution interactions', () => {
     const inspector = await openRunInspector(executingRun)
     await waitFor(() => expect(onLoadRunDetail).toHaveBeenCalledWith(executingRun.id))
 
-    fireEvent.click(within(inspector).getByRole('button', { name: '重试' }))
+    fireEvent.click(within(inspector).getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(onTaskRetry).toHaveBeenCalledWith(TASK_FAILED))
     // while the RPC is in flight the row shows the pending label
-    expect(within(inspector).getByText('重试中…')).toBeTruthy()
+    expect(within(inspector).getByText('Retrying…')).toBeTruthy()
 
     releaseRetry?.()
-    await waitFor(() => expect(within(inspector).getByText('任务已重新排队')).toBeTruthy())
-    expect(within(inspector).queryByText('重试中…')).toBeNull()
+    await waitFor(() => expect(within(inspector).getByText('Task re-queued')).toBeTruthy())
+    expect(within(inspector).queryByText('Retrying…')).toBeNull()
     // the success path refreshes the snapshot
     expect(onRefresh).toHaveBeenCalled()
   })
@@ -171,12 +171,12 @@ describe('Dashboard Task execution interactions', () => {
     const inspector = await openRunInspector(executingRun)
     await waitFor(() => expect(onLoadRunDetail).toHaveBeenCalledWith(executingRun.id))
 
-    fireEvent.click(within(inspector).getByRole('button', { name: '重试' }))
+    fireEvent.click(within(inspector).getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(onTaskRetry).toHaveBeenCalledWith(TASK_FAILED))
 
     await waitFor(() => expect(within(inspector).getByText('task.retryNotAllowed')).toBeTruthy())
     // the failed row stays with its retry action for the operator's next attempt
-    expect(within(inspector).getByRole('button', { name: '重试' })).toBeTruthy()
+    expect(within(inspector).getByRole('button', { name: 'Retry' })).toBeTruthy()
   })
 
   it('shows the empty state when the Host has no tasks for the run', async () => {
@@ -186,7 +186,7 @@ describe('Dashboard Task execution interactions', () => {
 
     const inspector = await openRunInspector(executingRun)
     await waitFor(() => expect(onLoadRunDetail).toHaveBeenCalledWith(executingRun.id))
-    expect(within(inspector).getByText('暂无任务')).toBeTruthy()
+    expect(within(inspector).getByText('No tasks yet')).toBeTruthy()
   })
 
   it('renders the zh unavailable-worker banner when the composition has no runtime', async () => {
@@ -216,7 +216,7 @@ describe('Dashboard Task execution interactions', () => {
 
     const inspector = await openRunInspector(executingRun)
     await waitFor(() => expect(onLoadRunDetail).toHaveBeenCalledWith(executingRun.id))
-    expect(within(inspector).getByText('执行不可用：当前组合未挂载代理运行时')).toBeTruthy()
+    expect(within(inspector).getByText('Execution unavailable: no agent runtime is mounted in this composition')).toBeTruthy()
   })
 })
 
@@ -231,12 +231,12 @@ describe('Dashboard Phase 5 Git isolation UI', () => {
     ...taskBase,
     id: TASK_SUCCEEDED,
     planTaskId: 't1',
-    title: '实现健康检查端点',
+    title: 'Implement health check endpoint',
     status: 'succeeded',
     dependencies: [],
     attempt: 1,
     maxAttempts: 3,
-    outputSummary: '端点已上线。',
+    outputSummary: 'Endpoint is live.',
     branch: taskBranch,
     baseCommit: '1111111111111111111111111111111111111111',
     headCommit: taskHead,
@@ -282,7 +282,7 @@ describe('Dashboard Phase 5 Git isolation UI', () => {
     const panel = within(inspector).getByRole('status')
     expect(within(panel).getByText(integrationBranch)).toBeTruthy()
     expect(within(panel).getByText(integrationHead.slice(0, 7))).toBeTruthy()
-    expect(within(panel).getByText('已成功')).toBeTruthy()
+    expect(within(panel).getByText('Succeeded')).toBeTruthy()
 
     // the task row carries its branch chip with the full head in the title
     expect(screen.getByTitle(`${taskBranch} @ ${taskHead}`)).toBeTruthy()
@@ -377,7 +377,7 @@ describe('Dashboard Phase 5 Git isolation UI', () => {
           ...taskBase,
           id: TASK_SUCCEEDED,
           planTaskId: 't1',
-          title: '实现健康检查端点',
+          title: 'Implement health check endpoint',
           status: 'succeeded',
           dependencies: [],
           attempt: 1,
@@ -390,9 +390,9 @@ describe('Dashboard Phase 5 Git isolation UI', () => {
     const inspector = await openRunInspector(run)
     await waitFor(() => expect(onLoadRunDetail).toHaveBeenCalledWith(run.id))
 
-    expect(within(inspector).getByText('该项目不是 Git 仓库：任务在共享目录中执行，未做工作树隔离。')).toBeTruthy()
+    expect(within(inspector).getByText('This project is not a Git repository: tasks ran in the shared tree without worktree isolation.')).toBeTruthy()
     // no integration panel and no branch chip for non-Git tasks
-    expect(within(inspector).queryByText('集成')).toBeNull()
+    expect(within(inspector).queryByText('Integration')).toBeNull()
     expect(screen.queryByTitle(new RegExp(`^${taskBranch}`))).toBeNull()
   })
 })

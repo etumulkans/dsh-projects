@@ -58,11 +58,11 @@ function renderAutomationsDashboard(
 describe('Dashboard Automations tab (Phase 9, spec §10.5)', () => {
   it('renders the automations tab between artifacts and configuration in zh', () => {
     renderAutomationsDashboard()
-    const tab = screen.getByRole('button', { name: '自动化' })
+    const tab = screen.getByRole('button', { name: 'Automations' })
     expect(tab).toBeTruthy()
     const tabs = Array.from(document.querySelectorAll('button')).map(button => button.textContent)
-    expect(tabs.indexOf('自动化')).toBeGreaterThan(tabs.indexOf('项目产物'))
-    expect(tabs.indexOf('自动化')).toBeLessThan(tabs.indexOf('配置'))
+    expect(tabs.indexOf('Automations')).toBeGreaterThan(tabs.indexOf('Project Artifacts'))
+    expect(tabs.indexOf('Automations')).toBeLessThan(tabs.indexOf('Configuration'))
   })
 
   it('renders the automations tab label in English under the en locale', () => {
@@ -92,35 +92,35 @@ describe('Dashboard Automations tab (Phase 9, spec §10.5)', () => {
   it('fetches the first project on demand when the tab opens', async () => {
     const onLoadTriggers = vi.fn(async () => [trigger()])
     renderAutomationsDashboard({ onLoadTriggers })
-    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Automations' }))
     await waitFor(() => expect(onLoadTriggers).toHaveBeenCalledTimes(1))
     expect(onLoadTriggers).toHaveBeenCalledWith(FIRST_PROJECT)
   })
 
   it('shows the empty marker when a project has no triggers', async () => {
     renderAutomationsDashboard({ onLoadTriggers: async () => [] })
-    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
-    await waitFor(() => expect(screen.getByText('暂无触发器')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Automations' }))
+    await waitFor(() => expect(screen.getByText('No triggers yet')).toBeTruthy())
   })
 
   it('lists a trigger with its type, status, and goal template', async () => {
     renderAutomationsDashboard()
-    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Automations' }))
     await waitFor(() => expect(screen.getByText('Fix {{issue.key}}')).toBeTruthy())
     // The type badge + enabled status.
-    expect(screen.getByText('跟踪源')).toBeTruthy()
-    expect(screen.getByText('已启用')).toBeTruthy()
+    expect(screen.getByText('Tracker source')).toBeTruthy()
+    expect(screen.getByText('Enabled')).toBeTruthy()
   })
 
   it('toggles a trigger enabled/disabled with busy gating', async () => {
     const onSetTriggerEnabled = vi.fn(async (_id: string, enabled: boolean) => trigger({ id: 'trigger-1', enabled }))
     renderAutomationsDashboard({ onSetTriggerEnabled, onLoadTriggers: async () => [trigger({ enabled: true })] })
-    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Automations' }))
     await waitFor(() => expect(screen.getByText('Fix {{issue.key}}')).toBeTruthy())
 
-    // Scope to the trigger row (the global pause control is also labelled "暂停").
+    // Scope to the trigger row (the global pause control is also labelled "Pause").
     const row = document.querySelector<HTMLElement>('.dshd-memory-entry[data-type="tracker"]')!
-    const disableButton = within(row).getByRole('button', { name: '暂停' })
+    const disableButton = within(row).getByRole('button', { name: 'Pause' })
     fireEvent.click(disableButton)
     await waitFor(() => expect(onSetTriggerEnabled).toHaveBeenCalledWith('trigger-1', false))
   })
@@ -132,48 +132,48 @@ describe('Dashboard Automations tab (Phase 9, spec §10.5)', () => {
     // assert the fire dispatch here; the run navigation is a snapshot update.
     renderAutomationsDashboard({ onFireTrigger, onLoadTriggers: async () => [trigger()] })
     void onOpenRun
-    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Automations' }))
     await waitFor(() => expect(screen.getByText('Fix {{issue.key}}')).toBeTruthy())
 
-    const runNow = screen.getByRole('button', { name: '立即运行' })
+    const runNow = screen.getByRole('button', { name: 'Run now' })
     fireEvent.click(runNow)
     await waitFor(() => expect(onFireTrigger).toHaveBeenCalledWith('trigger-1'))
   })
 
   it('opens the Add trigger dialog with the per-type fields (tracker default)', async () => {
     renderAutomationsDashboard()
-    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Automations' }))
     await waitFor(() => expect(screen.getByText('Fix {{issue.key}}')).toBeTruthy())
 
-    fireEvent.click(screen.getByRole('button', { name: '添加触发器' }))
-    await waitFor(() => expect(screen.getByRole('dialog', { name: '添加触发器' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Add trigger' }))
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'Add trigger' })).toBeTruthy())
 
     // The tracker type is the default — its config fields are shown.
-    const dialog = screen.getByRole('dialog', { name: '添加触发器' })
-    expect(within(dialog).getByText('跟踪源类型')).toBeTruthy()
-    expect(within(dialog).getByText('状态（逗号分隔）')).toBeTruthy()
+    const dialog = screen.getByRole('dialog', { name: 'Add trigger' })
+    expect(within(dialog).getByText('Tracker source kind')).toBeTruthy()
+    expect(within(dialog).getByText('States (comma-separated)')).toBeTruthy()
     // The submit is disabled until a goal template is provided.
-    const submit = within(dialog).getByRole('button', { name: '添加' })
+    const submit = within(dialog).getByRole('button', { name: 'Add' })
     expect((submit as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('submits a tracker trigger with the rendered config (readyStates) + goal template', async () => {
     const onCreateTrigger = vi.fn(async (input: TriggerCreateInput) => trigger({ id: 'trigger-new', type: input.type as TriggerView['type'], goalTemplate: input.goalTemplate }))
     renderAutomationsDashboard({ onCreateTrigger, onLoadTriggers: async () => [] })
-    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
-    await waitFor(() => expect(screen.getByText('暂无触发器')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Automations' }))
+    await waitFor(() => expect(screen.getByText('No triggers yet')).toBeTruthy())
 
-    fireEvent.click(screen.getByRole('button', { name: '添加触发器' }))
-    await waitFor(() => expect(screen.getByRole('dialog', { name: '添加触发器' })).toBeTruthy())
-    const dialog = screen.getByRole('dialog', { name: '添加触发器' })
+    fireEvent.click(screen.getByRole('button', { name: 'Add trigger' }))
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'Add trigger' })).toBeTruthy())
+    const dialog = screen.getByRole('dialog', { name: 'Add trigger' })
 
     // Fill the tracker sourceKind (first textbox) + the goal template (the textarea).
     const inputs = within(dialog).getAllByRole('textbox')
     fireEvent.change(inputs[0]!, { target: { value: 'linear' } })
-    const textarea = within(dialog).getByRole('textbox', { name: /目标模板/ })
+    const textarea = within(dialog).getByRole('textbox', { name: /Goal template/u })
     fireEvent.change(textarea, { target: { value: 'Fix {{issue.key}}' } })
 
-    const submit = within(dialog).getByRole('button', { name: '添加' })
+    const submit = within(dialog).getByRole('button', { name: 'Add' })
     expect((submit as HTMLButtonElement).disabled).toBe(false)
     fireEvent.click(submit)
     await waitFor(() => expect(onCreateTrigger).toHaveBeenCalledTimes(1))
@@ -194,28 +194,28 @@ describe('Dashboard Automations tab (Phase 9, spec §10.5)', () => {
         trigger({ id: 'trigger-default' }),
       ],
     })
-    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
-    await waitFor(() => expect(screen.getByText('审批策略: 受保护')).toBeTruthy())
-    expect(screen.getByText('审批策略: 使用默认')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Automations' }))
+    await waitFor(() => expect(screen.getByText('Approval policy: Guarded')).toBeTruthy())
+    expect(screen.getByText('Approval policy: Use default')).toBeTruthy()
   })
 
   it('submits a trigger with a chosen approval mode from the Add dialog', async () => {
     const onCreateTrigger = vi.fn(async (input: TriggerCreateInput) => trigger({ id: 'trigger-new', type: input.type as TriggerView['type'], goalTemplate: input.goalTemplate, ...(input.approvalMode !== undefined ? { approvalMode: input.approvalMode } : {}) }))
     renderAutomationsDashboard({ onCreateTrigger, onLoadTriggers: async () => [] })
-    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
-    await waitFor(() => expect(screen.getByText('暂无触发器')).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Automations' }))
+    await waitFor(() => expect(screen.getByText('No triggers yet')).toBeTruthy())
 
-    fireEvent.click(screen.getByRole('button', { name: '添加触发器' }))
-    await waitFor(() => expect(screen.getByRole('dialog', { name: '添加触发器' })).toBeTruthy())
-    const dialog = screen.getByRole('dialog', { name: '添加触发器' })
+    fireEvent.click(screen.getByRole('button', { name: 'Add trigger' }))
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'Add trigger' })).toBeTruthy())
+    const dialog = screen.getByRole('dialog', { name: 'Add trigger' })
 
     // Fill the goal template (enables submit) + choose the "guarded" approval mode.
-    const textarea = within(dialog).getByRole('textbox', { name: /目标模板/ })
+    const textarea = within(dialog).getByRole('textbox', { name: /Goal template/u })
     fireEvent.change(textarea, { target: { value: 'Fix {{issue.key}}' } })
-    const approvalSelect = within(dialog).getByRole('combobox', { name: /审批模式/ })
+    const approvalSelect = within(dialog).getByRole('combobox', { name: /Approval mode/u })
     fireEvent.change(approvalSelect, { target: { value: 'guarded' } })
 
-    const submit = within(dialog).getByRole('button', { name: '添加' })
+    const submit = within(dialog).getByRole('button', { name: 'Add' })
     expect((submit as HTMLButtonElement).disabled).toBe(false)
     fireEvent.click(submit)
     await waitFor(() => expect(onCreateTrigger).toHaveBeenCalledTimes(1))
@@ -231,15 +231,15 @@ describe('Dashboard Automations tab (Phase 9, spec §10.5)', () => {
   it('deletes a trigger through the confirm modal', async () => {
     const onDeleteTrigger = vi.fn(async () => undefined)
     renderAutomationsDashboard({ onDeleteTrigger, onLoadTriggers: async () => [trigger()] })
-    fireEvent.click(screen.getByRole('button', { name: '自动化' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Automations' }))
     await waitFor(() => expect(screen.getByText('Fix {{issue.key}}')).toBeTruthy())
 
-    fireEvent.click(screen.getByRole('button', { name: '删除' }))
-    await waitFor(() => expect(screen.getByRole('dialog', { name: '删除' })).toBeTruthy())
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(screen.getByRole('dialog', { name: 'Delete' })).toBeTruthy())
     // The confirm modal shows the confirmation copy + a confirm button.
-    const dialog = screen.getByRole('dialog', { name: '删除' })
-    expect(within(dialog).getByText('删除此触发器？其触发记录将保留。')).toBeTruthy()
-    const confirm = within(dialog).getAllByRole('button', { name: '删除' }).at(-1)!
+    const dialog = screen.getByRole('dialog', { name: 'Delete' })
+    expect(within(dialog).getByText('Delete this trigger? Its fire records are kept.')).toBeTruthy()
+    const confirm = within(dialog).getAllByRole('button', { name: 'Delete' }).at(-1)!
     fireEvent.click(confirm)
     await waitFor(() => expect(onDeleteTrigger).toHaveBeenCalledWith('trigger-1'))
   })

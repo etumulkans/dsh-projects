@@ -23,14 +23,14 @@ const planV1: RunPlanRecord = {
   projectId: executingRun.projectId,
   version: 1,
   pattern: 'direct',
-  rationale: '初始计划：单任务直接执行',
-  assumptions: ['任务规模较小'],
-  successCriteria: [{ id: 'c1', description: '健康检查端点可用' }],
+  rationale: 'Initial plan: single task executed directly',
+  assumptions: ['Task scope is small'],
+  successCriteria: [{ id: 'c1', description: 'Health check endpoint is available' }],
   tasks: [
-    { id: 't1', title: '实现健康检查端点', description: '添加端点与测试', dependencies: [], acceptanceCriteria: ['返回 200 与状态 JSON'] },
+    { id: 't1', title: 'Implement health check endpoint', description: 'Add endpoint and tests', dependencies: [], acceptanceCriteria: ['Return 200 with status JSON'] },
   ],
   status: 'superseded',
-  replanReason: '范围扩大：需要补齐单元测试',
+  replanReason: 'Scope expanded: unit tests needed',
   createdAt: '2026-08-14T02:11:00.000Z',
   revision: 2,
 }
@@ -41,15 +41,15 @@ const planV2: RunPlanRecord = {
   projectId: executingRun.projectId,
   version: 2,
   pattern: 'supervisor',
-  rationale: '协调两个任务并行推进',
+  rationale: 'Coordinate two tasks in parallel',
   assumptions: [],
-  successCriteria: [{ id: 'c1', description: '端点与测试全部通过' }],
+  successCriteria: [{ id: 'c1', description: 'Endpoint and tests all pass' }],
   tasks: [
-    { id: 't1', title: '实现健康检查端点', description: '添加 /health 端点', dependencies: [], acceptanceCriteria: ['返回 200'] },
-    { id: 't2', title: '补齐单元测试', description: '覆盖端点与错误路径', dependencies: ['t1'], acceptanceCriteria: [] },
+    { id: 't1', title: 'Implement health check endpoint', description: 'Add /health endpoint', dependencies: [], acceptanceCriteria: ['Return 200'] },
+    { id: 't2', title: 'Add unit tests', description: 'Cover endpoint and error paths', dependencies: ['t1'], acceptanceCriteria: [] },
   ],
   status: 'active',
-  replanReason: '范围扩大：需要补齐单元测试',
+  replanReason: 'Scope expanded: unit tests needed',
   supersedesPlanId: PLAN_V1_ID,
   createdAt: '2026-08-14T02:20:00.000Z',
   revision: 1,
@@ -61,10 +61,10 @@ const draftPlan: RunPlanRecord = {
   projectId: executingRun.projectId,
   version: 1,
   pattern: 'supervisor',
-  rationale: '待批准的草稿',
+  rationale: 'Draft awaiting approval',
   assumptions: [],
   successCriteria: [],
-  tasks: [{ id: 't1', title: '草稿任务', description: '描述', dependencies: [], acceptanceCriteria: [] }],
+  tasks: [{ id: 't1', title: 'Draft task', description: 'Description', dependencies: [], acceptanceCriteria: [] }],
   status: 'draft',
   createdAt: '2026-08-14T02:25:00.000Z',
   revision: 1,
@@ -76,10 +76,10 @@ function plansFor(runId: string): RunPlanRecord[] {
 }
 
 async function openRunInspector(run: ProjectRunView): Promise<HTMLElement> {
-  fireEvent.click(screen.getByRole('button', { name: '项目运行' }))
-  const table = screen.getByRole('table', { name: '项目运行列表' })
+  fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
+  const table = screen.getByRole('table', { name: 'Project Run list' })
   fireEvent.click(within(table).getByRole('row', { name: new RegExp(run.goal.slice(0, 12)) }))
-  return screen.getByRole('complementary', { name: /运行详情/u })
+  return screen.getByRole('complementary', { name: /Run details/u })
 }
 
 describe('Dashboard Run Plan interactions', () => {
@@ -90,22 +90,22 @@ describe('Dashboard Run Plan interactions', () => {
     const inspector = await openRunInspector(executingRun)
     await waitFor(() => expect(onLoadPlans).toHaveBeenCalledWith(executingRun.id))
 
-    expect(within(inspector).getByText('运行计划')).toBeTruthy()
-    expect(within(inspector).getByText('计划 v2 · 激活')).toBeTruthy()
+    expect(within(inspector).getByText('Run Plans')).toBeTruthy()
+    expect(within(inspector).getByText('Plan v2 · active')).toBeTruthy()
     expect(within(inspector).getByText('v2')).toBeTruthy()
     expect(within(inspector).getByText('v1')).toBeTruthy()
-    expect(within(inspector).getByText('监督者')).toBeTruthy()
-    expect(within(inspector).getByText('已取代')).toBeTruthy()
+    expect(within(inspector).getByText('Supervisor')).toBeTruthy()
+    expect(within(inspector).getByText('Superseded')).toBeTruthy()
 
     fireEvent.click(within(inspector).getByRole('button', { name: /v2/u }))
-    expect(within(inspector).getByText('协调两个任务并行推进')).toBeTruthy()
-    expect(within(inspector).getByText('t2 · 补齐单元测试')).toBeTruthy()
-    expect(within(inspector).getByText('依赖 t1')).toBeTruthy()
-    expect(within(inspector).getByText('范围扩大：需要补齐单元测试')).toBeTruthy()
+    expect(within(inspector).getByText('Coordinate two tasks in parallel')).toBeTruthy()
+    expect(within(inspector).getByText('t2 · Add unit tests')).toBeTruthy()
+    expect(within(inspector).getByText('depends on t1')).toBeTruthy()
+    expect(within(inspector).getByText('Scope expanded: unit tests needed')).toBeTruthy()
 
     fireEvent.click(within(inspector).getByRole('button', { name: /v1/u }))
-    expect(within(inspector).getByText('初始计划：单任务直接执行')).toBeTruthy()
-    expect(within(inspector).getByText('健康检查端点可用')).toBeTruthy()
+    expect(within(inspector).getByText('Initial plan: single task executed directly')).toBeTruthy()
+    expect(within(inspector).getByText('Health check endpoint is available')).toBeTruthy()
   })
 
   it('shows plan events interleaved on the run timeline', async () => {
@@ -143,10 +143,10 @@ describe('Dashboard Run Plan interactions', () => {
     await waitFor(() => expect(onLoadPlans).toHaveBeenCalledWith(executingRun.id))
     fireEvent.click(within(inspector).getByRole('button', { name: /v1/u }))
 
-    expect(within(inspector).getByRole('button', { name: '请求批准' })).toBeTruthy()
-    expect(within(inspector).getByRole('button', { name: '直接激活' })).toBeTruthy()
+    expect(within(inspector).getByRole('button', { name: 'Request approval' })).toBeTruthy()
+    expect(within(inspector).getByRole('button', { name: 'Activate' })).toBeTruthy()
 
-    fireEvent.click(within(inspector).getByRole('button', { name: '直接激活' }))
+    fireEvent.click(within(inspector).getByRole('button', { name: 'Activate' }))
     await waitFor(() => expect(onPlanTransition).toHaveBeenCalledWith({
       planId: draftPlan.id,
       status: 'active',
@@ -165,12 +165,12 @@ describe('Dashboard Run Plan interactions', () => {
     await waitFor(() => expect(onLoadPlans).toHaveBeenCalledWith(executingRun.id))
     fireEvent.click(within(inspector).getByRole('button', { name: /v2/u }))
 
-    fireEvent.click(within(inspector).getByRole('button', { name: '取代' }))
-    const dialog = screen.getByRole('dialog', { name: '取代计划 v2' })
-    const confirm = within(dialog).getByRole('button', { name: '取代' }) as HTMLButtonElement
+    fireEvent.click(within(inspector).getByRole('button', { name: 'Supersede' }))
+    const dialog = screen.getByRole('dialog', { name: 'Supersede plan v2' })
+    const confirm = within(dialog).getByRole('button', { name: 'Supersede' }) as HTMLButtonElement
     expect(confirm.disabled).toBe(true)
 
-    fireEvent.change(within(dialog).getByLabelText('重规划原因（必填）'), { target: { value: ' 方向调整 ' } })
+    fireEvent.change(within(dialog).getByLabelText('Replan reason (required)'), { target: { value: ' Direction change ' } })
     expect(confirm.disabled).toBe(false)
     fireEvent.click(confirm)
 
@@ -178,10 +178,10 @@ describe('Dashboard Run Plan interactions', () => {
       planId: PLAN_V2_ID,
       status: 'superseded',
       expectedRevision: planV2.revision,
-      replanReason: '方向调整',
+      replanReason: 'Direction change',
     }))
     // The failed transition keeps the dialog open with its error.
-    expect(screen.getByRole('dialog', { name: '取代计划 v2' })).toBeTruthy()
+    expect(screen.getByRole('dialog', { name: 'Supersede plan v2' })).toBeTruthy()
     expect(within(dialog).getByRole('alert')).toBeTruthy()
   })
 
@@ -203,23 +203,23 @@ describe('Dashboard Run Plan interactions', () => {
 
     const inspector = await openRunInspector(executingRun)
     await waitFor(() => expect(onLoadPlans).toHaveBeenCalledWith(executingRun.id))
-    fireEvent.click(within(inspector).getByRole('button', { name: '新建计划' }))
+    fireEvent.click(within(inspector).getByRole('button', { name: 'New Plan' }))
 
-    const dialog = screen.getByRole('dialog', { name: '新建运行计划' })
-    const create = within(dialog).getByRole('button', { name: '创建计划' }) as HTMLButtonElement
+    const dialog = screen.getByRole('dialog', { name: 'New Run Plan' })
+    const create = within(dialog).getByRole('button', { name: 'Create plan' }) as HTMLButtonElement
     expect(create.disabled).toBe(true)
 
-    fireEvent.change(within(dialog).getByLabelText('依据'), { target: { value: '  协调两个任务  ' } })
+    fireEvent.change(within(dialog).getByLabelText('Rationale'), { target: { value: '  Coordinate two tasks  ' } })
     // Versions exist (v2), so the replan reason is required before enabling.
     expect(create.disabled).toBe(true)
 
-    fireEvent.change(within(dialog).getByLabelText('重规划原因 *'), { target: { value: '重新规划' } })
-    fireEvent.click(within(dialog).getByRole('button', { name: '添加任务' }))
-    fireEvent.change(within(dialog).getAllByPlaceholderText('任务标题')[0]!, { target: { value: '第一个任务' } })
-    fireEvent.change(within(dialog).getAllByPlaceholderText('任务描述')[0]!, { target: { value: '做点什么' } })
-    fireEvent.click(within(dialog).getByRole('button', { name: '添加任务' }))
-    fireEvent.change(within(dialog).getAllByPlaceholderText('任务标题')[1]!, { target: { value: '第二个任务' } })
-    fireEvent.change(within(dialog).getAllByPlaceholderText('任务描述')[1]!, { target: { value: '再做点什么' } })
+    fireEvent.change(within(dialog).getByLabelText('Replan reason *'), { target: { value: 'Replan' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add task' }))
+    fireEvent.change(within(dialog).getAllByPlaceholderText('Task title')[0]!, { target: { value: 'First task' } })
+    fireEvent.change(within(dialog).getAllByPlaceholderText('Task description')[0]!, { target: { value: 'Do something' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add task' }))
+    fireEvent.change(within(dialog).getAllByPlaceholderText('Task title')[1]!, { target: { value: 'Second task' } })
+    fireEvent.change(within(dialog).getAllByPlaceholderText('Task description')[1]!, { target: { value: 'Do something more' } })
     fireEvent.click(within(dialog).getByLabelText('t1'))
 
     expect(create.disabled).toBe(false)
@@ -228,14 +228,14 @@ describe('Dashboard Run Plan interactions', () => {
     await waitFor(() => expect(onPlanCreate).toHaveBeenCalledWith({
       runId: executingRun.id,
       pattern: 'direct',
-      rationale: '协调两个任务',
+      rationale: 'Coordinate two tasks',
       tasks: [
-        { title: '第一个任务', description: '做点什么' },
-        { title: '第二个任务', description: '再做点什么', dependencies: ['t1'] },
+        { title: 'First task', description: 'Do something' },
+        { title: 'Second task', description: 'Do something more', dependencies: ['t1'] },
       ],
-      replanReason: '重新规划',
+      replanReason: 'Replan',
     }))
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建运行计划' })).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New Run Plan' })).toBeNull())
   })
 
   it('shows the empty state with the New Plan action for a run without plans', async () => {
@@ -256,8 +256,8 @@ describe('Dashboard Run Plan interactions', () => {
 
     const inspector = await openRunInspector(pausedRun)
     await waitFor(() => expect(onLoadPlans).toHaveBeenCalledWith(pausedRun.id))
-    expect(within(inspector).getByText('此运行尚无计划。')).toBeTruthy()
-    expect(within(inspector).getByRole('button', { name: '新建计划' })).toBeTruthy()
+    expect(within(inspector).getByText('No plans for this Run yet.')).toBeTruthy()
+    expect(within(inspector).getByRole('button', { name: 'New Plan' })).toBeTruthy()
   })
 
   it('hides New Plan for a terminal run', async () => {
@@ -266,7 +266,7 @@ describe('Dashboard Run Plan interactions', () => {
 
     const inspector = await openRunInspector(terminalRun)
     await waitFor(() => expect(onLoadPlans).toHaveBeenCalledWith(terminalRun.id))
-    expect(within(inspector).queryByRole('button', { name: '新建计划' })).toBeNull()
+    expect(within(inspector).queryByRole('button', { name: 'New Plan' })).toBeNull()
   })
 })
 

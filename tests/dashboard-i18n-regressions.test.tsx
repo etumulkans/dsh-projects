@@ -16,59 +16,59 @@ describe('Dashboard i18n regressions', () => {
   it('opens a searchable project context menu with current and background activity state', () => {
     renderDashboard()
 
-    fireEvent.click(screen.getByRole('button', { name: '当前任务源' }))
-    const switcher = screen.getByRole('dialog', { name: '项目上下文切换' })
+    fireEvent.click(screen.getByRole('button', { name: 'Current task source' }))
+    const switcher = screen.getByRole('dialog', { name: 'Project context switcher' })
 
-    expect(within(switcher).getByText('Tracker 由目标项目的 WORKFLOW.md 决定。')).toBeTruthy()
-    expect(within(switcher).getByRole('option', { name: /dsh-dashboard.*当前/u }).getAttribute('aria-selected')).toBe('true')
-    expect(within(switcher).getByRole('option', { name: /dsh-dashboard-test/u }).textContent).toContain('1 个 Agent 运行中')
+    expect(within(switcher).getByText("The target project's WORKFLOW.md determines its Tracker.")).toBeTruthy()
+    expect(within(switcher).getByRole('option', { name: /dsh-dashboard.*Current/u }).getAttribute('aria-selected')).toBe('true')
+    expect(within(switcher).getByRole('option', { name: /dsh-dashboard-test/u }).textContent).toContain('1 Agents running')
 
-    fireEvent.change(within(switcher).getByLabelText('搜索可切换的项目'), { target: { value: '全局任务演示' } })
-    expect(within(switcher).queryByRole('option', { name: /dsh-dashboard.*当前/u })).toBeNull()
+    fireEvent.change(within(switcher).getByLabelText('Search switchable projects'), { target: { value: 'Global task demo' } })
+    expect(within(switcher).queryByRole('option', { name: /dsh-dashboard.*Current/u })).toBeNull()
     expect(within(switcher).getByRole('option', { name: /dsh-dashboard-test/u })).toBeTruthy()
 
     fireEvent.keyDown(document, { key: 'Escape' })
-    expect(screen.queryByRole('dialog', { name: '项目上下文切换' })).toBeNull()
+    expect(screen.queryByRole('dialog', { name: 'Project context switcher' })).toBeNull()
   })
 
   it('switches to a validated project and closes the context menu only after success', async () => {
     const onSwitchProject = vi.fn(async () => {})
     renderDashboard({ onSwitchProject })
 
-    fireEvent.click(screen.getByRole('button', { name: '当前任务源' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Current task source' }))
     fireEvent.click(screen.getByRole('option', { name: /dsh-dashboard-test/u }))
 
     await waitFor(() => expect(onSwitchProject).toHaveBeenCalledWith('4bceae56-7cc1-4419-a912-a6ea110448fb'))
-    expect(screen.queryByRole('dialog', { name: '项目上下文切换' })).toBeNull()
+    expect(screen.queryByRole('dialog', { name: 'Project context switcher' })).toBeNull()
   })
 
   it('switches to the global composite view from the project context menu', async () => {
     const onSwitchGlobal = vi.fn(async () => {})
     renderDashboard({ onSwitchGlobal })
 
-    fireEvent.click(screen.getByRole('button', { name: '当前任务源' }))
-    fireEvent.click(screen.getByRole('option', { name: /全部项目/u }))
+    fireEvent.click(screen.getByRole('button', { name: 'Current task source' }))
+    fireEvent.click(screen.getByRole('option', { name: /All projects/u }))
 
     await waitFor(() => expect(onSwitchGlobal).toHaveBeenCalledOnce())
-    expect(screen.queryByRole('dialog', { name: '项目上下文切换' })).toBeNull()
+    expect(screen.queryByRole('dialog', { name: 'Project context switcher' })).toBeNull()
   })
 
   it('filters the global board by Provider and enters a task owning project', async () => {
     const onSwitchProject = vi.fn(async () => {})
     renderDashboard({ snapshot: globalFixtureSnapshot, onSwitchProject })
 
-    expect(screen.getByRole('button', { name: '当前任务源' }).textContent).toContain('全局·全部项目')
-    expect(screen.queryByRole('button', { name: '暂停' })).toBeNull()
-    const sourceFilter = screen.getByLabelText('筛选全局任务来源')
+    expect(screen.getByRole('button', { name: 'Current task source' }).textContent).toContain('Global·All projects')
+    expect(screen.queryByRole('button', { name: 'Pause' })).toBeNull()
+    const sourceFilter = screen.getByLabelText('Filter global task sources')
     fireEvent.change(sourceFilter, { target: { value: 'provider:local' } })
 
     expect(screen.getByText('LOCAL-18')).toBeTruthy()
     expect(screen.queryByText('ENG-238')).toBeNull()
     fireEvent.click(screen.getByText('LOCAL-18'))
     const inspector = document.querySelector<HTMLElement>('.dshd-inspector')!
-    expect(within(inspector).getByText('任务来源')).toBeTruthy()
+    expect(within(inspector).getByText('Task source')).toBeTruthy()
     expect(within(inspector).getByText('dsh-dashboard-test')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '进入项目' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enter project' }))
 
     await waitFor(() => expect(onSwitchProject).toHaveBeenCalledWith('4bceae56-7cc1-4419-a912-a6ea110448fb'))
   })
@@ -77,11 +77,11 @@ describe('Dashboard i18n regressions', () => {
     const onSwitchProject = vi.fn(async () => { throw new Error('Invalid WORKFLOW.md') })
     renderDashboard({ onSwitchProject })
 
-    fireEvent.click(screen.getByRole('button', { name: '当前任务源' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Current task source' }))
     fireEvent.click(screen.getByRole('option', { name: /dsh-dashboard-test/u }))
 
     await waitFor(() => expect(onSwitchProject).toHaveBeenCalledOnce())
-    expect(screen.getByRole('dialog', { name: '项目上下文切换' })).toBeTruthy()
+    expect(screen.getByRole('dialog', { name: 'Project context switcher' })).toBeTruthy()
   })
 
   it('omits inactive column overflow placeholders while keeping Local create controls', () => {
@@ -95,14 +95,14 @@ describe('Dashboard i18n regressions', () => {
     })
 
     expect(document.querySelector('.dshd-column-more')).toBeNull()
-    expect(screen.getAllByRole('button', { name: /^向“.+”添加任务$/u })).toHaveLength(4)
+    expect(screen.getAllByRole('button', { name: /^Add task to .+$/u })).toHaveLength(4)
   })
 
   it('collapses and expands the hidden-column summary while preserving its contents', () => {
     renderDashboard()
 
     const hiddenColumns = document.querySelector<HTMLElement>('.dshd-hidden-columns')
-    const collapseButton = screen.getByRole('button', { name: '收起隐藏分组' })
+    const collapseButton = screen.getByRole('button', { name: 'Collapse hidden columns' })
     const listId = collapseButton.getAttribute('aria-controls')
     const hiddenColumnList = listId === null ? null : document.getElementById(listId)
 
@@ -112,14 +112,14 @@ describe('Dashboard i18n regressions', () => {
 
     fireEvent.click(collapseButton)
 
-    const expandButton = screen.getByRole('button', { name: '展开隐藏分组' })
+    const expandButton = screen.getByRole('button', { name: 'Expand hidden columns' })
     expect(hiddenColumns?.hasAttribute('data-collapsed')).toBe(true)
     expect(expandButton.getAttribute('aria-expanded')).toBe('false')
     expect(hiddenColumnList?.hidden).toBe(true)
 
     fireEvent.click(expandButton)
 
-    expect(screen.getByRole('button', { name: '收起隐藏分组' }).getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Collapse hidden columns' }).getAttribute('aria-expanded')).toBe('true')
     expect(hiddenColumns?.hasAttribute('data-collapsed')).toBe(false)
     expect(hiddenColumnList?.hidden).toBe(false)
   })
@@ -127,8 +127,8 @@ describe('Dashboard i18n regressions', () => {
   it('filters board issues by runtime phase and composes with the text filter', () => {
     renderDashboard()
 
-    const runtimeFilters = screen.getByRole('toolbar', { name: '任务运行状态筛选' })
-    const runningFilter = within(runtimeFilters).getByRole('button', { name: '只显示运行中任务' })
+    const runtimeFilters = screen.getByRole('toolbar', { name: 'Issue runtime filters' })
+    const runningFilter = within(runtimeFilters).getByRole('button', { name: 'Show only Running issues' })
     fireEvent.click(runningFilter)
 
     expect(runningFilter.getAttribute('aria-pressed')).toBe('true')
@@ -137,21 +137,21 @@ describe('Dashboard i18n regressions', () => {
     expect(screen.queryByText('ENG-241')).toBeNull()
     expect(screen.queryByText('ENG-240')).toBeNull()
 
-    fireEvent.click(within(runtimeFilters).getByRole('button', { name: '只显示重试中任务' }))
+    fireEvent.click(within(runtimeFilters).getByRole('button', { name: 'Show only Retrying issues' }))
     expect(screen.getByText('ENG-236')).toBeTruthy()
     expect(screen.queryByText('ENG-238')).toBeNull()
 
-    fireEvent.click(within(runtimeFilters).getByRole('button', { name: '清除重试中筛选' }))
+    fireEvent.click(within(runtimeFilters).getByRole('button', { name: 'Clear Retrying filter' }))
     expect(screen.getByText('ENG-240')).toBeTruthy()
 
-    fireEvent.click(within(runtimeFilters).getByRole('button', { name: '只显示已阻塞任务' }))
+    fireEvent.click(within(runtimeFilters).getByRole('button', { name: 'Show only Blocked issues' }))
     expect(screen.getByText('ENG-241')).toBeTruthy()
     expect(screen.queryByText('ENG-240')).toBeNull()
-    fireEvent.click(within(runtimeFilters).getByRole('button', { name: '清除已阻塞筛选' }))
+    fireEvent.click(within(runtimeFilters).getByRole('button', { name: 'Clear Blocked filter' }))
 
-    fireEvent.click(screen.getByRole('button', { name: '筛选' }))
-    fireEvent.change(screen.getByLabelText('筛选任务'), { target: { value: 'ENG-233' } })
-    fireEvent.click(within(runtimeFilters).getByRole('button', { name: '只显示运行中任务' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Filter' }))
+    fireEvent.change(screen.getByLabelText('Filter issues'), { target: { value: 'ENG-233' } })
+    fireEvent.click(within(runtimeFilters).getByRole('button', { name: 'Show only Running issues' }))
 
     expect(screen.getByText('ENG-233')).toBeTruthy()
     expect(screen.queryByText('ENG-238')).toBeNull()
@@ -161,10 +161,10 @@ describe('Dashboard i18n regressions', () => {
     renderDashboard({ snapshot: undefined })
 
     expect(screen.getByText('Linear')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '配置' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Configuration' }))
 
-    const providerRow = screen.getByText('提供方').parentElement
-    expect(providerRow?.textContent).toBe('提供方—')
+    const providerRow = screen.getByText('Provider').parentElement
+    expect(providerRow?.textContent).toBe('Provider—')
   })
 
   it('presents configuration as a contextual, semantic last-good inspector', async () => {
@@ -172,26 +172,26 @@ describe('Dashboard i18n regressions', () => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     renderDashboard()
 
-    fireEvent.click(screen.getByRole('button', { name: '配置' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Configuration' }))
 
-    expect(screen.queryByRole('button', { name: '筛选' })).toBeNull()
-    expect(screen.queryByRole('button', { name: '显示' })).toBeNull()
-    expect(screen.queryByRole('toolbar', { name: '任务运行状态筛选' })).toBeNull()
-    expect(screen.getByText('当前使用最后一次有效配置')).toBeTruthy()
-    expect(screen.getByText(/最后成功加载于/u)).toBeTruthy()
-    expect(screen.getByRole('heading', { name: '工作流与生效范围' })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: '任务源（Tracker）' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Filter' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Display' })).toBeNull()
+    expect(screen.queryByRole('toolbar', { name: 'Issue runtime filters' })).toBeNull()
+    expect(screen.getByText('Using the last valid configuration')).toBeTruthy()
+    expect(screen.getByText(/Last loaded successfully at/u)).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Workflow and effective scope' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Task source (Tracker)' })).toBeTruthy()
     expect(document.querySelectorAll('.dshd-config-section dl')).toHaveLength(3)
-    expect(screen.getByRole('list', { name: '活动状态' }).children).toHaveLength(fixtureSnapshot.configuration.activeStates.length)
+    expect(screen.getByRole('list', { name: 'Active states' }).children).toHaveLength(fixtureSnapshot.configuration.activeStates.length)
 
-    fireEvent.click(screen.getByRole('button', { name: '复制 WORKFLOW.md 路径' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Copy WORKFLOW.md path' }))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(fixtureSnapshot.configuration.workflowPath))
-    expect(screen.getByRole('button', { name: '已复制' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Copied' })).toBeTruthy()
   })
 
   it('keeps the active Dashboard tab visible after the viewport changes', () => {
     renderDashboard()
-    const configurationTab = screen.getByRole('button', { name: '配置' })
+    const configurationTab = screen.getByRole('button', { name: 'Configuration' })
     fireEvent.click(configurationTab)
     const tabs = configurationTab.parentElement
     expect(tabs).toBeTruthy()
@@ -217,12 +217,12 @@ describe('Dashboard i18n regressions', () => {
       },
     })
 
-    fireEvent.click(screen.getByRole('button', { name: '配置' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Configuration' }))
 
     const status = screen.getByRole('status')
-    expect(status.textContent).toContain('当前使用最后一次有效配置')
+    expect(status.textContent).toContain('Using the last valid configuration')
     expect(status.textContent).toContain('tracker.provider.project_id: expected a non-empty string')
-    expect(screen.getByText('重新加载失败')).toBeTruthy()
+    expect(screen.getByText('Reload failed')).toBeTruthy()
   })
 
   it('renders English singular counts for one discovery root and one candidate', async () => {
@@ -259,10 +259,10 @@ describe('Dashboard i18n regressions', () => {
       },
     }
     renderDashboard({ snapshot })
-    fireEvent.click(screen.getByRole('button', { name: '配置' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Configuration' }))
 
-    expect(screen.getByText(/已配置（凭据存储）/u)).toBeTruthy()
-    expect(screen.getByText(/已配置（vault-plugin）/u)).toBeTruthy()
+    expect(screen.getByText(/configured \(credential store\)/u)).toBeTruthy()
+    expect(screen.getByText(/configured \(vault-plugin\)/u)).toBeTruthy()
     expect(screen.queryByText(/credential-store/u)).toBeNull()
   })
 
@@ -280,12 +280,12 @@ describe('Dashboard i18n regressions', () => {
     const data = new DashboardDataController(rpc as never)
     renderDashboard({ onAddDiscoveryRoot: input => data.addDiscoveryRoot(input) })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目' }))
-    fireEvent.click(screen.getByRole('button', { name: '管理根目录' }))
-    fireEvent.change(screen.getByLabelText('绝对目录路径'), { target: { value: 'relative-project' } })
-    fireEvent.click(screen.getByRole('button', { name: '添加根目录' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Projects' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Manage roots' }))
+    fireEvent.change(screen.getByLabelText('Absolute directory path'), { target: { value: 'relative-project' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add root' }))
 
-    expect((await screen.findByRole('alert')).textContent).toBe('路径必须是绝对路径，也可以使用 ~ 开头的路径。')
+    expect((await screen.findByRole('alert')).textContent).toBe('The path must be absolute or start with ~.')
     expect(rpc.call).toHaveBeenCalledWith('/dsh-dashboard', 'addDiscoveryRoot', {
       path: 'relative-project', maxDepth: 4,
     })
@@ -294,14 +294,14 @@ describe('Dashboard i18n regressions', () => {
   it('keeps unknown Provider errors verbatim', () => {
     expect(dashboardErrorMessage(
       new Error('GitHub API rate limit exceeded'),
-      createDashboardTranslator('zh'),
+      createDashboardTranslator('en'),
     )).toBe('GitHub API rate limit exceeded')
   })
 })
 
 function renderDashboard(
   overrides: Partial<ComponentProps<typeof DashboardSurface>> = {},
-  locale: 'zh' | 'en' = 'zh',
+  locale: 'en' = 'en',
 ): void {
   render(withLocale(
     <DashboardSurface
@@ -325,6 +325,6 @@ function renderDashboard(
   ))
 }
 
-function withLocale(children: ReactNode, locale: 'zh' | 'en'): ReactNode {
+function withLocale(children: ReactNode, locale: 'en'): ReactNode {
   return <DashboardI18nProvider t={createDashboardTranslator(locale)}>{children}</DashboardI18nProvider>
 }

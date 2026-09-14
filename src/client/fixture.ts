@@ -154,7 +154,7 @@ export const fixtureSnapshot: DashboardSnapshot = {
         id: '4bceae56-7cc1-4419-a912-a6ea110448fb', name: 'dsh-dashboard-test', root: 'F:\\Dev\\Code\\05_Apps_Tools\\deepseek\\dsh-dashboard-test',
         policyPath: 'F:\\Dev\\Code\\05_Apps_Tools\\deepseek\\dsh-dashboard-test\\WORKFLOW.md', repositoryIds: [], workspaceStrategy: 'controlled-directory', autonomousClaims: false,
         source: 'manual', createdAt: clock, updatedAt: clock, currentWorkspace: false,
-        trackerKind: 'local', contextLabel: '全局任务演示', configurationState: 'ready', runningAgents: 1, retryingAgents: 0, repositories: [],
+        trackerKind: 'local', contextLabel: 'Global task demo', configurationState: 'ready', runningAgents: 1, retryingAgents: 0, repositories: [],
       },
     ],
     discoveryRoots: [{ id: 'cbf5928c-bc76-43e2-944a-d41e96044fd9', path: 'F:\\Dev\\Code\\05_Apps_Tools', maxDepth: 4, confirmationRequired: true, createdAt: clock, updatedAt: clock }],
@@ -167,7 +167,7 @@ export const fixtureSnapshot: DashboardSnapshot = {
       {
         id: '9f1c2a50-4d3e-4b8a-9c21-7e5b0a6d1c22',
         projectId: '08b8e62d-5a7c-4a3a-a582-b63278347db0',
-        goal: '为本地任务源实现健康检查端点并补齐单元测试',
+        goal: 'Implement health check endpoint for the local task source and add unit tests',
         source: 'manual',
         phase: 'executing',
         startedAt: '2026-08-14T02:12:00.000Z',
@@ -182,7 +182,7 @@ export const fixtureSnapshot: DashboardSnapshot = {
       {
         id: '2b8d4e71-6f0a-4c1b-8d35-1a9c4f7e0b53',
         projectId: '08b8e62d-5a7c-4a3a-a582-b63278347db0',
-        goal: '调研 Agent Teams 实验能力并输出适配层方案',
+        goal: 'Research Agent Teams experimental capabilities and produce an adapter layer plan',
         source: 'manual',
         sourceRef: 'RESEARCH-7',
         phase: 'paused',
@@ -195,13 +195,13 @@ export const fixtureSnapshot: DashboardSnapshot = {
       {
         id: 'c47a90e2-51b3-4d6f-a8e0-3f2d9c817a46',
         projectId: '08b8e62d-5a7c-4a3a-a582-b63278347db0',
-        goal: '修复全局看板跨项目状态归一化',
+        goal: 'Fix global board cross-project state normalization',
         source: 'tracker',
         sourceRef: 'ENG-219',
         phase: 'succeeded',
         startedAt: '2026-08-13T08:02:00.000Z',
         completedAt: '2026-08-13T09:15:00.000Z',
-        resultSummary: '已修复并补充回归测试。',
+        resultSummary: 'Fixed and added regression tests.',
         tokenUsage: totals(88_150, 17_930, 240_600, 9_800, 3_420),
         createdAt: '2026-08-13T08:00:00.000Z',
         updatedAt: '2026-08-13T09:15:00.000Z',
@@ -215,17 +215,17 @@ export const fixtureSnapshot: DashboardSnapshot = {
 const localIssues: readonly TaskIssue[] = [
   {
     sourceKind: 'local', scopeRef: 'global-demo', nativeRef: 'local-17', identifier: 'LOCAL-17',
-    title: '整理全局看板验收证据', state: { name: 'Todo', type: 'unstarted' }, labels: ['dashboard'],
+    title: 'Organize global board acceptance evidence', state: { name: 'Todo', type: 'unstarted' }, labels: ['dashboard'],
     blockedBy: [], dispatchable: true, priority: 2, updatedAt: '2026-08-14T02:27:00.000Z',
   },
   {
     sourceKind: 'local', scopeRef: 'global-demo', nativeRef: 'local-18', identifier: 'LOCAL-18',
-    title: '验证 Local 与 Linear 状态归一化', state: { name: 'In Progress', type: 'started' }, labels: ['provider'],
+    title: 'Verify Local and Linear state normalization', state: { name: 'In Progress', type: 'started' }, labels: ['provider'],
     blockedBy: [], dispatchable: true, priority: 1, updatedAt: '2026-08-14T02:28:00.000Z',
   },
   {
     sourceKind: 'local', scopeRef: 'global-demo', nativeRef: 'local-19', identifier: 'LOCAL-19',
-    title: '记录移动端组合视图检查结果', state: { name: 'Done', type: 'completed' }, labels: ['qa'],
+    title: 'Record mobile composite view check results', state: { name: 'Done', type: 'completed' }, labels: ['qa'],
     blockedBy: [], dispatchable: false, priority: 3, updatedAt: '2026-08-14T02:29:00.000Z',
   },
 ]
@@ -233,7 +233,7 @@ const localIssues: readonly TaskIssue[] = [
 export const localFixtureSnapshot: DashboardSnapshot = {
   ...fixtureSnapshot,
   selection: { mode: 'project', projectId: '4bceae56-7cc1-4419-a912-a6ea110448fb' },
-  context: { kind: 'local', providerLabel: 'Local', projectLabel: '全局任务演示', projectRef: 'global-demo' },
+  context: { kind: 'local', providerLabel: 'Local', projectLabel: 'Global task demo', projectRef: 'global-demo' },
   taskMutations: { canCreate: true, canUpdate: true, canDelete: true, states: ['Backlog', 'Todo', 'In Progress', 'Done'] },
   board: {
     total: localIssues.length,
