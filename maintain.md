@@ -1,5 +1,90 @@
 # Maintenance Log — DSH Projects
 
+## Cycle 7 (post v0.14.0 deploy) — 2026-09-14
+
+**Status: no incidents.** Phase 8 (Artifacts + final report) released as
+v0.14.0 (release commit `758e223`, build `504a2fb`, test report `e454d7f`,
+spec `87d2591`, intent `15a8653`). Shipped on local `main` and **pushed to
+`origin/main`** this cycle (unlike Cycle 6's local-only work — `main` is now
+in sync with `origin/main`, 0/0). A release marker branch
+`dsh-projects-phase-8` (at `758e223`) was created and pushed for consistency
+with the Phase 3/4/5/6/7 markers.
+
+### Post-deploy verification
+
+- `pnpm run typecheck` — clean (exit 0)
+- `pnpm run build` — clean (dual tsdown: client 462.25 kB / host 428.55 kB)
+- `pnpm exec vitest run` — 547 passed / 3 failed (550 total); the 3 failures
+  are the pre-existing, documented macOS tmpdir environment failures in
+  `tests/project-catalog.test.ts` (`/var/folders` vs `/private/var/folders`
+  realpath mismatch), present since Phase 3 and unrelated to Phase 8. All 58
+  new Phase 8 tests are green (see `test-report.md`): artifact-service (20),
+  final-report (16), client-artifacts-isolation (1), dashboard-artifacts (9),
+  rpc-handler (58, +10), run-storage-integration (7, +1), task-service (32,
+  +1).
+- Working tree clean; `dsh_projects` storage domain remains at format version
+  0 (Phase 8 is additive — one `project_artifacts` table, two run event types
+  `artifact.created`/`run.report.failed`; no migration needed for installed
+  instances).
+- Invariant checks: the new client-isolation scan
+  (`tests/client-artifacts-isolation.test.ts`) proves `src/client/**` never
+  imports the node-side artifact modules — the client carries its own mirror
+  types in `controller.ts` and talks to the services only through the typed
+  `DashboardDataPort`; `DashboardSnapshot.version` stays 2 (artifacts are
+  on-demand `runDetail`/`artifactList` RPC data, not snapshot projections).
+
+### Test-stage findings (fixed during verification, recorded in test-report §3)
+
+1. **`rpc-handler` §11.4 gap** — the Phase 8 build covered the happy-path
+   dispatch + shape validation but not the structured failure surface. Added
+   the five §5.3 service rejections (`invalidCandidate`/`contentTooLarge`/
+   `missingUrl`/`kindReserved`/`containsSecrets`) round-tripping their
+   `dashboardCode` + `params` through `decodeDashboardError`, the three
+   not-mounted absent-service failures, and the on-demand
+   `runUnknown`/`reportFailed` (48 → 58 cases).
+2. **`run-storage-integration` §11.6 gap** — the build asserted the artifact
+   row survives reopen but not the `artifact.created` run events; extended the
+   reopen case to assert the two events also survive (6 → 7 cases).
+3. **`final-report` §11.2 gap** — the build covered the success path but not
+   the failure contract; added the failure case (a generation failure → a warn
+   log + the `run.report.failed` event + no artifact, never thrown, the run
+   still terminal) (15 → 16 cases).
+4. **`dashboard-artifacts` §11.5 "zh + en" gap** — the build covered the
+   inspector in zh only; added the en-locale inspector case (the final-report
+   renders with the English §64 headers + Regenerate) (8 → 9 cases).
+5. **`exactOptionalPropertyTypes` + `noUncheckedIndexedAccess`** — Phase 8 test
+   files needed tightening for the §12.6 typecheck gate: `artifact-service` +
+   `final-report` (`.entries()` yields `unknown` — cast on push),
+   `final-report` (`makeTask` gains `version: 1`; the "no fabricated data" case
+   builds a `ProjectRunRecord` without `resultSummary` inline rather than a
+   `delete` cast).
+
+### Known issues (tracked, non-blocking)
+
+1. **`project-catalog.test.ts` × 3** — macOS sandbox realpath mismatch
+   (`/var/folders` vs `/private/var/folders`). Fails identically before and
+   after every Phase 8 commit; not a regression.
+2. **`integration-strategy.test.ts` flaky under full-suite load** — the
+   git-worktree cases intermittently fail when the whole suite runs
+   concurrently (temp-dir / worktree contention); they pass 7/7 in isolation
+   and in the clean full-suite run that produced the §1 numbers. Not
+   introduced by Phase 8 (the Phase 8 diff does not touch the merge strategy).
+3. **Running GUI lags the repo** — the dashboard at http://127.0.0.1:3080
+   still serves a pre-Phase-8 build; the Phase 8 UI (the project Artifacts tab,
+   the RunInspector Artifacts section with the readable final-report + Regenerate,
+   the Add artifact dialog) is only visible after the plugin is
+   reinstalled/restarted against this checkout's v0.14.0 build output.
+
+### Follow-ups (next intent cycle)
+
+- Reinstall/restart the GUI plugin against the v0.14.0 build so the running
+  dashboard serves the Phase 8 UI (the Artifacts tab, the RunInspector
+  Artifacts section, the Add artifact dialog).
+- Decide whether to fix the `project-catalog.test.ts` tmpdir expectations
+  (normalize `realpath` in the assertions) or keep them documented.
+- Phase 9 scope: to be drafted as the next `intent.md` when this maintain
+  stage closes.
+
 ## Cycle 6 (post v0.13.0 deploy) — 2026-09-14
 
 **Status: no incidents.** Phase 7 (Approvals + budgets) released as v0.13.0
