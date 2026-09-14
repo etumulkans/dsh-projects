@@ -135,7 +135,7 @@ reconcileStaleTask(task, run, now):
 | Task state | `ProjectTaskService.casTaskTransition` — `current.status !== task.status` CAS (status-based) | `TaskTransitionError` (service-internal) |
 | Task assignment / worktree identity | `provisionTaskWorktree` second CAS — `current.version !== started.version` | `TaskTransitionError` |
 | Plan activation | `RunPlanService.transitionPlan` — `revision` + `expectedRevision` CAS | `plan.revisionConflict` |
-| Approval resolution | `ApprovalService.resolveApproval` / `expireApproval` — `version` + `expectedVersion` CAS | `approval.versionConflict` |
+| Approval resolution | `ApprovalService.resolveApproval` / `expireApproval` — `version` + `expectedVersion` CAS | `approval.staleVersion` |
 
 Phase 10 therefore **verifies** these guards under stress (it does not add them):
 
@@ -186,7 +186,7 @@ The §57 stress surface (fake ctx + fake worker, the `task-service.test.ts` patt
 1. **Task-state exactly-one-writer** — N concurrent `casTaskTransition` callers on one `ready` task; assert exactly one wins (`running`), the rest are no-ops/errors, the version is consistent.
 2. **Run-phase exactly-one-writer** — N concurrent `transitionRun` callers with distinct `expectedVersion`; assert exactly one wins, the rest get `run.versionConflict`.
 3. **Plan-activation stale-reject** — a `transitionPlan` with a stale `expectedRevision` is rejected with `plan.revisionConflict` (proving the guard the intent assumed missing is present).
-4. **Approval-resolution exactly-one-writer** — N concurrent `resolveApproval` callers; assert exactly one wins, the rest get `approval.versionConflict`.
+4. **Approval-resolution exactly-one-writer** — N concurrent `resolveApproval` callers; assert exactly one wins, the rest get `approval.staleVersion`.
 5. **Reconcile-vs-live race** — (mirrors 11.1.9 at the concurrency layer) a reconcile racing a live `beginExecution`/`settleResult` is safe.
 
 ### 11.3 `tests/run-storage-integration.test.ts` (extended)

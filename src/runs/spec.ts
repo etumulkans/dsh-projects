@@ -114,6 +114,10 @@ export const RUN_EVENT_TYPES = [
   'run.report.failed',
   // Additive (Phase 9): a trigger created a run (spec §3.4).
   'trigger.fired',
+  // Additive (Phase 10): restart reconciliation — a stale `running` task was
+  // interrupted (session gone) before re-queue/fail, and a non-terminal Run
+  // was re-driven (spec §3.1).
+  'task.interrupted', 'run.recovered',
 ] as const satisfies readonly ProjectRunEventRecord['type'][]
 
 export const projectRunEventRecordSchema = z.object({

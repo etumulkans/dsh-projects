@@ -41,6 +41,7 @@ import {
   type IntegrationStrategy,
 } from '../src/tasks/integration.ts'
 import { UnavailableWorker, type TaskWorker, type TaskWorkerInput, type TaskWorkerResult } from '../src/tasks/worker.ts'
+import { RECOVERY_STALE_MS } from '../src/tasks/constants.ts'
 
 const PROJECT_ID = '123e4567-e89b-42d3-a456-426614174000'
 const PROJECT_ROOT = '/tmp/dsh-task-cwd'
@@ -345,6 +346,8 @@ async function fixture(overrides: {
   readonly artifactFactory?: (ctx: Context, catalog: ProjectCatalog, runService: ProjectRunService) => ProjectArtifactService
   /** Phase 7: the run's budget, stamped directly on the record after creation. */
   readonly budget?: RunBudget
+  /** Phase 10: session-existence probe for restart reconciliation (absent = policy fallback). */
+  readonly sessionAlive?: (sessionId: string) => boolean
 } = {}): Promise<Fixture> {
   const storage = new MemoryStorage()
   const emit = vi.fn()
@@ -419,6 +422,7 @@ async function fixture(overrides: {
     memory,
     overrides.hooks,
     approvalService,
+    overrides.sessionAlive,
   )
   taskService.start()
   const planService = new RunPlanService(ctx, runService, clock, {
@@ -1657,4 +1661,113 @@ describe('ProjectTaskService Phase 8 run/completed report trigger (spec §7)', (
       await fx.runService.stop()
     }
   }, 30_000)
+})
+
+describe('ProjectTaskService Phase 10 restart reconciliation (spec §11.4)', () => {
+  /** Seed a `running` task directly into the tasks table. */
+  async function seedRunningTask(fx: Awaited<ReturnType<typeof fixture>>, overrides: Partial<ProjectTaskRecord> & { readonly id: string }): Promise<void> {
+    const record: ProjectTaskRecord = {
+      id: overrides.id,
+      runId: fx.runId,
+      planId: 'plan-1',
+      planTaskId: overrides.id,
+      title: overrides.title ?? `task ${overrides.id}`,
+      description: 'phase 10 fixture task',
+      dependencies: [],
+      status: 'running',
+      acceptanceCriteria: [],
+      attempt: overrides.attempt ?? 1,
+      maxAttempts: overrides.maxAttempts ?? 3,
+      startedAt: overrides.startedAt ?? NOW,
+      createdAt: NOW,
+      updatedAt: NOW,
+      version: overrides.version ?? 2,
+      ...(overrides.assignedAgentId === undefined ? {} : { assignedAgentId: overrides.assignedAgentId }),
+    }
+    await fx.runService.domain().table('tasks').put(record.id, record)
+  }
+
+  function eventsFor(fx: Awaited<ReturnType<typeof fixture>>, runId: string): Array<{ type: string; detail?: string }> {
+    const out: Array<{ type: string; detail?: string }> = []
+    const events = fx.runService.domain().table('run_events') as KvTable<string, { type: string; detail?: string; runId: string }>
+    for (const [, event] of events.entries()) {
+      if (event.runId === runId) out.push({ type: event.type, ...(event.detail === undefined ? {} : { detail: event.detail }) })
+    }
+    return out
+  }
+
+  // --- isStaleTask probe/fallback matrix ---
+
+  it('isStaleTask: a running task with no assignedAgentId is stale (torn write)', async () => {
+    // UnavailableWorker: the trailing tick cannot re-dispatch, so the
+    // re-queue outcome (`ready`) stays observable.
+    const fx = await fixture({ sessionAlive: () => true, worker: new UnavailableWorker() })
+    await seedRunningTask(fx, { id: 'task-1' })
+    await fx.taskService.reconcileAfterRestart()
+    expect(fx.runService.domain().table('tasks').get('task-1')?.status).toBe('ready')
+  })
+
+  it('isStaleTask: the probe reports a dead session ⇒ stale', async () => {
+    // The probe returns `true` only for the live session; `dsh-task-dead` is
+    // reported dead ⇒ stale.
+    const fx = await fixture({ sessionAlive: id => id === 'dsh-task-live', worker: new UnavailableWorker() })
+    await seedRunningTask(fx, { id: 'task-1', assignedAgentId: 'dsh-task-dead' })
+    await fx.taskService.reconcileAfterRestart()
+    expect(fx.runService.domain().table('tasks').get('task-1')?.status).toBe('ready')
+  })
+
+  it('isStaleTask: the probe reports a live session ⇒ left alone', async () => {
+    const fx = await fixture({ sessionAlive: id => id === 'dsh-task-live' })
+    const seeded = await seedRunningTask(fx, { id: 'task-1', assignedAgentId: 'dsh-task-live' })
+    void seeded
+    await fx.taskService.reconcileAfterRestart()
+    const task = fx.runService.domain().table('tasks').get('task-1')
+    expect(task?.status).toBe('running')
+    expect(task?.version).toBe(2)
+    expect(eventsFor(fx, fx.runId).some(e => e.type === 'task.interrupted')).toBe(false)
+  })
+
+  it('isStaleTask: without a probe, a task older than RECOVERY_STALE_MS is stale', async () => {
+    const staleStarted = new Date(Date.parse(NOW) - (RECOVERY_STALE_MS + 60_000)).toISOString()
+    const fx = await fixture({})
+    await seedRunningTask(fx, { id: 'stale', assignedAgentId: 'dsh-task-x', startedAt: staleStarted })
+    await seedRunningTask(fx, { id: 'fresh', assignedAgentId: 'dsh-task-y', startedAt: NOW })
+    await fx.taskService.reconcileAfterRestart()
+    expect(fx.runService.domain().table('tasks').get('stale')?.status).toBe('ready')
+    expect(fx.runService.domain().table('tasks').get('fresh')?.status).toBe('running')
+  })
+
+  // --- reconcileStaleTask outcomes ---
+
+  it('reconcileStaleTask: re-queues within the attempt budget (running → ready)', async () => {
+    const fx = await fixture({ sessionAlive: () => false, worker: new UnavailableWorker() })
+    await seedRunningTask(fx, { id: 'task-1', assignedAgentId: 'dsh-task-dead', attempt: 1, maxAttempts: 3 })
+    await fx.taskService.reconcileAfterRestart()
+    const task = fx.runService.domain().table('tasks').get('task-1')
+    expect(task?.status).toBe('ready')
+    expect(task?.version).toBe(3)
+    expect(eventsFor(fx, fx.runId).some(e => e.type === 'task.interrupted')).toBe(true)
+    expect(eventsFor(fx, fx.runId).some(e => e.type === 'run.recovered')).toBe(true)
+  })
+
+  it('reconcileStaleTask: fails at the attempt budget (running → failed)', async () => {
+    const fx = await fixture({ sessionAlive: () => false })
+    await seedRunningTask(fx, { id: 'task-1', assignedAgentId: 'dsh-task-dead', attempt: 3, maxAttempts: 3 })
+    await fx.taskService.reconcileAfterRestart()
+    const task = fx.runService.domain().table('tasks').get('task-1')
+    expect(task?.status).toBe('failed')
+    expect(task?.error).toBe('interrupted: session lost on restart')
+    expect(eventsFor(fx, fx.runId).some(e => e.type === 'task.interrupted')).toBe(true)
+  })
+
+  it('reconcileStaleTask: leaves a live task alone (no transition, no event)', async () => {
+    const fx = await fixture({ sessionAlive: () => true })
+    await seedRunningTask(fx, { id: 'task-1', assignedAgentId: 'dsh-task-live' })
+    await fx.taskService.reconcileAfterRestart()
+    const task = fx.runService.domain().table('tasks').get('task-1')
+    expect(task?.status).toBe('running')
+    expect(task?.version).toBe(2)
+    expect(eventsFor(fx, fx.runId).some(e => e.type === 'task.interrupted')).toBe(false)
+    expect(eventsFor(fx, fx.runId).some(e => e.type === 'run.recovered')).toBe(false)
+  })
 })

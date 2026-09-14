@@ -696,6 +696,115 @@ describe('ProjectRunService against real JSON storage', () => {
     dispose()
   })
 
+  it('reconciles a stale running task after a real storage restart (Phase 10)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-projects-run-it-'))
+    temporaryRoots.push(root)
+    const { ctx, facility, dispose } = await boot(root)
+    const clock = () => new Date(Date.UTC(2026, 7, 14, 6, 0, 0)).toISOString()
+    // A worker that never resolves: the task starts and stays running, so it
+    // is the stale `running` state reconciliation must recover.
+    const worker: TaskWorker = {
+      kind: 'local',
+      start: (_input: TaskWorkerInput): Promise<TaskWorkerResult> => new Promise(() => undefined),
+      async stop(): Promise<void> { /* nothing to stop */ },
+    }
+
+    // --- boot 1: run -> executing, activate a one-task plan, materialize ---
+    const first = new ProjectRunService(ctx, catalogFixture(), clock)
+    await first.start()
+    const firstTasks = new ProjectTaskService(ctx, catalogFixture(), first, worker, undefined, undefined, clock)
+    firstTasks.start()
+    const firstPlans = new RunPlanService(ctx, first, clock, {
+      onPlanStatus: (event: PlanStatusChangedEvent) => firstTasks.handlePlanStatus(event),
+    })
+    firstPlans.start()
+    const run = await first.createRun(
+      { goal: 'Integration: recover a stale task after restart', sourceRef: 'IT-R' },
+      { mode: 'project', projectId: PROJECT_ID },
+    )
+    await first.transitionRun(run.id, 'planning')
+    await first.transitionRun(run.id, 'executing')
+    const plan = await firstPlans.createPlan({
+      runId: run.id,
+      pattern: 'supervisor',
+      rationale: 'one-step recovery work',
+      tasks: [{ title: 'the task', description: 'do the thing', acceptanceCriteria: ['done'] }],
+    })
+    await firstPlans.transitionPlan(plan.id, 'active')
+    const materialized = firstTasks.taskList(run.id)
+    expect(materialized).toHaveLength(1)
+    const staleTaskId = materialized[0]!.id
+    const staleSessionId = materialized[0]!.assignedAgentId
+    expect(materialized[0]).toMatchObject({ status: 'running', attempt: 1 })
+    expect(staleSessionId).toMatch(/^dsh-task-/u)
+    firstPlans.stop()
+    firstTasks.stop()
+    await first.stop()
+    await facility.closeAll()
+
+    // --- boot 2: fresh services over the same medium; the session is gone ---
+    const second = new ProjectRunService(ctx, catalogFixture(), clock)
+    await second.start()
+    // The sessionAlive probe reports the stale session is dead (the Harness
+    // process restarted and the agent is no longer alive).
+    const secondTasks = new ProjectTaskService(
+      ctx, catalogFixture(), second, worker,
+      undefined, undefined, clock, undefined, undefined, undefined, undefined,
+      (sessionId: string) => sessionId !== staleSessionId,
+    )
+    secondTasks.start()
+    const secondPlans = new RunPlanService(ctx, second, clock, {
+      onPlanStatus: (event: PlanStatusChangedEvent) => secondTasks.handlePlanStatus(event),
+    })
+    secondPlans.start()
+    try {
+      // Before reconciliation the task is the stale `running` record.
+      expect(secondTasks.taskList(run.id)[0]).toMatchObject({ status: 'running', attempt: 1 })
+
+      // Reconcile: the stale running task is interrupted, re-queued to
+      // `ready` (attempt 1 < maxAttempts 3 ⇒ recoverable), and the trailing
+      // tick() re-dispatches it — so it is `running` again at attempt 2.
+      await secondTasks.reconcileAfterRestart()
+
+      const recovered = secondTasks.taskList(run.id)[0]
+      expect(recovered).toMatchObject({ status: 'running', attempt: 2 })
+      expect(recovered?.id).toBe(staleTaskId)
+
+      // The reconciliation is recorded in the run event stream: the stale
+      // task was interrupted and the run was recovered.
+      const detail = await second.runDetail(run.id)
+      expect(detail.events.some(event => event.type === 'task.interrupted')).toBe(true)
+      expect(detail.events.some(event => event.type === 'run.recovered')).toBe(true)
+
+      // A second reconciliation is a no-op (idempotent): the task is the
+      // re-dispatched `running` record with a session the probe still reports
+      // dead, but it was already recovered — the tick re-dispatched it. The
+      // interruption is recorded exactly once.
+      await secondTasks.reconcileAfterRestart()
+      const detailAfterSecond = await second.runDetail(run.id)
+      expect(detailAfterSecond.events.filter(event => event.type === 'task.interrupted')).toHaveLength(1)
+      expect(detailAfterSecond.events.filter(event => event.type === 'run.recovered')).toHaveLength(1)
+    } finally {
+      secondPlans.stop()
+      secondTasks.stop()
+      await second.stop()
+    }
+
+    // The medium carries the recovered task and the reconciliation events.
+    const entries = await readdir(root, { recursive: true })
+    const mediumFile = entries.find(entry => String(entry).includes('dsh_projects') && String(entry).endsWith('.json'))
+    expect(mediumFile).toBeDefined()
+    const medium = JSON.parse(await readFile(join(root, String(mediumFile)), 'utf8')) as {
+      tables: Record<string, Record<string, unknown>>
+    }
+    const persistedTask = Object.values(medium.tables.tasks ?? {})[0] as Record<string, unknown>
+    // The recovered task is persisted in its re-dispatched `running` state
+    // (attempt 2) — the reconciliation re-queued it and the tick re-dispatched.
+    expect(persistedTask).toMatchObject({ id: staleTaskId, status: 'running', attempt: 2 })
+
+    dispose()
+  })
+
   it('runs the full Git pipeline on a real repository and persists it across a domain reopen', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-projects-run-it-git-'))
     temporaryRoots.push(root)

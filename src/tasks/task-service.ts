@@ -32,6 +32,7 @@ import {
   DEFAULT_MAX_ATTEMPTS,
   DEFAULT_TASK_CONCURRENCY,
   EVENT_DETAIL_LIMIT,
+  RECOVERY_STALE_MS,
   TICK_INTERVAL_MS,
 } from './constants.ts'
 import {
@@ -145,6 +146,14 @@ export class ProjectTaskService {
     private readonly hooks?: ProjectTaskServiceHooks,
     /** Phase 7 (spec §4.5): approval service for the merge gate; `undefined` ⇒ no merge gate (test seam). */
     private readonly approvalService?: ApprovalService,
+    /**
+     * Phase 10 (spec §4.3): session-existence probe for restart reconciliation.
+     * Returns `true` when the Harness session with the given id is still alive.
+     * `undefined` ⇒ policy-fallback staleness (startedAt older than
+     * RECOVERY_STALE_MS, or no assignedAgentId). Wired in `src/index.ts` to the
+     * real installed `ctx.agents.get(sessionId) !== undefined`.
+     */
+    private readonly sessionAlive?: (sessionId: string) => boolean,
   ) {
     this.configuredIntegrationStrategy = integrationStrategy
   }
@@ -203,6 +212,117 @@ export class ProjectTaskService {
     for (const controller of this.inFlight.values()) controller.abort()
     this.inFlight.clear()
     this.tables = undefined
+  }
+
+  /**
+   * Phase 10 (spec §4): startup reconciliation. Repairs the in-flight
+   * execution a process restart orphaned: for each non-terminal Run it
+   * interrupts stale `running` tasks (their Harness session is gone) —
+   * re-queued within the attempt budget or failed when exhausted — and
+   * re-drives the Run. Idempotent and CAS-guarded: a task that moved
+   * concurrently (a live worker settled it) is a logged no-op, and a
+   * terminal Run is never touched (spec §54 "do not blindly restart").
+   *
+   * Called from `src/index.ts` after `start()`, before `runtime.start()`.
+   * A failure is logged by the caller, never fatal to boot.
+   */
+  async reconcileAfterRestart(): Promise<void> {
+    const tables = this.tables
+    if (tables === undefined) return // stopped — nothing to reconcile
+    const now = this.clock()
+    const nowMs = this.retryClock()
+    for (const [, run] of tables.runs.entries()) {
+      if (isTerminalRunPhase(run.phase)) continue // terminal Runs are never touched
+      let runInterrupted = 0
+      for (const task of this.tasksForRun(run.id)) {
+        if (task.status !== 'running') continue
+        if (!this.isStaleTask(task, nowMs)) continue // a live session is left untouched
+        const outcome = await this.reconcileStaleTask(task, run, now)
+        if (outcome !== 'left-alone' && outcome !== 'already-moved') runInterrupted++
+      }
+      if (runInterrupted > 0) {
+        await this.appendRunEvent({
+          runId: run.id,
+          projectId: run.projectId,
+          type: 'run.recovered',
+          title: 'Run recovered',
+          detail: `re-dispatched ${runInterrupted} interrupted task(s)`,
+          at: now,
+        })
+        // Re-drive: the existing tick loop re-dispatches the re-queued `ready`
+        // tasks (and the dead-DAG check blocks a Run whose DAG is dead). No
+        // direct phase transition — the scheduler stays the single authority.
+        await this.tick()
+      }
+    }
+  }
+
+  /**
+   * Phase 10 (spec §5): interrupt one stale `running` task through the single
+   * authority. Emits `task.interrupted`, then re-queues (`running → ready`,
+   * the existing internal-retry edge) when `attempt < maxAttempts`, else fails
+   * (`running → failed`) with the interruption reason. Each write is
+   * CAS-guarded (`casTaskTransition` checks `current.status !== task.status`),
+   * so a task that moved concurrently is a logged no-op. Returns the outcome
+   * for the caller's `run.recovered` count.
+   */
+  private async reconcileStaleTask(
+    task: ProjectTaskRecord,
+    run: ProjectRunRecord,
+    now: string,
+  ): Promise<'requeued' | 'failed' | 'left-alone' | 'already-moved'> {
+    const maxAttempts = task.maxAttempts ?? DEFAULT_MAX_ATTEMPTS
+    await this.appendRunEvent({
+      runId: task.runId,
+      projectId: run.projectId,
+      type: 'task.interrupted',
+      title: 'Task interrupted',
+      detail: `${task.title} (session lost on restart; attempt ${task.attempt}/${maxAttempts})`,
+      at: now,
+    })
+    try {
+      if (task.attempt < maxAttempts) {
+        const next = await this.casTaskTransition(task, 'ready', { now })
+        this.emitTaskEvent(next)
+        return 'requeued'
+      }
+      const next = await this.casTaskTransition(task, 'failed', {
+        now,
+        error: 'interrupted: session lost on restart',
+      })
+      this.emitTaskEvent(next)
+      return 'failed'
+    } catch (error) {
+      if (error instanceof TaskTransitionError) {
+        // A live worker settled the task (or a concurrent reconcile moved it)
+        // between the probe and the CAS — the interruption is already moot.
+        this.ctx.logger.info('dsh-projects: stale task %s moved concurrently; reconcile no-op', task.id)
+        return 'already-moved'
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Phase 10 (spec §4.3): is a `running` task stale (its Harness session is
+   * gone)? Probe-primary when the `sessionAlive` hook is wired (the real
+   * installed `ctx.agents.get(sessionId) !== undefined`); policy-fallback when
+   * it is not — stale when it has no `assignedAgentId` (a torn write) or its
+   * `startedAt` is older than `RECOVERY_STALE_MS`. A task whose probe reports
+   * the session is alive is never stale (§54 "do not blindly restart").
+   */
+  private isStaleTask(task: ProjectTaskRecord, nowMs: number): boolean {
+    if (task.assignedAgentId === undefined) return true // never dispatched — a torn write
+    if (this.sessionAlive !== undefined) {
+      return !this.sessionAlive(task.assignedAgentId)
+    }
+    // Policy fallback: the probe is not wired (a test seam). Stale when the
+    // task has been `running` longer than the bound.
+    const startedAt = task.startedAt
+    if (startedAt === undefined) return true
+    const startedMs = Date.parse(startedAt)
+    if (Number.isNaN(startedMs)) return true
+    return nowMs - startedMs > RECOVERY_STALE_MS
   }
 
   /** The worker kind this Host can currently execute tasks with (spec §6.4). */
