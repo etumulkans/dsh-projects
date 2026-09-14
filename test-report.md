@@ -1,105 +1,100 @@
-# Test Report — Phase 9: Trigger generalization
+# Test Report — Phase 10: Recovery + hardening
 
-Test-stage artifact for the Phase 9 diff (build commit `9d95463`,
-intent `0a0b648`, spec `f9a1ee1` — §10 test plan + §11 acceptance
-criteria). Verified on local `main` @ `9d95463`, 2026-09-14.
+Test-stage artifact for the Phase 10 diff (build commit `c16af2d`,
+intent `7f5594a`, spec `d55eecd` — §11 test plan + §12 acceptance
+criteria). Verified on local `main` @ `c16af2d`, 2026-09-14.
 
 ## 1. Test inventory
 
 | File | Cases | Scope (spec §11) |
 | --- | --- | --- |
-| `tests/trigger-service.test.ts` (new, in-memory domain + real `ProjectTriggerService`, fixed clock) | 15 | §11.1 the **store/service**: the two declared tables (`project_triggers` + `trigger_fires`, v0, no migration); the strict schema (7 types, per-type `config`, bounded `goalTemplate` 1..500); **CRUD** (`create`/`get`/`list`/`update`/`setEnabled`/`delete`); `manual` is **never persisted** (a `manual` create → `trigger.manualReserved`); a secret in `goalTemplate`/`config` → `trigger.containsSecrets`; `list` is newest-first with a deterministic insertion-order tiebreak under a fixed clock; `trigger.notStarted` before the service starts; the exported pure `validateTrigger` (per-type `config` shape, `goalTemplate` bounds). |
-| `tests/trigger-fire.test.ts` (new, in-memory domain + real `ProjectTriggerService` + real `ProjectRunService`, fixed clock) | 9 | §11.3 **idempotency** + §11.4 **fire**: `fire` renders the `goalTemplate` with the event and creates a run via `createRun` (the trigger's `approvalMode` + `source`/`sourceRef`); the **dedupe** — the same `(triggerId, sourceEventKey)` creates at most one run (a duplicate event is a no-op; a process **restart** does not re-fire — the `trigger_fires` record is the authority); a **disabled** trigger does not fire; `goalEmpty`/`goalTooLong` rejections; the **failure** contract (a `createRun` throw → **no** fire record persisted, the trigger is unchanged and retryable); the `trigger.fired` run event + `lastFiredAt`/`lastRunId` are recorded; a `manual` fire is non-idempotent (a synthetic `manual:<uuid>` key). |
-| `tests/trigger-adapters.test.ts` (new, fake clock + fake task sources) | 14 | §11.2 the **adapters**: the registry exposes exactly the 7 types; the **pull** set (`schedule`, `tracker`) vs the **push** set (`pr-event`, `repository-event`, `system`, `webhook`); the `tracker` adapter wraps the existing `TaskSource`s (no rewrite) and yields a `TriggerEvent` on a ready-state issue; the `schedule` adapter computes the next slot and fires on it (deterministic under a fake clock, no re-fire after a restart); the `webhook` adapter maps a signed payload to a `TriggerEvent`; the `system`/`repository-event`/`pr-event` adapters are the minimal real `onEvent` path (`pr-event` maps to the `repository-event` run source). |
-| `tests/rpc-handler.test.ts` (extended) | 72 (67 + **5 new**) | §11.6 the **RPC surface**: `triggerList`/`triggerCreate`/`triggerGet`/`triggerUpdate`/`triggerSetEnabled`/`triggerDelete`/`triggerFire` dispatch with validation (missing/invalid `projectId`/`id` → `bad-request`); the **service rejections** surface as structured `bad-request`s — `trigger.invalidCandidate`/`trigger.containsSecrets`/`trigger.unknown`/`trigger.disabled`/`trigger.goalEmpty` each round-trip their `dashboardCode` + `params` through `decodeDashboardError`; **absent-service** structured failures (the trigger endpoints are unavailable without a Trigger service). |
-| `tests/dashboard-automations.test.tsx` (new, jsdom) | 12 (10 + **2 new**) | §11.5 the **UI** (zh/en parity): the **Automations tab** (between artifacts and configuration in zh; the English label under the en locale) fetches the first project on demand, lists triggers (type badge, enabled/paused status, goal template, **approval policy** — the mode label or the "use default" marker) and the empty marker; **enable/disable** dispatches `triggerSetEnabled` with busy gating; **Run now** dispatches `triggerFire`; the **Add trigger** dialog (type select + per-type config fields + goal template + **approval-mode select**) dispatches `triggerCreate` (submit disabled until a goal template; a chosen approval mode is included); the **delete** confirm modal dispatches `triggerDelete`. |
-| `tests/run-storage-integration.test.ts` (extended) | 8 (7 + **1 new**) | §11.1 the **store**: `project_triggers` + `trigger_fires` are declared `dsh_projects` tables (the set grows by exactly two, v0, no migration); a **fired trigger + its fire record** survive a real JSON domain reopen (a restart does not lose the trigger or its `trigger_fires` dedupe row, and a re-fire after the reopen is idempotent — the same run). |
-| `tests/client-triggers-isolation.test.ts` (new) | 1 | §11.7 the client never imports the node-side trigger modules — no `src/client/**` file imports `src/triggers/**` (the client carries mirror types in `controller.ts`; the §8 isolation invariant). |
+| `tests/recovery.test.ts` (new, node — no jsdom) | 9 | §11.1 the **restart→reconcile surface**. Boots the real storage stack (the `run-storage-integration.test.ts` pattern: genuine Cordis Context + JSON backend + DomainFacility) with a fake `ctx.agents` (`get` → `undefined` for a dead session id, an object for a live one) and a fake worker. (1) a stale `running` task (dead session, `attempt 1`/`maxAttempts 3`) under an `executing` Run is re-queued to `ready` after a close+reopen + `reconcileAfterRestart()`, with a `task.interrupted` event and a `run.recovered` event (`re-dispatched 1 interrupted task(s)`); (2) the same at `attempt 3`/`maxAttempts 3` fails the task with `error: 'interrupted: session lost on restart'`; (3) a task whose session is **live** is left untouched (no transition, no event); (4) a `running` task with **no** `assignedAgentId` (a torn write) is stale and re-queued; (5) the **policy fallback** (no `sessionAlive` hook) — a task older than `RECOVERY_STALE_MS` is re-queued, a recent one is left alone; (6) a `running` task under a **terminal** (`succeeded`) Run is never touched; (7) the **durable surface** (a pending approval + a trigger + a memory + an artifact + a plan) survives the restart intact (versions unchanged); (8) a **double** `reconcileAfterRestart()` is a no-op (no duplicate events, no double-transition, versions stable); (9) a **reconcile-vs-live race** — a stale task settled concurrently to `succeeded` by a live worker ends `succeeded` (the CAS makes the reconcile a no-op), no corruption. |
+| `tests/concurrency.test.ts` (new, node) | 5 | §11.2 the **§57 stress surface** (fake ctx + fake worker, the `task-service.test.ts` pattern). (1) **task-state exactly-one-writer** — 8 concurrent `casTaskTransition` callers on one `ready` task: exactly one wins (`running`), the rest are no-ops, the version is consistent; (2) **run-phase exactly-one-writer** — 8 concurrent `transitionRun` callers with the same fresh `expectedVersion`: exactly one wins (`paused`), the 7 losers get `run.versionConflict`, the version advances by one; (3) **plan-activation stale-reject** — after a `draft→active` (revision stays 1), two concurrent `transitionPlan(..., 'superseded', {expectedRevision: 1})`: exactly one wins (revision → 2), the other gets `plan.revisionConflict` (proving the guard the intent assumed missing is present); (4) **approval-resolution exactly-one-writer** — 8 concurrent `resolveApproval` callers: exactly one wins, the 7 losers get `approval.invalidStatus` (the status check fires before the version check), plus a separate **version-guard** check (a still-`pending` approval whose version moved → `approval.staleVersion`); (5) **reconcile-vs-live race** (mirrors 11.1.9 at the concurrency layer) — a reconcile racing a live `beginExecution`/`settleResult` is safe. |
+| `tests/run-storage-integration.test.ts` (extended) | 9 (8 + **1 new**) | §11.3 the **real storage stack**: a `running` task (attempt 1, a stale session id) under an `executing` Run survives a close+reopen **and** is reconciled — `reconcileAfterRestart()` re-queues it and the trailing `tick()` re-dispatches it to `running` attempt 2 (the recoverable path); a `task.interrupted` + a `run.recovered` event are present; a second reconcile is a no-op (the re-dispatched task has a new live session); the persisted task is `running` attempt 2. Ties the recovery surface to the genuine JSON storage stack. |
+| `tests/task-service.test.ts` (extended) | 39 (32 + **7 new**) | §11.4 the **`reconcileAfterRestart` unit cases** (the existing fake ctx + fake worker fixture, no full storage stack). The `isStaleTask` matrix: (a) a `running` task with no `assignedAgentId` is stale (torn write); (b) the probe reports a **dead** session ⇒ stale (re-queued); (c) the probe reports a **live** session ⇒ left alone; (d) the **policy fallback** (no probe) — a task older than `RECOVERY_STALE_MS` is stale, a recent one is not. The `reconcileStaleTask` outcomes: (e) **re-queues** within the attempt budget (`running → ready`, `task.interrupted` appended); (f) **fails** at the attempt budget (`running → failed`, `error: 'interrupted: session lost on restart'`); (g) **leaves a live task alone** (no transition, no event). |
 
-**Total: 616 tests — 611 passed / 5 failed** (the 5 are the documented
-pre-existing environment/load failures, §4 — 3 `project-catalog` macOS
-`tmpdir()` cases + up to 2 `integration-strategy` under-load flakes; in
-isolation `project-catalog` is exactly 3/6 and `integration-strategy` is 7/7).
-**57 new Phase 9 tests** (51 in the five new files + 6 added to the two
-extended suites), all green.
+**Total: 638 tests — 635 passed / 3 failed** (the 3 are the documented
+pre-existing environment failures, §4 — the 3 `project-catalog` macOS
+`tmpdir()` symlink cases; in isolation `project-catalog` is exactly 3/6 and
+`integration-strategy` is 7/7). **22 new Phase 10 tests** (9 in
+`recovery.test.ts` + 5 in `concurrency.test.ts` + 1 added to
+`run-storage-integration.test.ts` + 7 added to `task-service.test.ts`),
+all green.
 
-## 2. Acceptance criteria (spec §11) — verified
+## 2. Acceptance criteria (spec §12) — verified
 
-1. **Store** — `project_triggers` (+ `trigger_fires`) are declared `dsh_projects`
-   tables (v0, no migration); records validate against the strict schema (7
-   types, per-type `config`, bounded `goalTemplate`); the table set grows by
-   exactly two tables. → `trigger-service.test.ts` (schema, CRUD, `manual`
-   reserved, secrets) + `run-storage-integration.test.ts` (table set, v0,
-   reopen).
-2. **Adapters** — the `tracker` adapter wraps the six existing `TaskSource`s (no
-   rewrite) and yields a `TriggerEvent` on a ready-state issue; the `schedule`
-   adapter computes the next slot and fires on it (deterministic under a fake
-   clock); the `webhook` adapter maps a signed payload to a `TriggerEvent`; the
-   `system`/`repository-event`/`pr-event` adapters are the minimal real `onEvent`
-   path; `manual` is the unchanged `runCreate` path. →
-   `trigger-adapters.test.ts` (registry, pull/push sets, all six adapters).
-3. **Idempotency** — the same `(triggerId, sourceEventKey)` creates at most one
-   run (verified across a duplicate event and a process restart); a disabled
-   trigger does not fire; the `schedule` adapter does not re-fire after a
-   restart. → `trigger-fire.test.ts` (duplicate no-op, restart no re-fire,
-   disabled no-fire) + `trigger-adapters.test.ts` (schedule no re-fire) +
-   `run-storage-integration.test.ts` (reopen idempotent re-fire).
-4. **Fire** — `fire` renders the `goalTemplate` with the event, creates a run via
-   `createRun` (the trigger's `approvalMode` + `source`/`sourceRef`), persists the
-   `trigger_fires` dedupe record, records `lastFiredAt`/`lastRunId`, and appends
-   the `trigger.fired` run event; the run is inspectable in the existing Runs UI.
-   → `trigger-fire.test.ts` (render, `createRun` args, dedupe record,
-   `lastFiredAt`/`lastRunId`, `trigger.fired` event, failure contract).
-5. **UI** — the Automations tab renders trigger/status/last-run/
-   **goal-template/approval-policy** (zh/en); enable/disable + Run now dispatch
-   the real RPCs; the Add trigger dialog dispatches `triggerCreate` (type select +
-   per-type config + goal template + **approval-mode select**); the config is
-   credential-free (no credential value is ever returned to the browser). →
-   `dashboard-automations.test.tsx` (tab zh+en, list + approval policy,
-   enable/disable, Run now, Add dialog + approval mode, delete) +
-   `client-triggers-isolation.test.ts`. **Deferred to Phase 11** (spec §12 "no
-   full Automations page polish"): the `next-run` (`nextRunAt`) column and the
-   trigger **detail view** — the working tab ships without them (see §3).
-6. **RPC** — `triggerList`/`triggerCreate`/`triggerGet`/`triggerUpdate`/
-   `triggerSetEnabled`/`triggerDelete`/`triggerFire` dispatch with validation;
-   absent-service structured failures; the new `trigger.*` error codes (with
-   `params`). → `rpc-handler.test.ts` (7 endpoints, validation, not-mounted, the
-   `trigger.*` rejections with `params`).
-7. **Repo green** — `pnpm run typecheck` (exit 0), `pnpm run build` (exit 0 —
-   client 491.86 kB / host 455.99 kB), full `pnpm vitest run` (611/5 of 616, the
-   5 modulo the documented pre-existing environment/load failures, §4).
+1. **Startup reconciliation exists and is wired** into the real boot path
+   (after services open, before `runtime.start()`), driven through the
+   single-authority transitions and CAS-guarded. → `recovery.test.ts` (the
+   full storage-stack reconcile) + `run-storage-integration.test.ts` (the
+   real JSON stack) + the `src/index.ts` wiring (the `sessionAlive` probe via
+   `ctx.agents.get(SessionId(...))` + `await taskService.reconcileAfterRestart()`
+   before `runtime.start()`, failure logged, never fatal).
+2. **Stale tasks are recovered** — an orphaned `running` task is interrupted +
+   re-queued (within budget) or failed (budget exhausted); a still-alive task is
+   left untouched; a no-session task is stale. → `recovery.test.ts` (1–4) +
+   `task-service.test.ts` (the `isStaleTask` matrix + the `reconcileStaleTask`
+   re-queue/fail/leave-alone outcomes).
+3. **Stale Runs are re-driven** — a non-terminal Run continues (re-queued tasks
+   re-dispatch, or the dead-DAG block applies); terminal Runs are never touched.
+   → `recovery.test.ts` (1, 6) + `run-storage-integration.test.ts` (the
+   re-dispatch to `running` attempt 2).
+4. **Pending approvals survive** (or are expired when the owning Run goes
+   terminal); the durable surface (catalog/plans/memory/artifacts/triggers) is
+   proven restart-safe. → `recovery.test.ts` (7) + `run-storage-integration.test.ts`.
+5. **The §57 guards are verified** — task-state / run-phase / plan-activation /
+   approval-resolution hold exactly-one-writer under stress; the plan-activation
+   stale-reject is proven. → `concurrency.test.ts` (1–4).
+6. **Reconciliation is idempotent and race-safe** — a double reconcile is a
+   no-op; a reconcile racing a live transition is safe. → `recovery.test.ts`
+   (8–9) + `concurrency.test.ts` (5).
+7. **Security review recorded** (credentials / untrusted content /
+   filesystem+Git safety / storage), `dsh_projects` stays at format version 0
+   (two additive event types only). → spec §9 (recorded in the spec); the diff
+   adds exactly two run event types (`task.interrupted`, `run.recovered`) — no
+   new table, no new record field, no migration.
+8. **The repo stays green:** `pnpm run typecheck` (exit 0), `pnpm run build`
+   (exit 0 — client 491.86 kB / host 460.59 kB), full `pnpm vitest run`
+   (635/3 of 638, the 3 modulo the documented pre-existing environment
+   failures, §4).
 
 ## 3. Test-stage fixes (made while verifying)
 
-- **`tests/rpc-handler.test.ts`** — filled the §10.4 gap: the Phase 9 build
-  covered the happy-path dispatch + shape validation but not the structured
-  failure surface. Added 5 cases: `triggerCreate` `invalidCandidate` +
-  `containsSecrets`; `triggerUpdate` `unknown` + `invalidCandidate`;
-  `triggerSetEnabled` `unknown`; `triggerDelete` `unknown`; `triggerFire`
-  `unknown`/`disabled`/`goalEmpty` — each round-tripping its `dashboardCode` +
-  `params` through `decodeDashboardError`. (67 → 72 cases.)
-- **`src/client/Dashboard.tsx` + `src/client/controller.ts`** — filled the §10.5 /
-  §11.5 **approval-policy** gap: the Phase 9 build shipped the Automations tab
-  without the spec-required **approval policy** (the `approvalMode` data existed
-  in the record but the UI never rendered or set it). Added the **approval-mode
-  select** to the Add trigger dialog (dispatched in `triggerCreate`) and the
-  **Approval policy** label to each trigger row (the mode label, or the "use
-  default" marker). Tightened the client `approvalMode` mirror type to
-  `ClientApprovalMode` (the wire validator now checks against
-  `CLIENT_APPROVAL_MODES`) so the dynamic `t(`mode.${…}`)` label typechecks.
-  **Deferred to Phase 11** (spec §12): the `next-run` column and the trigger
-  detail view — the working tab ships without them.
-- **`tests/dashboard-automations.test.tsx`** — filled the §10.5 gap for the new
-  approval-policy surface: added 2 cases — the row renders the approval policy
-  (mode label vs the "use default" marker) and the Add dialog dispatches
-  `triggerCreate` with a chosen approval mode. (10 → 12 cases.)
+No production-code gaps were found — the Phase 10 build shipped the full
+reconciliation surface and the spec's test plan was met as written. The fixes
+below were **test-side** (making the new suites pass under the strict compiler
+flags and the real transition semantics):
+
+- **`tests/concurrency.test.ts`** — the `run-phase` case initially passed a
+  stale `expectedVersion` (the `createRun` record's version 1) to all 8
+  callers, so all 8 were rejected. Fixed to read the **fresh** version from
+  `domain().table('runs').get(runId)` (createRun → planning → executing had
+  bumped it to 3). The `plan-activation` case initially asserted a
+  `plan.revisionConflict` after a `draft→active`, but that transition does not
+  bump the revision (only `superseded`/`completed` do); fixed to activate
+  first (revision stays 1) and then race two `superseded` transitions on
+  `expectedRevision: 1`. The `approval` case initially expected the 7 losers to
+  get `approval.staleVersion`, but `resolveApproval` checks the status
+  (`!== 'pending'` → `approval.invalidStatus`) **before** the version check;
+  fixed to assert `approval.invalidStatus` for the losers and added a separate
+  version-guard sub-check (a still-`pending` approval whose version moved →
+  `approval.staleVersion`).
+- **`tests/recovery.test.ts`** — the durable-surface seed used an invalid
+  `MemoryKind` (`'fact'` → `'finding'`) and a `RunPlanRecord` missing
+  `projectId`/`assumptions`/`successCriteria` (and carrying a non-existent
+  `updatedAt`); fixed to the exact record shapes.
+- **`tests/task-service.test.ts`** — three `reconcileStaleTask` re-queue cases
+  asserted the task ends `ready`, but the default `heldWorker()` re-dispatches
+  the re-queued task on the trailing `tick()` (to `running` attempt 2); fixed
+  those three to use `UnavailableWorker()` so the re-queue is observable. The
+  `isStaleTask` dead-session case had an **inverted probe** (`id => id !==
+  'dsh-task-live'` reported the dead session as alive); fixed to
+  `id => id === 'dsh-task-live'`.
 - **Type errors under `exactOptionalPropertyTypes` + `noUncheckedIndexedAccess`**
-  (all in Phase 9 code, fixed for the §11.7 typecheck gate): the dialog
-  `approvalMode` state is `ClientApprovalMode | ''` (matching the Phase 7 run
-  pattern) with the submit value cast to `ClientApprovalMode`; the wire validator
-  casts the `unknown` to `string` before `includes`; the test `trigger()` helper
-  spreads a conditional `approvalMode` (no `undefined` under
-  `exactOptionalPropertyTypes`).
+  (all in the new test files, fixed for the §12.8 typecheck gate): the
+  `concurrency.test.ts` fresh-version read narrowed with a `toBeDefined()`
+  assertion + a non-null assertion (the `TransitionRunOptions.expectedVersion`
+  is `number`, not `number | undefined`).
 
 ## 4. Known pre-existing failures (carried, documented)
 
@@ -109,10 +104,10 @@ extended suites), all green.
 295/3 of 298; Phase 5 336/3 of 339; Phase 6 425/3 of 428; Phase 7 489/3 of
 492; Phase 8 547/3 of 550; Phase 9 611/5 of 616 — the 3 tmpdir cases plus
 under-load flakes). The fix-vs-document decision is open in `maintain.md`.
-Unchanged by Phase 9 (all 57 new Phase 9 tests pass; `project-catalog` is
+Unchanged by Phase 10 (all 22 new Phase 10 tests pass; `project-catalog` is
 exactly 3/6 in isolation).
 
 `tests/integration-strategy.test.ts` — the git-worktree cases are flaky
 **under full-suite load** (temp-dir / worktree contention); they pass 7/7 in
-isolation. Not introduced by Phase 9 (the Phase 9 diff does not touch the merge
-strategy).
+isolation. Not introduced by Phase 10 (the Phase 10 diff does not touch the
+merge strategy).
