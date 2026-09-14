@@ -8,7 +8,7 @@ import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-permission-presets'
-import type {} from '@deepseek-ai/dsh-session'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-storage'
 import type {} from '@deepseek-ai/dsh-storage-domain'
 import type {} from '@deepseek-ai/dsh-tools'
@@ -131,6 +131,10 @@ export function apply(ctx: Context, config: PluginConfig): void {
     // Spec §6.3: fire-and-forget distillation after a run reaches succeeded.
     { onRunSucceeded: run => { void memoryService.distillRun(run) } },
     approvalService,
+    // Phase 10 (spec §4.3): session-existence probe for restart reconciliation —
+    // the real installed `ctx.agents.get(sessionId) !== undefined` (a live
+    // agent is returned for a live session, `undefined` for a gone one).
+    sessionId => ctx.agents.get(SessionId(sessionId)) !== undefined,
   )
   const coupler = new PlanRunCoupler(ctx, runService)
   const planService = new RunPlanService(ctx, runService, undefined, {
@@ -231,6 +235,12 @@ export function apply(ctx: Context, config: PluginConfig): void {
     planService.start()
     coordinator.start()
     taskService.start()
+    // Phase 10 (spec §4.1): reconcile the in-flight execution a process restart
+    // orphaned — before the runtime drives new work, so a re-queued task is not
+    // double-dispatched. A failure is logged, never fatal to boot.
+    await taskService.reconcileAfterRestart().catch((error: unknown) => {
+      ctx.logger.warn('dsh-projects: startup reconciliation failed: %s', error instanceof Error ? error.message : String(error))
+    })
     await runtime.start()
   })
 

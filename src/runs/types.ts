@@ -125,6 +125,12 @@ export type ProjectRunEventType =
   | 'run.report.failed'
   // Additive (Phase 9): a trigger created a run (spec §3.4).
   | 'trigger.fired'
+  // Additive (Phase 10): a stale `running` task was interrupted on restart
+  // (its session is gone) before being re-queued or failed (spec §3.1).
+  | 'task.interrupted'
+  // Additive (Phase 10): a non-terminal Run was re-driven on restart after its
+  // interrupted tasks were reconciled (spec §3.1).
+  | 'run.recovered'
 
 /** High-level Run event; detailed agent activity stays in Harness session logs. */
 export interface ProjectRunEventRecord {
