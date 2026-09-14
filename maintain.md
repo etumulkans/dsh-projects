@@ -1,5 +1,98 @@
 # Maintenance Log — DSH Projects
 
+## Cycle 6 (post v0.13.0 deploy) — 2026-09-14
+
+**Status: no incidents.** Phase 7 (Approvals + budgets) released as v0.13.0
+(release commit `00188da`, build `7c6db58`, test report `73dc5c7`, spec
+`321821d`, intent `d30a7da`). Shipped directly on local `main` with no fork
+PR (the user drove the loop gate-by-gate in-session; `main` is now 23
+commits ahead of `origin/main`). A release marker branch
+`dsh-projects-phase-7` (at `00188da`) is created for consistency with the
+Phase 3/4/5/6 markers.
+
+### Post-deploy verification
+
+- `pnpm run typecheck` — clean (exit 0)
+- `pnpm run build` — clean (dual tsdown: client 427.93 kB / host 407.55 kB)
+- `pnpm exec vitest run` — 489 passed / 3 failed (492 total); the 3 failures
+  are the pre-existing, documented macOS tmpdir environment failures in
+  `tests/project-catalog.test.ts` (`/var/folders` vs `/private/var/folders`
+  realpath mismatch), present since Phase 3 and unrelated to Phase 7. All 64
+  new Phase 7 tests are green (see `test-report.md`): approval-service (21),
+  budget-enforcement (15), client-approvals-isolation (1),
+  dashboard-approvals (9), task-service (31, +7 merge-gate cases),
+  plan-service (16, +2), rpc-handler (48, +8), run-storage-integration (6,
+  +1), run-state-machine (12, the two additive edges).
+- Working tree clean; `dsh_projects` storage domain remains at format version
+  0 (Phase 7 is additive — one `project_approvals` table, four run fields
+  `approvalMode`/`budget`/`budgetWarnings` + the merge-gate state, three run
+  event types `run.approval.requested`/`.resolved`/`.expired`, plus the
+  `run.budget.warning`/`.exceeded` events; no migration needed for installed
+  instances).
+- Invariant checks: the new client-isolation scan
+  (`tests/client-approvals-isolation.test.ts`) proves `src/client/**` never
+  imports the node-side approval/budget modules — the client carries its own
+  mirror types and talks to the services only through the typed
+  `DashboardDataPort`; the task-adapters import-isolation scan still passes;
+  the existing plan approve/reject buttons are unchanged (the Phase 7
+  Approvals section is additive, a separate section in the RunInspector).
+
+### Test-stage findings (fixed during verification, recorded in test-report §3)
+
+1. **`run-state-machine` transition table** — the hardcoded full-table test
+   predated the two additive Phase 7 edges; updated `awaiting_approval` to
+   include `integrating` (an approved merge resumes directly into the
+   integration step) and `executing` to include `awaiting_approval` (the
+   merge gate).
+2. **`approval-service.listApprovals` determinism** — the sort tiebroke
+   same-millisecond `requestedAt` on the random `id`, making "newest first"
+   non-deterministic for back-to-back requests (a full-suite flake). Now
+   reverses the insertion-ordered rows before the stable sort, so same-tick
+   records list in true creation order (latest created first) independent of
+   the id.
+3. **`exactOptionalPropertyTypes` + `noUncheckedIndexedAccess`** — three test
+   files needed tightening for the §10.6 typecheck gate: `approval-service`
+   (`pendingFor(…)?.id`, `onResolved[1]?.status`), `rpc-handler`
+   (`fakeRunService` gains the `setRunBudget` seam), `task-service` (capture
+   `overrides.budget` in a local const so the `update` closure keeps the
+   narrowed `RunBudget`).
+
+### Known issues (tracked, non-blocking)
+
+1. **`project-catalog.test.ts` × 3** — macOS sandbox realpath mismatch
+   (`/var/folders` vs `/private/var/folders`). Fails identically before and
+   after every Phase 7 commit; not a regression.
+2. **`integration-strategy.test.ts` flaky under full-suite load** — the
+   git-worktree cases intermittently fail when the whole suite runs
+   concurrently (temp-dir / worktree contention); they pass 7/7 in isolation
+   and in the clean full-suite run that produced the §1 numbers. Not
+   introduced by Phase 7 (the Phase 7 diff does not touch the merge
+   strategy).
+3. **Phase 7 work is local-only** — `main` is 23 commits ahead of
+   `origin/main`; no fork PR was opened this cycle. `dsh-projects-phase-7`
+   (at `00188da`) is the release marker.
+4. **Running GUI lags the repo** — the dashboard at http://127.0.0.1:3080
+   still serves a pre-Phase-7 build; the Phase 7 UI (the Approvals section,
+   the Budget panel, the New Run dialog's mode + budget fields) is only
+   visible after the plugin is reinstalled/restarted against this checkout's
+   v0.13.0 build output.
+
+### Follow-ups (next intent cycle)
+
+- Reinstall/restart the GUI plugin against the v0.13.0 build so the running
+  dashboard serves the Phase 7 UI (the Approvals section with Approve/Reject,
+  the Budget panel with usage + warning markers, the New Run dialog's
+  approval-mode select + nine budget fields).
+- Decide whether to fix the `project-catalog.test.ts` tmpdir expectations
+  (normalize `realpath` in the assertions) or keep them documented.
+- Optionally push `main` / open a fork PR for the Phase 5+6+7 work (23
+  commits ahead of `origin/main`) so it lands via review; the in-session gate
+  approval substituted for it this cycle.
+- Phase 8 scope: to be drafted as the next `intent.md` when this maintain
+  loop hands back to intent (Phase 7 spec §14 non-goals: no approval
+  notifications/webhooks, no `maxCost` enforcement site, no per-task budget
+  overrides, no approval audit trail export).
+
 ## Cycle 5 (post v0.12.0 deploy) — 2026-09-14
 
 **Status: no incidents.** Phase 6 (Project Memory) released as v0.12.0
