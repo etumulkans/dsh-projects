@@ -1,6 +1,6 @@
 # Intent — DSH Projects
 
-**Gate:** Intent · **Status:** Phases 0–8 delivered (v0.14.0 released; Phase 8 shipped on `main` @ `758e223`, pushed to `origin/main`) · **Spec:** `DSH_PROJECTS_SPEC.md` · **Architecture:** `docs/dsh-projects-architecture.md`
+**Gate:** Intent · **Status:** Phases 0–9 delivered (v0.15.0 released; Phase 9 shipped on `main` @ `9f81336`, pushed to `origin/main`) · **Spec:** `DSH_PROJECTS_SPEC.md` · **Architecture:** `docs/dsh-projects-architecture.md`
 
 ## 1. What we are doing
 
@@ -10,17 +10,26 @@ The work proceeds as **vertical slices**: each phase delivers a thin, working, t
 
 ## 2. Why
 
-The dashboard today observes and schedules *tasks* (task sources, local store, Git worktree model) and can own a *project goal* over time (Phases 1–8: runs, plans, task DAG, Git integration, memory, approvals + budgets, artifacts + final reports). What it cannot yet do is **start runs automatically** from the world around it: a tracker issue moving to a ready state, a wall-clock schedule, or an external event. Phase 9 makes the harness a *triggered* project runtime: a durable, per-project **Trigger** rule watches a source (tracker / schedule / webhook / repository / system), and when the source fires it creates a Project Run from a goal template — inspectable and manageable in the GUI, idempotent, and credential-safe.
+Phases 1–9 built a durable, inspectable, *triggered* project runtime: persistent runs, versioned plans, a coordinator, a task DAG executed by native Harness agents, per-task Git worktrees, project memory, approvals + budgets, artifacts + final reports, and seven trigger types that start runs automatically. What that runtime does **not** yet do is **survive a process restart cleanly**. Today the durable state (runs, plans, tasks, approvals, memory, artifacts, triggers) all persist — but the *in-flight* execution state does not reconcile with reality on boot:
+
+- A **Task** that claims `running` (with an `assignedAgentId` = a native Harness session id) and whose session is gone after a restart stays `running` **forever** — orphaned. Nothing re-queues it, nothing marks it interrupted, and its dependents stay `pending` behind it. The master spec is explicit (§54): *"stale running Agent states should be reconciled … Do not blindly restart everything. Implement reconciliation."*
+- A **Run** stuck in a non-terminal phase (`executing`/`integrating`/`validating`/`finalizing`) whose execution context is gone is never re-driven: no task is dispatched, no phase advances, the run is wedged until a human cancels it.
+- **Plan activation** is the one orchestration mutation that is *not* compare-and-set guarded (master spec §57 lists "Plan activation" among the states to protect); a concurrent activate can last-write-win.
+- There are **no recovery tests** (restart → reconcile) and **no concurrency stress tests**, and the security surface (credentials, secret projection, untrusted external content) has not been reviewed as a whole.
+
+Phase 10 makes the runtime **crash-safe and hardened**: on startup it **reconciles** the durable state with the live Harness world (stale runs, stale tasks, interrupted agents) using the existing single-authority state machines and compare-and-set guards, and it closes the remaining hardening gaps (plan-activation CAS, a security review, recovery + concurrency stress tests). No new capability is added — the existing lifecycle is made *durable across restarts* and *robust under concurrency*.
 
 ## 3. Invariants (non-negotiable for every phase)
 
-1. **No invented APIs.** Only native Harness/Cordis/Agent-Teams/subagent/storage primitives as installed in the profile are used. Experimental APIs (`ctx.agentTeams`, `ctx.subagents`) are touched only behind adapter isolation (Phase 4) and never imported speculatively.
+1. **No invented APIs.** Only native Harness/Cordis/Agent-Teams/subagent/storage primitives as installed in the profile are used. The session-existence probe used by reconciliation must be a real, installed API (discovered in the Design stage, never invented); if no such API exists, reconciliation degrades to a *policy-based* timeout (a `running` task older than a bound with no live result is interrupted), and that decision is recorded.
 2. **No placeholder APIs that are never implemented. No fake UI data.** Every RPC endpoint, service method, and UI control shipped must be backed by real behavior and real (or explicitly fixture-labeled local-mode) data.
 3. **No premature phases.** Each slice ships only its own capability; later-phase tables/fields appear only where the architecture doc explicitly says so (domain name, reserved record fields).
 4. **Preserve the existing Git worktree model** and all existing dashboard behavior; all changes are additive where the spec allows.
 5. **Extend the native Dashboard UI** (one frontend, existing extension slots). No new app, no second shell.
-6. **Orchestration state lives in code + persistent storage** (`dsh_projects` storage domain), never in ephemeral process state. State must survive a process restart.
+6. **Orchestration state lives in code + persistent storage** (`dsh_projects` storage domain), never in ephemeral process state. State must survive a process restart — this phase is the one that *enforces* that for in-flight execution, not just durable records.
 7. **The repo stays buildable and testable** at every commit: `pnpm run typecheck`, `pnpm run build`, `pnpm vitest run` green (modulo pre-existing environment failures documented at Phase 0).
+8. **Single authority for state transitions.** Reconciliation must drive state through the existing `ProjectRunService.transition` / `ProjectTaskService` guarded transitions — never by writing records directly. This keeps the invariants testable (master spec §58).
+9. **Reconciliation is idempotent and safe to re-run.** Booting twice (or a reconcile racing a live transition) must not double-interrupt, double-requeue, or corrupt a record that moved concurrently. Every reconcile write is compare-and-set guarded.
 
 ## 4. Phase roadmap
 
@@ -34,78 +43,89 @@ The dashboard today observes and schedules *tasks* (task sources, local store, G
 | 5 | Git isolation + integration — per-task worktrees, `dsh/run-<id>/<task>` branches, run completion pipeline | **done (v0.11.0)** |
 | 6 | Project Memory — `memory` store, retrieval, distillation, context budget, Memory UI | **done (v0.12.0)** |
 | 7 | Approvals + budgets — approval modes, `project_approvals` table, code-enforced run budgets | **done (v0.13.0)** |
-| 8 | Artifacts + final report — `project_artifacts`, run report generation, Artifacts UI | **done (v0.14.0)** |
-| 9 | Triggers — TaskSource events → `ProjectTrigger` adapters, schedule + webhook abstractions, Automations UI | **next** |
-| 10 | Recovery + hardening — startup reconciliation | planned |
+| 8 | Artifacts + final report — `project_artifacts` table, final-report generation, Artifacts UI | **done (v0.14.0)** |
+| 9 | Trigger generalization — `project_triggers` + `trigger_fires`, 7 trigger types, idempotent fire, Automations UI | **done (v0.15.0)** |
+| **10** | **Recovery + hardening — startup reconciliation for runs/tasks/agents, plan-activation CAS, recovery + concurrency stress tests, security review** | **this intent** |
 | 11 | UI polish — overview/agent/plan/memory/artifacts/automations pages | planned |
+| 12 | Optional Remote Worker Provider — `WorkerProvider` abstraction (+ optional K8s/OpenShift behind a flag) | planned (optional) |
 
-## 5. Phase 8 acceptance (delivered, verified)
+## 5. Scope — Phase 10 (Recovery + Hardening)
 
-Phase 8 (Artifacts + final report) is shipped and verified (test report `e454d7f`, release `758e223`, v0.14.0): the `project_artifacts` table (dsh_projects v0, additive, append-only), the 12 artifact kinds with the content policy (64 KB inline bound, `path`/`url` references, secret scrub), the deterministic final report (master spec §64, generated in code at the run's terminal transition, one per run, idempotent), the `artifact.created`/`run.report.failed` run events, the Artifacts tab + RunInspector section (zh/en), and the `artifactList`/`artifactCreate`/`artifactGet`/`runGenerateReport` RPC endpoints. Full suite 547/3 of 550 (the 3 pre-existing macOS catalog failures).
+Per master spec §73 (PHASE 10), §54 (crash/restart recovery), §57 (optimistic concurrency), §58 (single authority). This is a **hardening slice**: it adds no new user-facing capability and no new storage domain; it makes the existing lifecycle survive restarts and hold under concurrency.
 
-## 6. Phase 9 intent — Trigger generalization
+### 5.1 Startup reconciliation (the core of this phase)
 
-**End state:** the dashboard can define **triggers** — durable, per-project automation rules that create Project Runs from events. The existing tracker polling is generalized into a `tracker` trigger adapter (the six existing sources — Linear, GitHub, Jira, Asana, GitLab, Local — are *wrapped*, not rewritten); a `schedule` trigger (interval/cron with a computed next-run) and a `webhook` trigger (where feasible) are added; `manual` is the existing `runCreate` path. Triggers are inspectable and manageable in a new **Automations** UI section (trigger, status, last run, next run, goal template, approval policy; enable/disable), are **idempotent** (the same trigger + the same source event creates at most one run), and **never leak credentials into the browser**.
+On service startup (after the Run/Task/Plan/Approval services are open, before `runtime.start()`), run a **reconciliation pass** that walks the durable state and repairs in-flight execution that a restart orphaned. It is driven entirely through the existing single-authority transitions (invariant 8) and is compare-and-set guarded (invariant 9).
 
-### 6.1 The `project_triggers` table (additive, dsh_projects v0)
+- **Stale Task reconciliation (§54 example).** A task in `status: 'running'` carries an `assignedAgentId` (the native Harness session id, or member name). After a restart the in-memory `inFlight` map is empty, so a `running` task with no live worker is *stale*. Reconcile it:
+  - **Probe, then decide.** If a real installed API can answer "does session `<assignedAgentId>` still exist / is it still producing turns?", use it (invariant 1). If the session is dead, the task is **interrupted**. If the session is still alive, leave the task alone (do not blindly restart — §54).
+  - **Policy-based fallback.** If no session-existence API is installed, fall back to a deterministic policy: a `running` task whose `startedAt` is older than a recovery bound **and** has no live worker is interrupted. The bound and the probe-vs-policy decision are decided in the Design stage and recorded there.
+  - **Interrupted → recoverable.** An interrupted task is not simply dropped: it is moved to a **recoverable** state that the existing scheduler can re-dispatch (respecting `attempt`/`maxAttempts` and dependency readiness). The exact target state (a new `interrupted` status vs. re-queueing to `ready`/`blocked` with an `interrupted` event) is decided in the Design stage; either way the task must not stay wedged in `running` and its dependents must be unblocked.
+- **Stale Run reconciliation.** A run in a non-terminal phase (`executing`/`integrating`/`validating`/`finalizing`) whose execution context is gone is re-driven: after its tasks are reconciled, the run's phase is advanced (or its tasks re-dispatched) through `ProjectRunService.transition` so the run continues rather than wedging. Terminal runs (`succeeded`/`failed`/`canceled`) are never touched.
+- **Pending approvals remain pending (§54).** Approvals are already durable; reconciliation confirms they survive and, where the owning run was reconciled to a terminal phase, expires the now-irrelevant pending approvals through the existing `approvalService` (no new state).
+- **Triggers / memory / artifacts / plans / catalog remain (§54).** These are already durable and additive; reconciliation *asserts* they survive (a recovery test, not new code) — the phase's job is to prove the whole durable surface is restart-safe, not to re-implement it.
+- **Reconciliation is observable.** Each reconcile action emits a run event (e.g. `task.interrupted`, `run.recovered`) and a log line, so a restart is inspectable in the Run detail / event timeline (reusing the existing event surface, no new UI in this phase).
 
-- One new declared table `project_triggers` in the `dsh_projects` domain (the 8th table; the set grows by exactly one, no migration — storage-domain initializes absent declared tables as empty).
-- The `ProjectTriggerRecord`: `{ id, projectId, type, enabled, config, goalTemplate, approvalMode?, lastFiredAt?, lastRunId?, createdAt, updatedAt }` where `type: 'manual' | 'tracker' | 'schedule' | 'webhook' | 'repository-event' | 'pr-event' | 'system'` (matching the existing `ProjectRunSource`, plus `pr-event` split out per master spec §27).
-- `config: unknown` is the trigger-type-specific payload (tracker: source kind + filter states; schedule: interval/cron + timezone; webhook: endpoint + secret ref), validated per-type by the service (strict schema, no invented fields).
-- `goalTemplate: string` carries `{{placeholder}}` tokens (e.g. `{{issue.key}}`, `{{issue.title}}`, `{{pr.number}}`) filled from the firing event; `approvalMode?` is the per-trigger approval policy applied to the runs it creates (Phase 7 `ApprovalMode`).
-- `lastFiredAt` + `lastRunId` are the "Last run" the Automations UI shows; they are set by the fire path (the run's `source`/`sourceRef` already record the provenance — `source: 'tracker' | 'schedule' | …`, `sourceRef: <trigger id>`).
+### 5.2 Stale Run / Task / interrupted Agent handling
 
-### 6.2 The `ProjectTriggerService`
+The concrete repair rules from §5.1, expressed as testable service behavior:
 
-- **CRUD:** `create` (validate `type` + per-type `config` + non-empty `goalTemplate`; `manual` triggers are not persisted — they are the implicit `runCreate` path), `list` (per project, newest-first), `get` (by id), `update` (goal template, config, approval mode, enabled), `setEnabled` (enable/disable — the only state toggle the UI drives), `delete`.
-- **Fire:** `fire(triggerId, event)` — render the `goalTemplate` with the event, create a Project Run via the existing `ProjectRunService.createRun` (with the trigger's `approvalMode` + `source`/`sourceRef`), and record `lastFiredAt`/`lastRunId`. Fire is **idempotent**: a `(triggerId, sourceEventKey)` that already produced a run does not create a second one (the dedupe key is persisted, e.g. on the run's `sourceRef` or a small `trigger_fires` record).
-- **Adapters:** a `TriggerAdapter` seam — `{ type, poll?(ctx): Promise<TriggerEvent[]>, onEvent?(ctx, event): void }` — with one adapter per type:
-  - `tracker` — wraps the existing `TaskSource` registry: a tracker issue entering an active/ready state yields a `TriggerEvent` (keyed by the issue id + state transition); the existing polling cadence is preserved (no new poller).
-  - `schedule` — the schedule abstraction: an interval or cron expression, a computed `nextRunAt`, and a tick that fires when `now >= nextRunAt` (then advances `nextRunAt`); deterministic under a fake clock.
-  - `webhook` — where feasible: an HTTP-receivable event (the Cordis plugin's existing HTTP surface, not a new server) that maps a signed payload to a `TriggerEvent`; the endpoint + secret are config, never returned to the browser.
-  - `repository-event` / `pr-event` / `system` — the types are declared and the adapters are the *minimal* real path (repository/PR events surfaced by the existing Git integration where it already observes them; `system` for internal events); no external provider SDKs are added in this phase (master spec §27: "Do not build all external webhook providers before the internal abstraction is correct").
-- **No invented APIs:** the adapters use only the existing `TaskSource` seam, the existing Git-workspace observation, and the Cordis HTTP surface as installed.
+- **Stale Run handling** — a non-terminal run with no live execution is re-driven to progress (or, if its active plan has no recoverable work, transitioned to a terminal phase with a `run.recovered`/`run.failed` event). Never a blind restart of everything (§54).
+- **Stale Task handling** — an orphaned `running` task is interrupted and made recoverable (re-queued within its `maxAttempts`, or failed with an `error` when the budget is exhausted).
+- **Interrupted Agent handling** — the agent identity (`assignedAgentId`) of an interrupted task is cleared/retired so a re-dispatch gets a fresh session; a dead agent never blocks a re-run.
 
-### 6.3 Idempotency
+### 5.3 Concurrency hardening (master spec §57)
 
-- A trigger fire is idempotent: the same `(triggerId, sourceEventKey)` creates at most one run. The dedupe key is persisted (a `trigger_fires` record or the run's `sourceRef`), so a process restart or a duplicate event does not double-create a run.
-- The `schedule` adapter is idempotent across restarts: `nextRunAt` is derived from the persisted `config` + `lastFiredAt`, so a restart does not re-fire a schedule that already fired.
-- `manual` (the `runCreate` path) is unchanged and remains explicitly non-idempotent (each call is a new run) — idempotency applies to the *automated* adapters.
+- **Plan activation compare-and-set.** Close the one §57 gap: plan activation (the `RunPlanService` activate/replan mutation) is guarded by `version`/`expectedVersion` compare-and-set with a `plan.versionConflict` failure, matching the existing run/task/approval guards. Task assignment, task state, run phase, and approval resolution are already CAS-guarded (verified in the current code); this phase *verifies* them with stress tests and adds the missing plan-activation guard.
+- **No last-write-wins corruption** on the five §57-critical mutations (task assignment, task state, run phase, plan activation, approval resolution).
 
-### 6.4 The RPC surface (additive)
+### 5.4 Recovery tests (master spec §73)
 
-- `triggerList` (per project), `triggerCreate`, `triggerGet`, `triggerUpdate`, `triggerSetEnabled`, `triggerDelete`, `triggerFire` (an explicit fire for testing / the UI's "Run now").
-- The existing `runCreate` is unchanged (it is the `manual` trigger); a run created by an automated trigger carries `source: <trigger type>` + `sourceRef: <trigger id>` (already supported by `CreateRunInput`).
-- Absent-service structured failures + the new `trigger.*` error codes (with `params`), following the Phase 7/8 RPC error convention (`decodeDashboardError`).
+A dedicated recovery test surface (new `tests/recovery-*.test.ts`, jsdom-free node tests) that:
 
-### 6.5 The UI (Automations section, zh/en)
+- **Restart → reconcile:** seed durable state (a `running` task + a non-terminal run + a pending approval + triggers + memory + artifacts), "restart" the services (close + reopen the domain, as the real boot does), run reconciliation, and assert: the stale task is interrupted/recoverable, the run is re-driven (not wedged), the approval survives (or is expired if the run went terminal), and the durable surface (catalog/plans/memory/artifacts/triggers) is intact.
+- **Idempotent reconcile:** running the reconciliation pass twice (or racing it against a live transition) does not double-interrupt, double-requeue, or corrupt a concurrently-moved record.
+- **Do-not-blindly-restart:** a `running` task whose session is still alive (or, under the policy fallback, within the recovery bound) is left untouched.
+- **Terminal runs untouched:** reconciliation never moves a `succeeded`/`failed`/`canceled` run.
 
-- A new **Automations** section (a project-level tab or a RunInspector-adjacent section, per the existing extension slots) showing, per trigger: **Trigger** (type + label), **Status** (enabled/paused), **Last run** (`lastFiredAt` + the linked run), **Next run** (the schedule's `nextRunAt`), **Goal template**, **Approval policy**.
-- Enable/disable drives `triggerSetEnabled`; a "Run now" affordance drives `triggerFire`; the Add-trigger dialog dispatches `triggerCreate` (type select + per-type config + goal template + approval mode).
-- **No credentials in the browser:** the trigger `config` returned to the client is the credential-free projection (the webhook secret is a ref, never a value); the client carries mirror types in `controller.ts` (the §8 isolation invariant — no `src/client/**` imports `src/triggers/**`).
-- zh/en parity compile-enforced (`en satisfies Record<DashboardLocaleKey, string>`).
+### 5.5 Concurrency stress tests (master spec §73)
 
-### 6.6 Storage + events
+A dedicated concurrency test surface (new `tests/concurrency-*.test.ts`) that drives the five §57-critical mutations from many interleaved async callers and asserts:
 
-- `dsh_projects` stays at **format version 0** (additive — one `project_triggers` table, optionally one `trigger_fires` dedupe table; no migration).
-- New additive run event types where the fire path is observable: `trigger.fired` (a trigger created a run) — appended to the run's event stream (the existing `run_events` table).
+- Exactly-one-writer semantics hold: concurrent task-assignment / task-state / run-phase / plan-activation / approval-resolution calls either serialize cleanly or fail with the typed `*.versionConflict` error — never a lost update.
+- The new plan-activation CAS rejects a stale activate.
+- Reconciliation racing a live transition is safe (ties the recovery and concurrency surfaces together).
 
-### 6.7 Out of scope (later phases)
+### 5.6 Security review (master spec §73)
 
-- External webhook *provider* SDKs (GitHub/GitLab/Lark webhooks) — the `webhook` adapter is the internal abstraction only (master spec §27).
-- The full Automations *page* polish (Phase 11) — this phase ships the working section, not the finished page.
-- Recovery of in-flight trigger state across a crash beyond the idempotency guarantee (Phase 10).
+A documented security review (recorded in the spec/test-report, not new code unless a gap is found) covering the master spec's security model (§33–§37):
 
-### 6.8 Acceptance criteria (maps to master spec §27, §47, §62, §63)
+- **Credentials** — no secret/credential is ever projected to the browser; the trigger `config` projection (Phase 9) and the run/task views carry no credentials.
+- **Untrusted external content** — tracker/webhook payloads and agent output are treated as untrusted; no path where external content becomes an instruction or a filesystem write.
+- **Filesystem / external-write / Git safety** — the per-task worktree + one-writer-per-worktree invariant and the default Git safety rules hold under the new reconciliation (reconciliation never writes outside the project worktree, never force-pushes, never touches the base branch).
+- **Storage** — the `dsh_projects` domain stays at format version 0 (reconciliation is additive: it may add run *event types* and at most one recoverable task *status*, both additive; no migration).
 
-1. **Store** — `project_triggers` is a declared `dsh_projects` table (v0, no migration); records validate against the strict schema (7 types, per-type `config`, non-empty `goalTemplate`); the table set grows by exactly one (or two with the dedupe table).
-2. **Adapters** — the `tracker` adapter wraps the six existing `TaskSource`s (no rewrite) and yields a `TriggerEvent` on a ready-state transition; the `schedule` adapter computes `nextRunAt` and fires on the tick (deterministic under a fake clock); the `webhook` adapter maps a signed payload to a `TriggerEvent` (where the Cordis HTTP surface allows it); `manual` is the unchanged `runCreate` path.
-3. **Idempotency** — the same `(triggerId, sourceEventKey)` creates at most one run (verified across a duplicate event and a process restart); the `schedule` adapter does not re-fire after a restart.
-4. **Fire** — `fire` renders the `goalTemplate` with the event, creates a run via `ProjectRunService.createRun` (the trigger's `approvalMode` + `source`/`sourceRef`), and records `lastFiredAt`/`lastRunId`; the run is inspectable in the existing Runs UI.
-5. **UI** — the Automations section renders trigger/status/last-run/next-run/goal-template/approval-policy (zh/en); enable/disable + Run now dispatch the real RPCs; the Add-trigger dialog dispatches `triggerCreate`; no credential value is ever returned to the browser.
-6. **RPC** — `triggerList`/`triggerCreate`/`triggerGet`/`triggerUpdate`/`triggerSetEnabled`/`triggerDelete`/`triggerFire` dispatch with validation; absent-service structured failures; the new `trigger.*` error codes (with `params`).
-7. **Repo green** — `pnpm run typecheck`, `pnpm run build`, full `pnpm vitest run` (modulo the documented pre-existing environment failures).
+If the review finds a real gap, the fix is in scope for this phase; otherwise the review is a recorded pass.
+
+### 5.7 Explicit non-goals for this phase
+
+- **No new user-facing capability** — no new page, tab, or RPC surface beyond what reconciliation needs to be inspectable (run events). The Automations/overview/agent/plan/memory/artifacts page polish is Phase 11.
+- **No new storage domain** and **no schema migration** — `dsh_projects` stays at format version 0 (additive event types / at most one recoverable task status only).
+- **No Remote Worker Provider** — that is the optional Phase 12.
+- **No blind auto-restart of agents** — reconciliation repairs state; it does not silently re-launch dead agents beyond the recoverable re-queue the existing scheduler already performs.
+- **No re-implementation of durable persistence** — catalog/plans/memory/artifacts/triggers already persist; this phase *proves* it with recovery tests.
+
+## 6. Definition of done (acceptance for this phase)
+
+1. **Startup reconciliation exists and is wired** into the real boot path (after services open, before `runtime.start()`), driven through the single-authority transitions and CAS-guarded.
+2. **Stale tasks are recovered** — an orphaned `running` task is interrupted and made recoverable (re-queued within budget or failed); its dependents unblock; a still-alive task is left untouched (§54 "do not blindly restart").
+3. **Stale runs are re-driven** — a non-terminal run whose execution context is gone continues (or reaches a terminal phase with an event); terminal runs are never touched.
+4. **Pending approvals survive** (or are expired when the owning run goes terminal); the durable surface (catalog/plans/memory/artifacts/triggers) is proven restart-safe by tests.
+5. **Plan activation is CAS-guarded** (`plan.versionConflict`), closing the last §57 gap.
+6. **Recovery tests** (restart → reconcile, idempotent reconcile, do-not-blindly-restart, terminal-untouched) and **concurrency stress tests** (the five §57 mutations, exactly-one-writer, plan-activation stale-reject, reconcile-vs-live race) are green.
+7. **Security review** is recorded (credentials / untrusted content / filesystem+Git safety / storage), with any found gap fixed.
+8. **The repo stays green:** `pnpm run typecheck`, `pnpm run build`, `pnpm vitest run` pass (modulo the pre-existing, documented environment failures).
 
 ## 7. Next gate
 
-**Design (Phase 9 — Trigger generalization):** formalize `spec.md` — the `project_triggers` table schema + strict record spec (7 types, per-type `config`, the `goalTemplate` + `{{placeholder}}` contract, the `approvalMode`), the `ProjectTriggerService` (CRUD + `setEnabled` + `fire`, the idempotency/dedupe key, the per-type `config` validation), the `TriggerAdapter` seam + the four adapters (tracker over the existing `TaskSource` registry, schedule with the `nextRunAt` computation, webhook over the Cordis HTTP surface, the minimal repository/pr/system path), the additive RPC surface (triggerList/triggerCreate/triggerGet/triggerUpdate/triggerSetEnabled/triggerDelete/triggerFire + the `trigger.*` error codes), the `trigger.fired` run event, the UI (the Automations section, the Add-trigger dialog, the enable/disable + Run now affordances, the credential-free `config` projection, zh/en keys), and the full test plan, per §6.
+**Design (Phase 10 — Recovery + hardening):** formalize `spec.md` — the reconciliation pass (where it runs in the boot sequence, the probe-vs-policy decision for stale-task detection and the recovery bound, the exact interrupted→recoverable state model and its event types, the stale-run re-drive rules through `ProjectRunService.transition`, the approval-expiry-on-terminal-run rule), the plan-activation compare-and-set guard + `plan.versionConflict`, the recovery test surface (the restart→reconcile harness that closes + reopens the domain) and the concurrency stress harness, the security-review checklist + recorded findings, and the full test plan per §6.
