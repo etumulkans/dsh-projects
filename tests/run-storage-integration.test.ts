@@ -413,6 +413,11 @@ describe('ProjectRunService against real JSON storage', () => {
         expect(reportDetail).toMatchObject({ kind: 'final-report', title: 'Final report' })
         expect(reportDetail?.content).toContain('Goal')
         expect(reportDetail?.content).toContain('Remaining risks')
+        // The run's artifact.created events survive the reopen (spec §11.6):
+        // one for the run-scoped artifact + one for the final report.
+        const reopenedDetail = await second.runDetail(run.id)
+        const createdEvents = reopenedDetail.events.filter(event => event.type === 'artifact.created')
+        expect(createdEvents).toHaveLength(2)
       } finally {
         secondArtifacts.stop()
       }

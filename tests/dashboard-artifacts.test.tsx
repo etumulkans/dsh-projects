@@ -293,4 +293,52 @@ describe('Dashboard Run Inspector Artifacts section (spec §11)', () => {
     const section = artifactsSection(inspector)
     expect(section.textContent).toContain('此运行没有产物。')
   })
+
+  it('renders the final report with English section headers under the en locale', async () => {
+    const report = finalReportArtifact()
+    const onLoadRunDetail = vi.fn(async (runId: string) =>
+      runDetailWithArtifacts(runId, [artifact({ runId: SUCCEEDED_RUN.id }), report], report))
+    render(
+      <DashboardI18nProvider t={createDashboardTranslator('en')}>
+        <DashboardSurface
+          snapshot={fixtureSnapshot}
+          onRefresh={async () => {}}
+          onPause={async () => {}}
+          onStop={async () => {}}
+          onCreateTask={async () => {}}
+          onUpdateTask={async () => {}}
+          onDeleteTask={async () => {}}
+          onSwitchProject={async () => {}}
+          onAddDiscoveryRoot={async () => {}}
+          onRemoveDiscoveryRoot={async () => {}}
+          onScanProjects={async () => ({ root: fixtureSnapshot.catalog.discoveryRoots[0]!, candidates: [], truncated: false })}
+          onRegisterProjectCandidate={async () => {}}
+          onRegisterProject={async () => {}}
+          onOpenSession={() => {}}
+          onLoadRunDetail={onLoadRunDetail}
+          onGenerateReport={async () => ({})}
+        />
+      </DashboardI18nProvider>,
+    )
+
+    // Navigate to the run inspector (en labels).
+    fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
+    const table = screen.getByRole('table', { name: 'Project Run list' })
+    const run = (fixtureSnapshot.runs!.runs ?? []).find(candidate => candidate.id === SUCCEEDED_RUN.id)!
+    const row = within(table).getByRole('row', { name: new RegExp(run.goal) })
+    fireEvent.click(row)
+    const inspector = await screen.findByRole('complementary', { name: /Run details/i })
+    await waitFor(() => expect(onLoadRunDetail).toHaveBeenCalledWith(SUCCEEDED_RUN.id))
+
+    // The Artifacts section heading + the localized §64 headers (en).
+    const heading = within(inspector).getByRole('heading', { name: 'Artifacts' })
+    const section = heading.closest('section')
+    if (section === null) throw new Error('artifacts section not found')
+    expect(section.textContent).toContain('Goal')
+    expect(section.textContent).toContain('Outcome')
+    expect(section.textContent).toContain('Changes')
+    expect(section.textContent).toContain('Remaining risks')
+    expect(section.textContent).toContain('Implement the health-check endpoint.')
+    expect(within(section).getByRole('button', { name: 'Regenerate' })).toBeTruthy()
+  })
 })

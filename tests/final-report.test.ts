@@ -298,6 +298,34 @@ describe('buildFinalReport — the terminal trigger (spec §11.2)', () => {
     await f.service.generateFinalReport(run.id, 'on-demand')
     expect(finalReports(f, run.id)).toHaveLength(1)
   })
+
+  it('a generation failure is a warn + run.report.failed event + no artifact (never thrown)', async () => {
+    const f = await fixture()
+    const created = await f.runService.createRun({ goal: 'g' }, { mode: 'project', projectId: PROJECT_ID })
+    // Sabotage the persistence BEFORE the terminal transition so the
+    // fire-and-forget generation's try block fails and the catch path runs.
+    const artifactsTable = f.storage.tables.get('project_artifacts')!
+    const originalPut = artifactsTable.put.bind(artifactsTable)
+    artifactsTable.put = async () => { throw new Error('disk full') }
+    try {
+      let run = created
+      for (const phase of ['planning', 'executing', 'finalizing', 'succeeded'] as const) {
+        run = await f.runService.transitionRun(run.id, phase as never, { resultSummary: 'done' })
+      }
+      // The run reached its terminal phase regardless (fire-and-forget).
+      expect(run.phase).toBe('succeeded')
+      await flush()
+      // The warn log fired.
+      expect(f.ctx.logger.warn).toHaveBeenCalled()
+      // The run.report.failed event was appended.
+      const failedEvents = eventsFor(f, run.id).filter(event => event.type === 'run.report.failed')
+      expect(failedEvents).toHaveLength(1)
+      // No artifact was persisted.
+      expect(finalReports(f, run.id)).toHaveLength(0)
+    } finally {
+      artifactsTable.put = originalPut
+    }
+  })
 })
 
 class MemoryStorage {

@@ -1212,6 +1212,35 @@ describe('Dashboard RPC Artifacts (Phase 8, spec §11.4)', () => {
     expect(missingTitle).toMatchObject({ ok: false, error: { code: 'bad-request' } })
   })
 
+  it('artifactCreate surfaces the §5.3 service rejections as structured bad-requests', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const cases: Array<[string, unknown, DashboardDomainError]> = [
+      ['unknown-kind', { reason: 'unknown-kind' }, new DashboardDomainError('artifact.invalidCandidate', 'unknown kind', { reason: 'unknown-kind' })],
+      ['content-too-large', { maxLength: 65536 }, new DashboardDomainError('artifact.contentTooLarge', 'too large', { maxLength: 65536 })],
+      ['missing-url', { reason: 'missing-url' }, new DashboardDomainError('artifact.missingUrl', 'needs url', { reason: 'missing-url' })],
+      ['kind-reserved', { reason: 'kind-reserved' }, new DashboardDomainError('artifact.kindReserved', 'reserved', { reason: 'kind-reserved' })],
+      ['contains-secrets', { reason: 'contains-secrets' }, new DashboardDomainError('artifact.containsSecrets', 'secret', { reason: 'contains-secrets' })],
+    ]
+    for (const [label, params, error] of cases) {
+      const create = vi.fn(async () => { throw error })
+      const artifacts = fakeArtifactService({ create })
+      const result = await handleDashboardRpc(
+        runtime, 'artifactCreate', { projectId: 'p1', kind: 'plan', title: 'Plan' }, signal(), Promise.resolve(), ...NO_SERVICES, artifacts,
+      )
+      expect(result, label).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+      if (result.ok === false) {
+        expect(decodeDashboardError(result.error.message), label).toMatchObject({ dashboardCode: error.dashboardCode, params })
+      }
+    }
+  })
+
+  it('artifactCreate is unavailable without an Artifact service', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const result = await handleDashboardRpc(runtime, 'artifactCreate', { projectId: 'p1', kind: 'plan', title: 'Plan' }, signal(), Promise.resolve())
+    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('not mounted') } })
+  })
+
   it('artifactGet returns the record or a structured unknown error', async () => {
     const get = vi.fn(() => ({ id: ARTIFACT_ID, kind: 'plan', title: 'Plan' }))
     const artifacts = fakeArtifactService({ get })
@@ -1238,6 +1267,32 @@ describe('Dashboard RPC Artifacts (Phase 8, spec §11.4)', () => {
 
     const badRun = await handleDashboardRpc(runtime, 'runGenerateReport', { runId: 'nope' }, signal(), Promise.resolve(), ...NO_SERVICES, artifacts)
     expect(badRun).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
+
+  it('runGenerateReport surfaces the on-demand service failures (runUnknown / reportFailed)', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+
+    const unknownRun = vi.fn(async () => { throw new DashboardDomainError('artifact.runUnknown', 'unknown run', { runId: RUN_ID }) })
+    const unknown = await handleDashboardRpc(runtime, 'runGenerateReport', { runId: RUN_ID }, signal(), Promise.resolve(), ...NO_SERVICES, fakeArtifactService({ generateFinalReport: unknownRun }))
+    expect(unknown).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (unknown.ok === false) {
+      expect(decodeDashboardError(unknown.error.message)).toMatchObject({ dashboardCode: 'artifact.runUnknown', params: { runId: RUN_ID } })
+    }
+
+    const failed = vi.fn(async () => { throw new DashboardDomainError('artifact.reportFailed', 'not terminal', { runId: RUN_ID }) })
+    const reportFailed = await handleDashboardRpc(runtime, 'runGenerateReport', { runId: RUN_ID }, signal(), Promise.resolve(), ...NO_SERVICES, fakeArtifactService({ generateFinalReport: failed }))
+    expect(reportFailed).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    if (reportFailed.ok === false) {
+      expect(decodeDashboardError(reportFailed.error.message)).toMatchObject({ dashboardCode: 'artifact.reportFailed', params: { runId: RUN_ID } })
+    }
+  })
+
+  it('artifactGet / runGenerateReport are unavailable without an Artifact service', async () => {
+    const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
+    const get = await handleDashboardRpc(runtime, 'artifactGet', { id: ARTIFACT_ID }, signal(), Promise.resolve())
+    expect(get).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('not mounted') } })
+    const report = await handleDashboardRpc(runtime, 'runGenerateReport', { runId: RUN_ID }, signal(), Promise.resolve())
+    expect(report).toMatchObject({ ok: false, error: { code: 'bad-request', message: expect.stringContaining('not mounted') } })
   })
 
   it('runDetail attaches the run artifacts + final report when the Artifact service is mounted', async () => {
