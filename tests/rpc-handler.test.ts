@@ -1332,8 +1332,10 @@ describe('trigger endpoints (Phase 9, spec §10.4)', () => {
   function fakeTriggerService(overrides: Record<string, unknown> = {}) {
     return {
       list: vi.fn(() => []),
+      listProjected: vi.fn(() => []),
       create: vi.fn(async (input: Record<string, unknown>) => ({ id: TRIGGER_ID, ...input })),
       get: vi.fn(() => ({ id: TRIGGER_ID })),
+      getProjected: vi.fn(() => ({ id: TRIGGER_ID })),
       update: vi.fn(async (id: string, patch: Record<string, unknown>) => ({ id, ...patch })),
       setEnabled: vi.fn(async (id: string, enabled: boolean) => ({ id, enabled })),
       delete: vi.fn(async () => undefined),
@@ -1343,13 +1345,13 @@ describe('trigger endpoints (Phase 9, spec §10.4)', () => {
   }
 
   it('triggerList requires a non-empty projectId and returns the project triggers', async () => {
-    const list = vi.fn(() => [{ id: TRIGGER_ID }])
-    const triggers = fakeTriggerService({ list })
+    const listProjected = vi.fn(() => [{ id: TRIGGER_ID }])
+    const triggers = fakeTriggerService({ listProjected })
     const runtime = fakeRuntime({ mode: 'project', projectId: 'p1' })
 
     const ok = await handleDashboardRpc(runtime, 'triggerList', { projectId: 'p1' }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers)
     expect(ok).toMatchObject({ ok: true, value: { triggers: [{ id: TRIGGER_ID }] } })
-    expect(list).toHaveBeenCalledWith('p1')
+    expect(listProjected).toHaveBeenCalledWith('p1')
 
     const missing = await handleDashboardRpc(runtime, 'triggerList', {}, signal(), Promise.resolve(), undefined, ...NO_SERVICES, triggers)
     expect(missing).toMatchObject({ ok: false, error: { code: 'bad-request' } })
@@ -1396,7 +1398,7 @@ describe('trigger endpoints (Phase 9, spec §10.4)', () => {
     const notUuid = await handleDashboardRpc(runtime, 'triggerGet', { id: 'nope' }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, fakeTriggerService())
     expect(notUuid).toMatchObject({ ok: false, error: { code: 'bad-request' } })
 
-    const unknown = fakeTriggerService({ get: vi.fn(() => undefined) })
+    const unknown = fakeTriggerService({ getProjected: vi.fn(() => undefined) })
     const missing = await handleDashboardRpc(runtime, 'triggerGet', { id: TRIGGER_ID }, signal(), Promise.resolve(), undefined, ...NO_SERVICES, unknown)
     expect(missing).toMatchObject({ ok: false, error: { code: 'bad-request' } })
     if (missing.ok === false) {

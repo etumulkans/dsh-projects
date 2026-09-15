@@ -181,6 +181,10 @@ export interface TriggerView {
   readonly lastRunId?: string
   readonly createdAt: string
   readonly updatedAt: string
+  /** Phase 11: the next scheduled slot (absent for non-schedule triggers — the UI shows "—"). */
+  readonly nextRunAt?: string
+  /** Phase 11: the bounded, newest-first fire history (the trigger detail view's "Recent fires"). */
+  readonly recentFires?: readonly { readonly firedAt: string; readonly runId: string; readonly sourceEventKey: string }[]
 }
 
 /** Phase 9: client-side `triggerCreate` input. */
@@ -967,6 +971,16 @@ function isTriggerView(value: unknown): boolean {
     && (trigger.lastRunId === undefined || typeof trigger.lastRunId === 'string')
     && typeof trigger.createdAt === 'string'
     && typeof trigger.updatedAt === 'string'
+    && (trigger.nextRunAt === undefined || typeof trigger.nextRunAt === 'string')
+    && (trigger.recentFires === undefined || (Array.isArray(trigger.recentFires) && trigger.recentFires.every(isTriggerFireSummary)))
+}
+
+function isTriggerFireSummary(value: unknown): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const fire = value as Record<string, unknown>
+  return typeof fire.firedAt === 'string'
+    && typeof fire.runId === 'string'
+    && typeof fire.sourceEventKey === 'string'
 }
 
 function parseRunPlan(value: unknown): RunPlanRecord {

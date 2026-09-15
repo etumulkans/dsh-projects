@@ -413,7 +413,7 @@ export async function handleDashboardRpc(
         if (projectId === false || projectId === undefined) {
           return badRequest('triggerList requires a non-empty `projectId`')
         }
-        return success({ triggers: triggers.list(projectId) })
+        return success({ triggers: triggers.listProjected(projectId) })
       }
       case 'triggerCreate': {
         if (triggers === undefined) return badRequest('triggerCreate is unavailable: the Trigger service is not mounted')
@@ -425,7 +425,7 @@ export async function handleDashboardRpc(
         if (triggers === undefined) return badRequest('triggerGet is unavailable: the Trigger service is not mounted')
         const id = readUuidField(payload, 'id')
         if (id === undefined) return badRequest('triggerGet requires a uuid `id`')
-        const record = triggers.get(id)
+        const record = triggers.getProjected(id)
         if (record === undefined) throw new DashboardDomainError('trigger.unknown', `Unknown trigger ${id}`, { id })
         return success(record)
       }

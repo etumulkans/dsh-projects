@@ -84,6 +84,74 @@ function nextCronSlot(cron: string, anchor: number, now: number): number | undef
   return undefined
 }
 
+/**
+ * The pure **next-run** projection (Phase 11 spec §5.4). Returns the ISO
+ * timestamp of the *next* scheduled slot strictly after `now`, or `undefined`
+ * when the config has no schedule (non-schedule triggers show "—"). This is a
+ * read-only projection of `config` + the stable `createdAt` anchor + the clock
+ * (it is **not** stored). Deterministic under a fake clock.
+ *
+ * - `everyMs`: `anchor + (floor((now - anchor) / everyMs) + 1) * everyMs`.
+ * - `cron`: the next slot after `now` (the "star-slash-N" and "M" forms the
+ *   poller supports).
+ */
+export function computeNextRunAt(
+  config: Record<string, unknown>,
+  anchorIso: string,
+  nowIso: string,
+): string | undefined {
+  const anchor = Date.parse(anchorIso)
+  const now = Date.parse(nowIso)
+  if (!Number.isFinite(anchor) || !Number.isFinite(now)) return undefined
+  const everyMs = config.everyMs
+  if (typeof everyMs === 'number' && Number.isFinite(everyMs) && everyMs >= 1000) {
+    const nextIndex = Math.floor((now - anchor) / everyMs) + 1
+    return new Date(anchor + nextIndex * everyMs).toISOString()
+  }
+  const cron = config.cron
+  if (typeof cron === 'string' && cron.trim() !== '') {
+    const slot = nextCronSlotAfter(cron, anchor, now)
+    if (slot === undefined) return undefined
+    return new Date(slot).toISOString()
+  }
+  return undefined
+}
+
+/**
+ * The next cron slot **strictly after** `now` (the mirror of `nextCronSlot`,
+ * which returns the slot at-or-before `now`). Supports the same two forms the
+ * poller supports ("star-slash-N" and "M"); other forms return `undefined`.
+ */
+function nextCronSlotAfter(cron: string, anchor: number, now: number): number | undefined {
+  const fields = cron.trim().split(/\s+/)
+  if (fields.length !== 5) return undefined
+  const minuteField = fields[0]
+  if (minuteField === undefined) return undefined
+  // "star-slash-N" — every N minutes.
+  const everyMatch = minuteField.match(/^\*\/(\d+)$/)
+  if (everyMatch !== null) {
+    const step = Number(everyMatch[1])
+    if (Number.isFinite(step) && step >= 1) {
+      const slotMs = step * 60_000
+      const next = anchor + (Math.floor((now - anchor) / slotMs) + 1) * slotMs
+      return next > now ? next : undefined
+    }
+  }
+  // `M` — minute M of every hour.
+  const minuteMatch = minuteField.match(/^(\d+)$/)
+  if (minuteMatch !== null) {
+    const minute = Number(minuteMatch[1])
+    if (Number.isFinite(minute) && minute >= 0 && minute <= 59) {
+      const d = new Date(now)
+      const currentHour = new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), minute, 0, 0).getTime()
+      if (currentHour > now) return currentHour
+      const nextHour = new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours() + 1, minute, 0, 0).getTime()
+      return nextHour > now ? nextHour : undefined
+    }
+  }
+  return undefined
+}
+
 export const scheduleAdapter: TriggerAdapter = {
   type: 'schedule',
   async poll(trigger, ctx): Promise<readonly TriggerEvent[]> {

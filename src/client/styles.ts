@@ -570,6 +570,13 @@ export const DASHBOARD_STYLES = String.raw`
   .dshd-board-list-group { overflow-x: auto; }
   .dshd-attention-alerts { padding-left: 14px; padding-right: 14px; }
   .dshd-action-toast { top: 148px; right: 12px; }
+  /* Phase 11 — responsive: Overview metrics stack, DAG wraps, lists collapse. */
+  .dshd-overview-grid { grid-template-columns: 1fr; }
+  .dshd-health-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dshd-plan-dag { flex-direction: column; }
+  .dshd-dag-layer { flex-direction: row; flex-wrap: wrap; }
+  .dshd-token-grid { grid-template-columns: 1fr; }
+  .dshd-memory-list { overflow-x: auto; }
 }
 @container (max-width: 500px) {
   .dshd-source-filter { min-width: 38px; width: 38px; padding: 0; justify-content: center; }
@@ -810,6 +817,58 @@ export const DASHBOARD_STYLES = String.raw`
 .dshd-trigger-approval { color: #6b7a90; font-size: 11px; margin-left: 10px; }
 .dshd-memory-actions .dshd-danger { color: #c52b3a; border-color: #e5b6bc; }
 .dshd-memory-actions .dshd-danger:hover:not(:disabled) { background: #fff2f4; border-color: #d68f99; }
+/* Phase 11 — Overview surface. */
+.dshd-overview { display: flex; flex-direction: column; gap: 14px; padding: 4px 2px 16px; }
+.dshd-overview-head h2 { margin: 0 0 2px; font-size: 15px; }
+.dshd-overview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.dshd-overview-card { background: #f7f9fc; border: 1px solid #e3e9f2; border-radius: 10px; padding: 12px 14px; }
+.dshd-overview-card h3 { margin: 0 0 10px; font-size: 12px; font-weight: 640; color: #46536b; text-transform: uppercase; letter-spacing: 0.04em; }
+.dshd-health-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.dshd-health-grid div { background: #fff; border: 1px solid #e3e9f2; border-radius: 8px; padding: 8px 10px; }
+.dshd-health-grid dt { font-size: 10px; color: #6b7a90; text-transform: uppercase; letter-spacing: 0.04em; }
+.dshd-health-grid dd { margin: 2px 0 0; font-size: 18px; font-weight: 680; color: #1f2a3d; }
+.dshd-overview-runs, .dshd-overview-activity { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.dshd-overview-run { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; background: #fff; border: 1px solid #e3e9f2; border-radius: 8px; cursor: pointer; text-align: left; }
+.dshd-overview-run:hover { border-color: #b9c6da; background: #fbfcfe; }
+.dshd-overview-run-goal { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: #33415a; }
+.dshd-overview-run-phase { flex: 0 0 auto; font-size: 10px; font-weight: 620; color: #6b7a90; text-transform: uppercase; letter-spacing: 0.04em; }
+.dshd-overview-activity li { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.dshd-overview-activity-id { font-weight: 620; color: #33415a; }
+/* Phase 11 — Usage summary. */
+.dshd-usage { display: flex; flex-direction: column; gap: 8px; }
+.dshd-usage-total { display: flex; align-items: baseline; justify-content: space-between; font-size: 12px; color: #46536b; }
+.dshd-usage-total strong { font-size: 18px; color: #1f2a3d; }
+.dshd-usage-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.dshd-usage-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; }
+.dshd-usage-goal { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #33415a; }
+/* Phase 11 — Trigger detail view. */
+.dshd-trigger-detail { display: flex; flex-direction: column; gap: 12px; }
+.dshd-trigger-detail h3 { margin: 0; font-size: 14px; }
+.dshd-trigger-detail-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 12px; color: #46536b; }
+.dshd-trigger-detail-row strong { color: #1f2a3d; }
+.dshd-trigger-detail-section h4 { margin: 0 0 6px; font-size: 11px; font-weight: 640; color: #6b7a90; text-transform: uppercase; letter-spacing: 0.04em; }
+.dshd-kv { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.dshd-kv div { display: flex; gap: 8px; font-size: 12px; }
+.dshd-kv dt { flex: 0 0 auto; color: #6b7a90; min-width: 90px; }
+.dshd-kv dd { margin: 0; color: #33415a; word-break: break-word; }
+.dshd-fires-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.dshd-fires-list li { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.dshd-fires-list code { font-size: 11px; color: #6b7a90; }
+/* Phase 11 — Plan dependency DAG (CSS-only, no graph library). */
+.dshd-plan-dag { display: flex; flex-direction: row; gap: 14px; align-items: flex-start; flex-wrap: wrap; margin: 0 0 10px; padding: 0; list-style: none; }
+.dshd-plan-dag-linear { flex-direction: column; }
+.dshd-dag-layer { display: flex; flex-direction: column; gap: 8px; }
+.dshd-dag-node { background: #fff; border: 1px solid #e3e9f2; border-left: 3px solid #b9c6da; border-radius: 8px; padding: 8px 10px; min-width: 150px; max-width: 240px; }
+.dshd-dag-node strong { display: block; font-size: 12px; color: #1f2a3d; }
+.dshd-dag-deps { display: block; margin-top: 3px; font-size: 10px; color: #6b7a90; }
+.dshd-dag-node-pending { border-left-color: #b9c6da; }
+.dshd-dag-node-ready { border-left-color: #5867c6; }
+.dshd-dag-node-running { border-left-color: #35b88a; background: #f2fbf8; }
+.dshd-dag-node-blocked { border-left-color: #f04452; background: #fff5f5; }
+.dshd-dag-node-awaiting-review { border-left-color: #e99b2f; }
+.dshd-dag-node-succeeded { border-left-color: #35b88a; }
+.dshd-dag-node-failed { border-left-color: #f04452; background: #fff5f5; }
+.dshd-dag-node-canceled { border-left-color: #929eb1; }
 `
 
 /** Install once per browser plugin lifetime. */

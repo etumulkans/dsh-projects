@@ -28,8 +28,8 @@ import type {
 import { buildTaskTimelinePage } from '../runtime/timeline.ts'
 import type { CreateTaskInput, UpdateTaskInput } from '../task-source/index.ts'
 import type { CreateRunInput, ProjectRunEventView, ProjectRunPhase, ProjectRunView, RunBudget, RunDetailView } from '../runs/types.ts'
-import type { CreatePlanInput, PlannedTaskInput, RunPlanPattern, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
-import type { ProjectTaskView, TaskWorkerKindView } from '../tasks/types.ts'
+import type { CreatePlanInput, PlannedTask, PlannedTaskInput, RunPlanPattern, RunPlanRecord, RunPlanStatus } from '../plans/types.ts'
+import type { ProjectTaskStatus, ProjectTaskView, TaskWorkerKindView } from '../tasks/types.ts'
 import { CLIENT_MEMORY_KINDS, CLIENT_APPROVAL_MODES, CLIENT_ARTIFACT_KINDS, CLIENT_TRIGGER_TYPES } from './controller.ts'
 import type {
   ApprovalRequestView,
@@ -254,7 +254,7 @@ export interface DashboardSurfaceProps {
   readonly onOpenSession: (sessionId: string) => void
 }
 
-type Tab = 'board' | 'runtime' | 'runs' | 'projects' | 'memory' | 'artifacts' | 'automations' | 'configuration'
+type Tab = 'overview' | 'board' | 'runtime' | 'runs' | 'projects' | 'memory' | 'artifacts' | 'automations' | 'configuration'
 type RuntimePhaseFilter = Extract<IssueRuntimeView['phase'], 'running' | 'retrying' | 'blocked'>
 type RuntimeFilter = RuntimePhaseFilter | 'attention'
 type ActionToastState = { readonly tone: 'success' | 'error'; readonly message: string }
@@ -527,6 +527,7 @@ export function DashboardSurface({
             </div>
           </div>
           <nav className="dshd-tabs" aria-label={t('shell.viewsAria')}>
+            <TabButton active={tab === 'overview'} onClick={() => setTab('overview')}>{t('tab.overview')}</TabButton>
             <TabButton active={tab === 'board'} onClick={() => setTab('board')}>{t('tab.board')}</TabButton>
             <TabButton active={tab === 'runtime'} onClick={() => setTab('runtime')}>{t('tab.runtime')}</TabButton>
             <TabButton active={tab === 'runs'} onClick={() => setTab('runs')}>{t('tab.runs')}</TabButton>
@@ -556,6 +557,7 @@ export function DashboardSurface({
         {snapshot?.runtime.lastError !== undefined && runtimeFilter !== 'attention' ? <div className="dshd-warning" role="status">{snapshot.runtime.lastError}</div> : null}
 
         <div className="dshd-view">
+          {tab === 'overview' ? <OverviewView snapshot={snapshot} attention={attention} onOpenRun={runId => { setSelectedRunId(runId); setTab('runs') }} t={t} /> : null}
           {tab === 'board' && runtimeFilter === 'attention' && attention.alerts.length > 0 ? <AttentionAlerts alerts={attention.alerts} /> : null}
           {tab === 'board' ? (
             viewPreferences.layout === 'board' ? (
@@ -2643,19 +2645,23 @@ function RunInspector({ run, global, onClose, onPause, onResume, onCancel, cance
                         ) : null}
                         <div className="dshd-plan-tasks">
                           <span className="dshd-plan-subtitle">{t('plans.tasks')}</span>
-                          {plan.tasks.length === 0 ? <span className="dshd-plan-tasks-empty">{t('plans.noTasks')}</span> : null}
-                          {plan.tasks.map(task => (
-                            <div key={task.id} className="dshd-plan-task">
-                              <strong>{task.id} · {task.title}</strong>
-                              <p>{task.description}</p>
-                              {task.dependencies.length > 0 ? (
-                                <span className="dshd-plan-deps">{t('plans.dependsOn', { deps: task.dependencies.join(', ') })}</span>
-                              ) : null}
-                              {task.acceptanceCriteria.length > 0 ? (
-                                <ul className="dshd-plan-bullets">{task.acceptanceCriteria.map((criterion, index) => <li key={index}>{criterion}</li>)}</ul>
-                              ) : null}
-                            </div>
-                          ))}
+                          {plan.tasks.length === 0 ? <span className="dshd-plan-tasks-empty">{t('plans.noTasks')}</span> : (
+                            <>
+                              <PlanDag tasks={plan.tasks} projectTasks={detail?.tasks} t={t} />
+                              {plan.tasks.map(task => (
+                                <div key={task.id} className="dshd-plan-task">
+                                  <strong>{task.id} · {task.title}</strong>
+                                  <p>{task.description}</p>
+                                  {task.dependencies.length > 0 ? (
+                                    <span className="dshd-plan-deps">{t('plans.dependsOn', { deps: task.dependencies.join(', ') })}</span>
+                                  ) : null}
+                                  {task.acceptanceCriteria.length > 0 ? (
+                                    <ul className="dshd-plan-bullets">{task.acceptanceCriteria.map((criterion, index) => <li key={index}>{criterion}</li>)}</ul>
+                                  ) : null}
+                                </div>
+                              ))}
+                            </>
+                          )}
                         </div>
                         {onPlanTransition !== undefined && !isTerminalPlanStatus(plan.status) ? (
                           <div className="dshd-plan-actions">
@@ -4580,6 +4586,202 @@ function MemoryEditDialog({ entry, onClose, onSubmit }: {
  * trigger dialog. The config projection is credential-free (a secret is a ref,
  * never a value).
  */
+/** The Run phases that count as "active" for the Overview surface. */
+const ACTIVE_RUN_PHASES: ReadonlySet<ProjectRunPhase> = new Set([
+  'created', 'planning', 'awaiting_approval', 'executing', 'integrating', 'validating', 'finalizing', 'paused', 'blocked',
+])
+
+/** Format a token total for display (compact, e.g. "1.2k"). */
+function formatTokenCount(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`
+  return String(value)
+}
+
+/** Phase 11 — the per-Run + per-project usage summary. */
+export function UsageSummary({ runs, t }: { readonly runs: readonly ProjectRunView[]; readonly t: DashboardTranslate }) {
+  const perRun = runs
+    .filter(run => run.tokenUsage !== undefined)
+    .map(run => ({ id: run.id, goal: run.goal, total: run.tokenUsage!.total }))
+  const total = perRun.reduce((sum, row) => sum + row.total, 0)
+  if (total === 0 && perRun.length === 0) {
+    return <div className="dshd-usage"><p className="dshd-muted">{t('usage.none')}</p></div>
+  }
+  return (
+    <div className="dshd-usage">
+      <div className="dshd-usage-total"><span>{t('usage.tokens')}</span><strong>{formatTokenCount(total)}</strong></div>
+      {perRun.length > 0 ? (
+        <ul className="dshd-usage-list" aria-label={t('usage.perRun')}>
+          {perRun.map(row => (
+            <li key={row.id}><span className="dshd-usage-goal" title={row.goal}>{row.goal}</span><strong>{formatTokenCount(row.total)}</strong></li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  )
+}
+
+/** Phase 11 — the trigger detail view (config + next run + fire history). */
+export function TriggerDetailView({ trigger, t }: { readonly trigger: TriggerView; readonly t: DashboardTranslate }) {
+  const configEntries = Object.entries(trigger.config)
+  return (
+    <div className="dshd-trigger-detail">
+      <h3>{t('trigger.detail.title')}</h3>
+      <div className="dshd-trigger-detail-row">
+        <span>{t('trigger.detail.nextRun')}</span>
+        <strong>{trigger.nextRunAt ?? t('trigger.detail.notScheduled')}</strong>
+      </div>
+      <div className="dshd-trigger-detail-section">
+        <h4>{t('trigger.detail.config')}</h4>
+        {configEntries.length === 0 ? <p className="dshd-muted">—</p> : (
+          <dl className="dshd-kv">
+            {configEntries.map(([key, value]) => (
+              <div key={key}><dt>{key}</dt><dd>{typeof value === 'string' ? value : JSON.stringify(value)}</dd></div>
+            ))}
+          </dl>
+        )}
+      </div>
+      <div className="dshd-trigger-detail-section">
+        <h4>{t('trigger.detail.recentFires')}</h4>
+        {trigger.recentFires === undefined || trigger.recentFires.length === 0 ? <p className="dshd-muted">{t('trigger.detail.noFires')}</p> : (
+          <ul className="dshd-fires-list">
+            {trigger.recentFires.map(fire => (
+              <li key={fire.sourceEventKey}><span>{fire.firedAt}</span><code>{fire.runId}</code></li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** Phase 11 — the Project Overview surface (active runs, task health, recent activity, usage). */
+export function OverviewView({ snapshot, attention, onOpenRun, t }: {
+  readonly snapshot?: DashboardSnapshot | undefined
+  readonly attention: AttentionSummary
+  readonly onOpenRun: (runId: string) => void
+  readonly t: DashboardTranslate
+}) {
+  const runs = snapshot?.runs?.runs ?? []
+  const activeRuns = runs.filter(run => ACTIVE_RUN_PHASES.has(run.phase))
+  const health = snapshot?.runtime
+  const recentActivity = (snapshot?.runtime.issues ?? [])
+    .slice()
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, 5)
+  return (
+    <div className="dshd-overview">
+      <header className="dshd-overview-head">
+        <h2>{t('overview.title')}</h2>
+        <p className="dshd-muted">{t('overview.description')}</p>
+      </header>
+      {attention.alerts.length > 0 ? <AttentionAlerts alerts={attention.alerts} /> : null}
+      <div className="dshd-overview-grid">
+        <section className="dshd-overview-card" aria-label={t('overview.taskHealth')}>
+          <h3>{t('overview.taskHealth')}</h3>
+          <dl className="dshd-health-grid">
+            <div><dt>{t('overview.running')}</dt><dd>{health?.running ?? 0}</dd></div>
+            <div><dt>{t('overview.retrying')}</dt><dd>{health?.retrying ?? 0}</dd></div>
+            <div><dt>{t('overview.blocked')}</dt><dd>{health?.blocked ?? 0}</dd></div>
+            <div><dt>{t('overview.capacity')}</dt><dd>{health?.capacity ?? 0}</dd></div>
+          </dl>
+        </section>
+        <section className="dshd-overview-card" aria-label={t('overview.usage')}>
+          <h3>{t('overview.usage')}</h3>
+          <UsageSummary runs={runs} t={t} />
+        </section>
+      </div>
+      <section className="dshd-overview-card" aria-label={t('overview.activeRuns')}>
+        <h3>{t('overview.activeRuns')}</h3>
+        {activeRuns.length === 0 ? <p className="dshd-muted">{t('overview.activeRunsEmpty')}</p> : (
+          <ul className="dshd-overview-runs">
+            {activeRuns.map(run => (
+              <li key={run.id}>
+                <button type="button" className="dshd-overview-run" onClick={() => onOpenRun(run.id)}>
+                  <span className="dshd-overview-run-goal" title={run.goal}>{run.goal}</span>
+                  <span className="dshd-overview-run-phase">{run.phase}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      <section className="dshd-overview-card" aria-label={t('overview.recentActivity')}>
+        <h3>{t('overview.recentActivity')}</h3>
+        {recentActivity.length === 0 ? <p className="dshd-muted">{t('overview.recentActivityEmpty')}</p> : (
+          <ul className="dshd-overview-activity">
+            {recentActivity.map(issue => (
+              <li key={issue.key}>
+                <span className="dshd-overview-activity-id">{issue.identifier}</span>
+                <span className={`dshd-phase dshd-phase-${issue.phase}`}>{issue.phase}</span>
+                {issue.lastEvent !== undefined ? <span className="dshd-muted">{issue.lastEvent}</span> : null}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  )
+}
+
+/** Phase 11 — the Plan dependency DAG (spec §5.6). CSS-only, no graph library. */
+export function PlanDag({ tasks, projectTasks, t }: {
+  readonly tasks: readonly PlannedTask[]
+  readonly projectTasks?: readonly ProjectTaskView[] | undefined
+  readonly t: DashboardTranslate
+}) {
+  const statusById = new Map<string, ProjectTaskStatus>()
+  for (const task of projectTasks ?? []) statusById.set(task.planTaskId, task.status)
+
+  // Compute each task's dependency depth (topological layer; ties broken by id).
+  const byId = new Map(tasks.map(task => [task.id, task] as const))
+  const depthOf = (id: string, seen: ReadonlySet<string>): number => {
+    if (seen.has(id)) return 0 // cycle guard
+    const task = byId.get(id)
+    if (task === undefined || task.dependencies.length === 0) return 0
+    const nextSeen = new Set(seen)
+    nextSeen.add(id)
+    return Math.max(...task.dependencies.map(dep => depthOf(dep, nextSeen))) + 1
+  }
+  const layers = new Map<number, PlannedTask[]>()
+  for (const task of tasks) {
+    const depth = depthOf(task.id, new Set())
+    const column = layers.get(depth) ?? []
+    column.push(task)
+    layers.set(depth, column)
+  }
+  const maxDepth = [...layers.keys()].reduce((max, depth) => Math.max(max, depth), 0)
+
+  // A linear plan (no dependencies) degenerates to a vertical list — no visual regression.
+  if (maxDepth === 0) {
+    return (
+      <ol className="dshd-plan-dag dshd-plan-dag-linear" aria-label={t('plan.dag.title')}>
+        {tasks.map(task => (
+          <li key={task.id} className={`dshd-dag-node dshd-dag-node-${statusById.get(task.id) ?? 'pending'}`}>
+            <strong>{task.id} · {task.title}</strong>
+            {task.dependencies.length > 0 ? <span className="dshd-dag-deps">{t('plan.dag.dependsOn', { deps: task.dependencies.join(', ') })}</span> : null}
+          </li>
+        ))}
+      </ol>
+    )
+  }
+
+  return (
+    <div className="dshd-plan-dag" role="list" aria-label={t('plan.dag.title')}>
+      {Array.from({ length: maxDepth + 1 }, (_, depth) => (
+        <div className="dshd-dag-layer" role="listitem" key={depth} aria-label={t('plan.dag.layer', { depth: depth + 1 })}>
+          {(layers.get(depth) ?? []).map(task => (
+            <div key={task.id} className={`dshd-dag-node dshd-dag-node-${statusById.get(task.id) ?? 'pending'}`}>
+              <strong>{task.id} · {task.title}</strong>
+              {task.dependencies.length > 0 ? <span className="dshd-dag-deps">{t('plan.dag.dependsOn', { deps: task.dependencies.join(', ') })}</span> : null}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function AutomationsView({ projects, busy, onLoadTriggers, onCreateTrigger, onSetTriggerEnabled, onDeleteTrigger, onFireTrigger, onOpenRun }: {
   readonly projects: readonly ProjectView[]
   readonly busy: boolean
@@ -4599,6 +4801,7 @@ function AutomationsView({ projects, busy, onLoadTriggers, onCreateTrigger, onSe
   const [pendingKey, setPendingKey] = useState<string | undefined>()
   const [addOpen, setAddOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<TriggerView | undefined>()
+  const [detailTrigger, setDetailTrigger] = useState<TriggerView | undefined>()
   const [reloadKey, setReloadKey] = useState(0)
   const reload = (): void => setReloadKey(current => current + 1)
 
@@ -4708,6 +4911,12 @@ function AutomationsView({ projects, busy, onLoadTriggers, onCreateTrigger, onSe
                 <div className="dshd-memory-actions">
                   <button
                     type="button"
+                    onClick={() => setDetailTrigger(trigger)}
+                  >
+                    {t('trigger.detail')}
+                  </button>
+                  <button
+                    type="button"
                     disabled={onSetTriggerEnabled === undefined || pendingKey !== undefined}
                     aria-pressed={trigger.enabled}
                     onClick={() => { void mutate(`trigger:toggle:${trigger.id}`, async () => {
@@ -4779,6 +4988,17 @@ function AutomationsView({ projects, busy, onLoadTriggers, onCreateTrigger, onSe
                 {t('trigger.delete')}
               </button>
             </footer>
+          </div>
+        </div>
+      ) : null}
+      {detailTrigger !== undefined ? (
+        <div className="dshd-modal" role="dialog" aria-modal="true" aria-label={t('trigger.detail.title')} onKeyDown={(event) => { if (event.key === 'Escape') event.stopPropagation() }}>
+          <div className="dshd-modal-card">
+            <header>
+              <h3>{t('trigger.detail.title')}</h3>
+              <button type="button" aria-label={t('common.close')} onClick={() => setDetailTrigger(undefined)}><CloseIcon size={16} /></button>
+            </header>
+            <TriggerDetailView trigger={detailTrigger} t={t} />
           </div>
         </div>
       ) : null}

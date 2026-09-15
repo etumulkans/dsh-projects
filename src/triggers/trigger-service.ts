@@ -22,6 +22,7 @@ import { SECRET_PATTERNS } from '../memory/memory-service.ts'
 import { ScopedTaskSourceRegistry, type TaskSourceRegistry } from '../task-source/index.ts'
 import { renderGoalTemplate } from './goal-template.ts'
 import { MAX_GOAL_TEMPLATE_LENGTH } from './spec.ts'
+import { computeNextRunAt } from './adapters/schedule.ts'
 import {
   TRIGGER_TYPES,
   type ProjectTriggerRecord,
@@ -41,6 +42,25 @@ export interface TriggerLifecycleEvent {
   readonly type: TriggerType
   readonly enabled?: boolean
   readonly runId?: string
+}
+
+/** One fire-history row for the trigger detail view (Phase 11 spec §5.4). */
+export interface TriggerFireSummary {
+  readonly firedAt: string
+  readonly runId: string
+  readonly sourceEventKey: string
+}
+
+/**
+ * The trigger view with the Phase 11 additive read-only projections (spec
+ * §5.4): `nextRunAt` (the next scheduled slot, absent for non-schedule
+ * triggers) + `recentFires` (the bounded, newest-first fire history). Both are
+ * **computed** — not stored; the `dsh_projects` domain stays at format version
+ * 0. This is the shape the `triggerList` / `triggerGet` RPC output carries.
+ */
+export interface TriggerProjectedView extends ProjectTriggerRecord {
+  readonly nextRunAt?: string
+  readonly recentFires?: readonly TriggerFireSummary[]
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -78,6 +98,9 @@ const TRIGGER_TYPE_TO_RUN_SOURCE: Record<TriggerType, ProjectRunSource> = {
 
 /** The run goal bound (reused from the run service — a rendered goal must fit a run). */
 const MAX_GOAL_LENGTH = 4_000
+
+/** The Phase 11 `recentFires` projection bound (the trigger detail view's "Recent fires"). */
+const RECENT_FIRES_LIMIT = 10
 
 const TRACKER_SOURCE_KINDS = ['linear', 'github', 'jira', 'asana', 'gitlab', 'local'] as const
 
@@ -322,6 +345,53 @@ export class ProjectTriggerService {
   get(id: TriggerId): ProjectTriggerRecord | undefined {
     const tables = this.requireStarted()
     return tables.triggers.get(id)
+  }
+
+  /**
+   * Phase 11 spec §5.4 — list triggers (newest first) with the additive
+   * read-only projections (`nextRunAt` + `recentFires`). The `triggerList` RPC
+   * returns this shape.
+   */
+  listProjected(projectId: string): TriggerProjectedView[] {
+    return this.list(projectId).map(record => this.projectTrigger(record))
+  }
+
+  /**
+   * Phase 11 spec §5.4 — the full record for the detail view with the additive
+   * read-only projections (`nextRunAt` + `recentFires`). The `triggerGet` RPC
+   * returns this shape.
+   */
+  getProjected(id: TriggerId): TriggerProjectedView | undefined {
+    const record = this.get(id)
+    return record === undefined ? undefined : this.projectTrigger(record)
+  }
+
+  /**
+   * Compute the additive read-only projections for one trigger (Phase 11 spec
+   * §5.4). `nextRunAt` is present only for an **enabled** `schedule` trigger
+   * (the next slot after the clock); `recentFires` is the bounded (newest-first)
+   * fire history from the `trigger_fires` table. Both are computed, not stored.
+   */
+  private projectTrigger(record: ProjectTriggerRecord): TriggerProjectedView {
+    const tables = this.requireStarted()
+    const nextRunAt = record.enabled && record.type === 'schedule'
+      ? computeNextRunAt(record.config, record.createdAt, this.clock())
+      : undefined
+    // Bounded, newest-first fire history (the trigger detail view's "Recent
+    // fires"). The fires table is keyed by `${triggerId}:${sourceEventKey}`.
+    const fires: TriggerFireSummary[] = []
+    for (const [id, fire] of tables.fires.entries()) {
+      if (fire.triggerId === record.id) {
+        fires.push({ firedAt: fire.firedAt, runId: fire.runId, sourceEventKey: fire.sourceEventKey })
+      }
+    }
+    fires.sort((left, right) => right.firedAt.localeCompare(left.firedAt) || right.sourceEventKey.localeCompare(left.sourceEventKey))
+    const recentFires = fires.slice(0, RECENT_FIRES_LIMIT)
+    return {
+      ...record,
+      ...(nextRunAt === undefined ? {} : { nextRunAt }),
+      ...(recentFires.length === 0 ? {} : { recentFires }),
+    }
   }
 
   /** §5.2 — update the goal template / config / approval mode (not the enabled flag — use setEnabled). */

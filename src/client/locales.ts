@@ -754,6 +754,41 @@ export const zh = {
   'error.requestCancelled': 'The Dashboard request was cancelled.',
   'error.unsupportedScan': 'Dashboard Host returned unsupported project scan data.',
   'error.unsupportedState': 'Dashboard Host returned unsupported state data.',
+  // Phase 11 — Overview surface (new tab).
+  'tab.overview': 'Overview',
+  'overview.title': 'Overview',
+  'overview.description': 'Active Runs, task health, recent activity, and usage at a glance.',
+  'overview.activeRuns': 'Active Runs',
+  'overview.activeRunsEmpty': 'No active Runs.',
+  'overview.taskHealth': 'Task Health',
+  'overview.running': 'Running',
+  'overview.retrying': 'Retrying',
+  'overview.blocked': 'Blocked',
+  'overview.capacity': 'Capacity',
+  'overview.recentActivity': 'Recent Activity',
+  'overview.recentActivityEmpty': 'No recent activity.',
+  'overview.usage': 'Usage',
+  // Phase 11 — Usage summary.
+  'usage.title': 'Usage',
+  'usage.perRun': 'Per Run',
+  'usage.perProject': 'Per Project',
+  'usage.tokens': 'Tokens',
+  'usage.duration': 'Duration',
+  'usage.none': 'No usage recorded.',
+  // Phase 11 — Trigger detail view.
+  'trigger.detail': 'Detail',
+  'trigger.detail.title': 'Trigger detail',
+  'trigger.detail.config': 'Configuration',
+  'trigger.detail.nextRun': 'Next run',
+  'trigger.detail.recentFires': 'Recent fires',
+  'trigger.detail.noFires': 'No fires recorded.',
+  'trigger.detail.notScheduled': 'Not scheduled',
+  // Phase 11 — Plan / DAG visualization.
+  'plan.dag.title': 'Plan',
+  'plan.dag.empty': 'No plan for this Run.',
+  'plan.dag.task': 'Task {id}',
+  'plan.dag.dependsOn': 'Depends on {deps}',
+  'plan.dag.layer': 'Layer {depth}',
 } satisfies Record<string, string>
 
 /** The Dashboard's English dictionary (the sole locale; the UI renders English only). */
@@ -1506,6 +1541,41 @@ export const en = {
   'error.requestCancelled': 'The Dashboard request was cancelled.',
   'error.unsupportedScan': 'Dashboard Host returned unsupported project scan data.',
   'error.unsupportedState': 'Dashboard Host returned unsupported state data.',
+  // Phase 11 — Overview surface (new tab).
+  'tab.overview': 'Overview',
+  'overview.title': 'Overview',
+  'overview.description': 'Active Runs, task health, recent activity, and usage at a glance.',
+  'overview.activeRuns': 'Active Runs',
+  'overview.activeRunsEmpty': 'No active Runs.',
+  'overview.taskHealth': 'Task Health',
+  'overview.running': 'Running',
+  'overview.retrying': 'Retrying',
+  'overview.blocked': 'Blocked',
+  'overview.capacity': 'Capacity',
+  'overview.recentActivity': 'Recent Activity',
+  'overview.recentActivityEmpty': 'No recent activity.',
+  'overview.usage': 'Usage',
+  // Phase 11 — Usage summary.
+  'usage.title': 'Usage',
+  'usage.perRun': 'Per Run',
+  'usage.perProject': 'Per Project',
+  'usage.tokens': 'Tokens',
+  'usage.duration': 'Duration',
+  'usage.none': 'No usage recorded.',
+  // Phase 11 — Trigger detail view.
+  'trigger.detail': 'Detail',
+  'trigger.detail.title': 'Trigger detail',
+  'trigger.detail.config': 'Configuration',
+  'trigger.detail.nextRun': 'Next run',
+  'trigger.detail.recentFires': 'Recent fires',
+  'trigger.detail.noFires': 'No fires recorded.',
+  'trigger.detail.notScheduled': 'Not scheduled',
+  // Phase 11 — Plan / DAG visualization.
+  'plan.dag.title': 'Plan',
+  'plan.dag.empty': 'No plan for this Run.',
+  'plan.dag.task': 'Task {id}',
+  'plan.dag.dependsOn': 'Depends on {deps}',
+  'plan.dag.layer': 'Layer {depth}',
 } satisfies Record<string, string>
 
 /** Dashboard dictionary key union (the `en` dictionary is the source of truth). */
