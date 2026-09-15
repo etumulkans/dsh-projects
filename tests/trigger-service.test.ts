@@ -278,6 +278,125 @@ describe('trigger service — absent (spec §10.1)', () => {
   })
 })
 
+describe('trigger service — Phase 11 projection (spec §5.4)', () => {
+  it('listProjected computes nextRunAt for an enabled schedule trigger (everyMs)', async () => {
+    const f = await fixture()
+    await f.service.create({
+      projectId: f.projectId,
+      type: 'schedule',
+      config: { everyMs: 3_600_000 },
+      goalTemplate: 'Hourly',
+    })
+    const views = f.service.listProjected(f.projectId)
+    expect(views).toHaveLength(1)
+    // createdAt = now = 2026-09-10T00:00:00.000Z, everyMs = 1h → next slot is +1h.
+    expect(views[0]?.nextRunAt).toBe('2026-09-10T01:00:00.000Z')
+    // No fires yet → recentFires is absent (not an empty array).
+    expect(views[0]?.recentFires).toBeUndefined()
+  })
+
+  it('listProjected omits nextRunAt for a disabled schedule trigger', async () => {
+    const f = await fixture()
+    const record = await f.service.create({
+      projectId: f.projectId,
+      type: 'schedule',
+      config: { everyMs: 3_600_000 },
+      goalTemplate: 'Hourly',
+    })
+    await f.service.setEnabled(record.id, false)
+    const views = f.service.listProjected(f.projectId)
+    expect(views[0]?.nextRunAt).toBeUndefined()
+  })
+
+  it('listProjected omits nextRunAt for a non-schedule trigger', async () => {
+    const f = await fixture()
+    await f.service.create({
+      projectId: f.projectId,
+      type: 'webhook',
+      config: { path: '/hooks/test', secretRef: 'env:HOOK' },
+      goalTemplate: 'Hook',
+    })
+    const views = f.service.listProjected(f.projectId)
+    expect(views[0]?.nextRunAt).toBeUndefined()
+  })
+
+  it('listProjected computes nextRunAt for a cron schedule trigger', async () => {
+    const f = await fixture()
+    await f.service.create({
+      projectId: f.projectId,
+      type: 'schedule',
+      config: { cron: '*/5 * * * *' },
+      goalTemplate: 'Every 5 minutes',
+    })
+    const views = f.service.listProjected(f.projectId)
+    // createdAt = now = 2026-09-10T00:00:00.000Z, cron */5 → next slot is +5min.
+    expect(views[0]?.nextRunAt).toBe('2026-09-10T00:05:00.000Z')
+  })
+
+  it('getProjected returns the record with projections', async () => {
+    const f = await fixture()
+    const record = await f.service.create({
+      projectId: f.projectId,
+      type: 'schedule',
+      config: { everyMs: 3_600_000 },
+      goalTemplate: 'Hourly',
+    })
+    const view = f.service.getProjected(record.id)
+    expect(view).toBeDefined()
+    expect(view?.id).toBe(record.id)
+    expect(view?.nextRunAt).toBe('2026-09-10T01:00:00.000Z')
+  })
+
+  it('getProjected returns undefined for an unknown id', async () => {
+    const f = await fixture()
+    expect(f.service.getProjected('00000000-0000-4000-8000-000000000000')).toBeUndefined()
+  })
+
+  it('listProjected returns recentFires newest-first, bounded to 10', async () => {
+    const f = await fixture()
+    const record = await f.service.create({
+      projectId: f.projectId,
+      type: 'schedule',
+      config: { everyMs: 3_600_000 },
+      goalTemplate: 'Hourly',
+    })
+    const fires = f.storage.tables.get('trigger_fires')!
+    // 12 fires with increasing timestamps → only the newest 10 should appear.
+    for (let i = 0; i < 12; i += 1) {
+      const key = `slot-${i}`
+      const firedAt = new Date(Date.parse('2026-09-10T00:00:00.000Z') + i * 60_000).toISOString()
+      await fires.put(`${record.id}:${key}`, {
+        id: `${record.id}:${key}`,
+        triggerId: record.id,
+        sourceEventKey: key,
+        runId: `run-${i}`,
+        firedAt,
+      })
+    }
+    const views = f.service.listProjected(f.projectId)
+    const recent = views[0]?.recentFires
+    expect(recent).toBeDefined()
+    expect(recent).toHaveLength(10)
+    // Newest first: the most recent fire (slot-11) is at the head.
+    expect(recent![0]).toEqual({ firedAt: new Date(Date.parse('2026-09-10T00:00:00.000Z') + 11 * 60_000).toISOString(), runId: 'run-11', sourceEventKey: 'slot-11' })
+    // The oldest of the kept 10 (slot-2) is at the tail; slot-0/slot-1 are dropped.
+    expect(recent![9]).toEqual({ firedAt: new Date(Date.parse('2026-09-10T00:00:00.000Z') + 2 * 60_000).toISOString(), runId: 'run-2', sourceEventKey: 'slot-2' })
+  })
+
+  it('listProjected does not leak other triggers fires into recentFires', async () => {
+    const f = await fixture()
+    const a = await f.service.create({ projectId: f.projectId, type: 'schedule', config: { everyMs: 3_600_000 }, goalTemplate: 'A' })
+    const b = await f.service.create({ projectId: f.projectId, type: 'schedule', config: { everyMs: 3_600_000 }, goalTemplate: 'B' })
+    const fires = f.storage.tables.get('trigger_fires')!
+    await fires.put(`${a.id}:k`, { id: `${a.id}:k`, triggerId: a.id, sourceEventKey: 'k', runId: 'run-a', firedAt: '2026-09-10T00:30:00.000Z' })
+    const views = f.service.listProjected(f.projectId)
+    const viewForA = views.find(view => view.id === a.id)
+    const viewForB = views.find(view => view.id === b.id)
+    expect(viewForA?.recentFires).toHaveLength(1)
+    expect(viewForB?.recentFires).toBeUndefined()
+  })
+})
+
 describe('validateTrigger (pure, spec §5.4)', () => {
   it('returns the normalized fields for a valid input', () => {
     const fields = validateTrigger({

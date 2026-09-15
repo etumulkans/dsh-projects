@@ -1,14 +1,20 @@
-# Spec — Phase 11: UI Polish (English-only)
+# Spec — Phase 11: UI Polish (remaining surfaces, steps 2–5)
 
-**Gate:** Design · **Intent:** `intent.md` (Phase 11) · **Master spec:** `DSH_PROJECTS_SPEC.md` §73 (PHASE 11 — UI POLISH), §74 (Observability + UX acceptance) · **Architecture:** `docs/dsh-projects-architecture.md` §2.2 (browser side), §3.7 (UI extension slots)
+**Gate:** Design · **Intent:** `intent.md` (Phase 11, remaining surfaces) · **Master spec:** `DSH_PROJECTS_SPEC.md` §73 (PHASE 11 — UI POLISH), §74 (Observability + UX acceptance) · **Architecture:** `docs/dsh-projects-architecture.md` §2.2 (browser side), §3.7 (UI extension slots)
+
+> **Status:** the English-only localization slice (this spec's former §4, build
+> §10 step 1) is **done and merged** (PR #4, squash `015757c`, on `origin/main`).
+> This spec now formalizes the **remaining Phase 11 work** — build §10 steps 2–5:
+> the `nextRunAt` / `recentFires` projection, the new surfaces, the polished
+> surfaces, and the responsive pass.
 
 ## 1. Goal and success
 
-Finish the Dashboard as a **polished, English-only, responsive** product surface. Add the missing spec-required surfaces (Project Overview, Agent detail, usage summary, the Phase 9-deferred Automations next-run column + trigger detail view), polish the existing ones (Plan/DAG visualization, approval UX, understandable errors), and **remove all Chinese** so the UI renders English only. No new host-side capability, no new storage domain, no new table/field, no migration — `dsh_projects` stays at format version 0.
+Finish the Dashboard as a **polished, English-only, responsive** product surface. The English-only localization (the user directive *"remove all chinese from any of ui"*) is **already shipped** — the `zh` dictionary is an English mirror of `en` and the UI renders English under either locale id. This slice **adds the missing spec-required surfaces** (Project Overview, Agent detail, usage summary, the Phase 9-deferred Automations next-run column + trigger detail view), **polishes the existing ones** (Run detail, Plan/DAG visualization, approval UX, Memory, Artifacts, understandable errors), and **verifies responsive behavior**. No new host-side capability, no new storage domain, no new table/field, no migration, no new RPC endpoint — `dsh_projects` stays at format version 0 (the only host-side change is the additive `nextRunAt` / `recentFires` projection on the existing trigger output).
 
 Success (measured at the Test gate):
 
-- The `zh` dictionary is **removed**; the Dashboard renders **English only** (standalone fallback, dev harness, and Harness locale seat all English). A test asserts **no CJK characters** appear in the rendered Dashboard or the `en` dictionary, and that user-facing strings are routed through the translator.
+- The Dashboard remains **English only** (the `dashboard-english-only` guard still passes; new surfaces route every string through the translator, the `zh` mirror kept byte-identical).
 - A **Project Overview** surface shows active runs, task health, recent activity, and usage at a glance, backed by real snapshot data.
 - An **Agent detail** surface shows identity, session, worktree/branch, tokens, duration, and attempt history, with the "open session" action preserved.
 - **Usage summaries** (per-run + per-project token/duration rollups) are shown.
@@ -35,7 +41,20 @@ Success (measured at the Test gate):
 
 `dsh_projects` stays at **format version 0**. Phase 11 adds **no tables, no record fields, no migrations, no new run event types**. The only host-side change is **two additive read-only projection** fields on the trigger view (`nextRunAt` + `recentFires`, §5.4) — computed values, not stored ones.
 
-## 4. English-only localization (the user directive — done first)
+## 4. English-only localization (the user directive) — **DONE (PR #4)**
+
+> **Shipped.** This section is retained for the record. The English-only
+> localization (build §10 step 1) is **done and merged** (PR #4, squash
+> `015757c`). One correction to the original plan: the Harness locale seat
+> (`@deepseek-ai/dsh-client-locale`) has `LOCALE_IDS: readonly ["zh", "en"]` and
+> its `register(ns, dicts)` requires a dictionary for **both** locale ids — an
+> `{ en }`-only registration is a type error. So instead of deleting `zh`, the
+> `zh` dictionary was kept as an **English mirror** of `en` (byte-identical
+> values, 747 keys each, 0 CJK); `en` is the source of truth. The UI renders
+> English under *either* locale id. The `dashboard-english-only` guard (5
+> tests) locks in: no CJK in the `en` dictionary, the `zh` mirror byte-identical
+> to `en`, no CJK in a rendered `DashboardSurface`, no CJK in the standalone
+> translator output, and no CJK in the client source files.
 
 Remove all Chinese so the Dashboard renders **English only**. The `en` dictionary is already a complete mirror of the `zh` key set (both 757 keys, `meta.locale` `en-US`), so this is a **deletion + rewiring**, not a translation.
 
@@ -196,10 +215,10 @@ A systematic pass over **responsive behavior**:
 
 All changes are in `src/client/**` (the browser side) + two host-side projection fields:
 
-- `src/client/locales.ts` — delete `zh`; keep `en` (§4.1).
-- `src/client/i18n.tsx` — `DashboardLocale = 'en'`; fallback + translator English (§4.2).
-- `src/client/index.tsx` — locale seat registers `{ en }` only (§4.3).
-- `src/client/dev.tsx` — dev harness English (§4.4).
+- `src/client/locales.ts` — **done (PR #4):** `zh` kept as an English mirror of `en` (the locale seat requires both `LOCALE_IDS`); `en` is the source of truth. New-surface keys (`overview.*`, `agent.*`, `usage.*`, `trigger.detail.*`, `plan.dag.*`, `approval.*`) are added to `en` with the `zh` mirror kept byte-identical.
+- `src/client/i18n.tsx` — **done (PR #4):** `DashboardLocale = 'en'`; fallback + translator English.
+- `src/client/index.tsx` — **done (PR #4):** locale seat registers `{ zh, en }` (both English).
+- `src/client/dev.tsx` — **done (PR #4):** dev harness English.
 - `src/client/controller.ts` — `TriggerView` gains `nextRunAt?: string` + `recentFires?: readonly { readonly firedAt: string; readonly runId: string; readonly sourceEventKey: string }[]` (§5.4); the `loadTriggers` / `loadTrigger` path maps the host projection.
 - `src/triggers/trigger-service.ts` (host) — the `triggerList` / `triggerGet` output computes `nextRunAt` via the existing schedule slot logic + `recentFires` from the existing `trigger_fires` table (bounded, newest first) (§5.4). **The one host-side change.**
 - `src/client/Dashboard.tsx` — the new surfaces (Overview, Agent detail, usage summary, trigger detail, Plan/DAG, approval UX) + the polished surfaces (Run detail, Memory, Artifacts, errors) + the responsive pass. New components: `OverviewView`, `AgentDetailPanel`, `UsageSummary`, `TriggerDetailView`, `PlanDag`, `ApprovalSection` (refactored). Existing components are refined in place.
@@ -283,8 +302,8 @@ The `nextRunAt` + `recentFires` projections (§5.4) are covered by an extension 
 
 ## 10. Sequencing (build order)
 
-1. **English-only localization** (§4) — delete `zh`, rewire `i18n.tsx` / `index.tsx` / `dev.tsx`, update all UI test selectors to English, add the `dashboard-english-only` test. **Done first** (it touches every surface and every test).
-2. **The `nextRunAt` projection** (§5.4) — the host-side computed field + the client `TriggerView` field + the `trigger-service` test.
+1. **English-only localization** (§4) — **DONE (PR #4, squash `015757c`)**: `zh` kept as an English mirror of `en`, `i18n.tsx` / `index.tsx` / `dev.tsx` rewired to English, all UI test selectors updated to English, the `dashboard-english-only` guard added.
+2. **The `nextRunAt` + `recentFires` projection** (§5.4) — the host-side computed fields + the client `TriggerView` fields + the `trigger-service` test.
 3. **New surfaces** (§5.1–5.3, §5.4) — Overview, Agent detail, usage summary, trigger detail view + their tests.
 4. **Polished surfaces** (§5.5–5.10) — Run detail, Plan/DAG, approval UX, Memory, Artifacts, understandable errors + their tests.
 5. **Responsive pass** (§5.11) — the narrow-viewport assertions + the responsive styles.

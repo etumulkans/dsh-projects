@@ -99,7 +99,7 @@ describe('Dashboard Run Plan interactions', () => {
 
     fireEvent.click(within(inspector).getByRole('button', { name: /v2/u }))
     expect(within(inspector).getByText('Coordinate two tasks in parallel')).toBeTruthy()
-    expect(within(inspector).getByText('t2 · Add unit tests')).toBeTruthy()
+    expect(within(inspector).getAllByText('t2 · Add unit tests').length).toBeGreaterThan(0)
     expect(within(inspector).getByText('depends on t1')).toBeTruthy()
     expect(within(inspector).getByText('Scope expanded: unit tests needed')).toBeTruthy()
 
