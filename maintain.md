@@ -1,5 +1,49 @@
 # Maintenance Log — DSH Projects
 
+## Cycle 10 (post Phase 11 English-only merge) — 2026-09-15
+
+**Status: no incidents.** Phase 11 (UI polish), **English-only localization
+slice** (spec §10 step 1, the lead deliverable), merged to `origin/main` via
+**PR #4** (`dsh-projects-phase-11` → `main`, squash merge commit `015757c`).
+User directive: *"in step make sure all are english remove all chinese from
+any of ui."* The UI now renders **English only** under either locale id.
+
+### Post-deploy verification
+
+- `pnpm run typecheck` — clean (exit 0)
+- `pnpm run build` — clean (dual tsdown: client 492.50 kB / host 460.59 kB —
+  the client grew ~0.64 kB from the English `zh` mirror; the host is unchanged)
+- `pnpm exec vitest run` — 640 passed / 3 failed (643 total); the 3 failures
+  are the pre-existing, documented environment failures — 3 macOS tmpdir cases
+  in `tests/project-catalog.test.ts` (`/var/folders` vs `/private/var/folders`
+  realpath mismatch, present since Phase 3; exactly 3/6 in isolation) + the
+  `integration-strategy` / `task-service` git-worktree flakes under full-suite
+  load (they pass in isolation). All 5 new English-only guard tests are green
+  and all 15 Dashboard UI test files pass (see `test-report.md`).
+- Working tree clean; `dsh_projects` storage domain remains at format version
+  0 (Phase 11 adds **no** table, field, migration, or event — the English-only
+  slice is pure client-side localization; the later `nextRunAt` / `recentFires`
+  build step is a computed additive projection on the trigger output, also
+  non-migrating).
+- Invariant checks: the Harness locale seat requires a dictionary for **both**
+  `LOCALE_IDS` (`zh`, `en`), so the English-only guarantee is achieved by making
+  the `zh` dictionary an **English mirror** of `en` (byte-identical values);
+  `en` is the source of truth. No CJK text exists in any dictionary value, so
+  the UI renders English under *either* locale id even if a user selects the
+  `zh` preference. The `tests/dashboard-english-only.test.tsx` guard (5 tests)
+  locks this in: the `en` dictionary, the `zh` mirror, a rendered
+  `DashboardSurface`, the standalone translator output, and the client source
+  files all ship no CJK (`/\p{Script=Han}/u`).
+
+### Scope note
+
+This cycle shipped the English-only localization slice only. The remaining
+Phase 11 build steps (spec §10 steps 2–5: `nextRunAt` / `recentFires`
+projection, new surfaces, polished surfaces, responsive pass) follow in
+subsequent PRs in the same Phase 11.
+
+---
+
 ## Cycle 9 (post v0.16.0 deploy) — 2026-09-14
 
 **Status: no incidents.** Phase 10 (Recovery + hardening) released as
