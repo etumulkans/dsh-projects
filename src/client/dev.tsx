@@ -91,7 +91,7 @@ function DevApp() {
 const root = document.querySelector('#root')
 if (root === null) throw new Error('Missing #root for Dashboard fixture')
 createRoot(root).render(
-  <DashboardI18nProvider t={createDashboardTranslator('zh')}>
+  <DashboardI18nProvider t={createDashboardTranslator('en')}>
     <DevApp />
   </DashboardI18nProvider>,
 )

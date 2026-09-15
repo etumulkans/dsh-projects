@@ -62,24 +62,24 @@ describe('Dashboard P0 operator UX', () => {
   it('filters the board to tasks that need attention and explains the blocked reason', () => {
     renderDashboard({ snapshot: { ...fixtureSnapshot, runtime: { ...fixtureSnapshot.runtime, lastRefreshAt: new Date().toISOString() } } })
 
-    fireEvent.click(screen.getByRole('button', { name: '只显示需要关注的任务' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Show only issues that need attention' }))
 
     expect(screen.getByText('ENG-236')).toBeTruthy()
     expect(screen.getByText('ENG-241')).toBeTruthy()
     expect(screen.getByText('Blocked by ENG-212 (In Progress)')).toBeTruthy()
     expect(screen.queryByText('ENG-238')).toBeNull()
-    expect(screen.getByRole('button', { name: '清除需要关注筛选' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Clear needs-attention filter' }).getAttribute('aria-pressed')).toBe('true')
   })
 
   it('provides a persistent Display panel with real layout, density, group, and card settings', () => {
     const first = renderDashboard()
-    fireEvent.click(screen.getByRole('button', { name: '显示' }))
-    const display = screen.getByRole('dialog', { name: '视图设置' })
+    fireEvent.click(screen.getByRole('button', { name: 'Display' }))
+    const display = screen.getByRole('dialog', { name: 'View settings' })
 
-    expect(within(display).getByLabelText('卡片内 Agent 状态')).toBeTruthy()
-    fireEvent.click(within(display).getByRole('button', { name: '列表' }))
-    fireEvent.click(within(display).getByLabelText('任务来源'))
-    fireEvent.click(within(display).getByLabelText('显示空分组'))
+    expect(within(display).getByLabelText('Agent status on cards')).toBeTruthy()
+    fireEvent.click(within(display).getByRole('button', { name: 'List' }))
+    fireEvent.click(within(display).getByLabelText('Task source'))
+    fireEvent.click(within(display).getByLabelText('Show empty groups'))
 
     expect(document.querySelector('.dshd-board-list')).toBeTruthy()
     expect(document.querySelector('.dshd-board-list-origin')).toBeNull()
@@ -89,17 +89,17 @@ describe('Dashboard P0 operator UX', () => {
     renderDashboard()
 
     expect(document.querySelector('.dshd-board-list')).toBeTruthy()
-    expect(screen.getByRole('button', { name: '显示' }).hasAttribute('data-active')).toBe(true)
+    expect(screen.getByRole('button', { name: 'Display' }).hasAttribute('data-active')).toBe(true)
   })
 
   it('removes misleading menu affordances until real menus exist', () => {
     renderDashboard()
 
-    expect(screen.queryByRole('button', { name: 'Agent 容量' })).toBeNull()
-    expect(screen.getByRole('group', { name: 'Agent 容量' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Agent capacity' })).toBeNull()
+    expect(screen.getByRole('group', { name: 'Agent capacity' })).toBeTruthy()
     expect(document.querySelector('.dshd-card-more')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: '项目' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Projects' }))
     expect(document.querySelector('.dshd-project-more')).toBeNull()
   })
 
@@ -107,16 +107,16 @@ describe('Dashboard P0 operator UX', () => {
     let resolvePause: (() => void) | undefined
     const onPause = vi.fn(() => new Promise<void>((resolve) => { resolvePause = resolve }))
     renderDashboard({ onPause })
-    const pause = screen.getByRole('button', { name: '暂停' })
+    const pause = screen.getByRole('button', { name: 'Pause' })
 
     fireEvent.click(pause)
 
     expect(pause.getAttribute('aria-busy')).toBe('true')
     expect((pause as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.getByRole('button', { name: '筛选' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Filter' })).toBeTruthy()
     resolvePause?.()
 
-    expect((await screen.findByRole('status')).textContent).toContain('任务调度已暂停')
+    expect((await screen.findByRole('status')).textContent).toContain('Task scheduling paused')
     await waitFor(() => expect((pause as HTMLButtonElement).disabled).toBe(false))
   })
 
@@ -124,9 +124,9 @@ describe('Dashboard P0 operator UX', () => {
     let resolveRemoval: (() => void) | undefined
     const onRemoveDiscoveryRoot = vi.fn(() => new Promise<void>((resolve) => { resolveRemoval = resolve }))
     renderDashboard({ onRemoveDiscoveryRoot })
-    fireEvent.click(screen.getByRole('button', { name: '项目' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Projects' }))
     const root = fixtureSnapshot.catalog.discoveryRoots[0]!
-    const remove = screen.getByRole('button', { name: `移除 ${root.path}` })
+    const remove = screen.getByRole('button', { name: `Remove ${root.path}` })
 
     fireEvent.click(remove)
 
@@ -144,7 +144,7 @@ describe('Dashboard P0 operator UX', () => {
     const onSwitchProject = vi.fn(() => new Promise<void>((resolve) => { resolveSwitch = resolve }))
     renderDashboard({ snapshot: globalFixtureSnapshot, onSwitchProject })
     fireEvent.click(screen.getByText('LOCAL-18'))
-    const enterProject = screen.getByRole('button', { name: '进入项目' })
+    const enterProject = screen.getByRole('button', { name: 'Enter project' })
 
     fireEvent.click(enterProject)
 
@@ -154,13 +154,13 @@ describe('Dashboard P0 operator UX', () => {
     expect(onSwitchProject).toHaveBeenCalledOnce()
 
     resolveSwitch?.()
-    await waitFor(() => expect(screen.queryByRole('button', { name: '进入项目' })).toBeNull())
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Enter project' })).toBeNull())
   })
 
   it('announces an action failure without replacing the current snapshot', async () => {
     renderDashboard({ onRefresh: async () => { throw new Error('Provider temporarily unavailable') } })
 
-    fireEvent.click(screen.getByRole('button', { name: '刷新仪表盘' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh Dashboard' }))
 
     expect((await screen.findByRole('alert')).textContent).toContain('Provider temporarily unavailable')
     expect(screen.getByText('ENG-238')).toBeTruthy()

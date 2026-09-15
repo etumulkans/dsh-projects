@@ -1864,7 +1864,7 @@ function InspectorRow({ label, children }: { readonly label: string; readonly ch
  * Phase 8 (spec §9.1): split the deterministic final-report `content` (the
  * master spec §64 layout) into its sections. The generator writes the English
  * section headers; the UI re-renders each with the localized `report.*` key
- * (zh/en parity). Unknown text before the first known header is ignored.
+ * (English only). Unknown text before the first known header is ignored.
  */
 const FINAL_REPORT_SECTION_HEADERS = [
   'Goal', 'Outcome', 'Changes', 'Validation', 'Git', 'Agents', 'Usage',

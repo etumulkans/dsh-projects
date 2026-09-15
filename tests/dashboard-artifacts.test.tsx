@@ -105,11 +105,11 @@ function renderArtifactsDashboard(
 describe('Dashboard Project Artifacts tab (spec §10)', () => {
   it('renders the artifacts tab between memory and configuration in zh', () => {
     renderArtifactsDashboard()
-    const tab = screen.getByRole('button', { name: '项目产物' })
+    const tab = screen.getByRole('button', { name: 'Project Artifacts' })
     expect(tab).toBeTruthy()
     const tabs = Array.from(document.querySelectorAll('button')).map(button => button.textContent)
-    expect(tabs.indexOf('项目产物')).toBeGreaterThan(tabs.indexOf('项目记忆'))
-    expect(tabs.indexOf('项目产物')).toBeLessThan(tabs.indexOf('配置'))
+    expect(tabs.indexOf('Project Artifacts')).toBeGreaterThan(tabs.indexOf('Project Memory'))
+    expect(tabs.indexOf('Project Artifacts')).toBeLessThan(tabs.indexOf('Configuration'))
   })
 
   it('renders the artifacts tab label in English under the en locale', () => {
@@ -140,20 +140,20 @@ describe('Dashboard Project Artifacts tab (spec §10)', () => {
     const onLoadArtifacts = vi.fn(async () => [artifact()])
     renderArtifactsDashboard({ onLoadArtifacts })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目产物' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Artifacts' }))
     await waitFor(() => expect(onLoadArtifacts).toHaveBeenCalledTimes(1))
     expect(onLoadArtifacts).toHaveBeenCalledWith({ projectId: FIRST_PROJECT })
   })
 
   it('lists the project artifacts with kind, title, and an open-run action', async () => {
     renderArtifactsDashboard()
-    fireEvent.click(screen.getByRole('button', { name: '项目产物' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Artifacts' }))
 
-    const list = await screen.findByRole('table', { name: '产物列表' })
+    const list = await screen.findByRole('table', { name: 'Artifact list' })
     expect(list.textContent).toContain('The plan')
-    expect(list.textContent).toContain('计划')
+    expect(list.textContent).toContain('Plan')
     // The run-scoped artifact exposes the open-run action.
-    expect(within(list).getByRole('button', { name: '打开运行' })).toBeTruthy()
+    expect(within(list).getByRole('button', { name: 'Open run' })).toBeTruthy()
   })
 
   it('opens the add dialog and submits a new artifact', async () => {
@@ -161,16 +161,16 @@ describe('Dashboard Project Artifacts tab (spec §10)', () => {
       return artifact({ id: 'artifact-new', kind: input.kind, title: input.title, ...(input.content === undefined ? {} : { content: input.content }) })
     })
     renderArtifactsDashboard({ onCreateArtifact })
-    fireEvent.click(screen.getByRole('button', { name: '项目产物' }))
-    await screen.findByRole('table', { name: '产物列表' })
+    fireEvent.click(screen.getByRole('button', { name: 'Project Artifacts' }))
+    await screen.findByRole('table', { name: 'Artifact list' })
 
-    fireEvent.click(screen.getByRole('button', { name: '添加产物' }))
-    const dialog = await screen.findByRole('dialog', { name: '添加产物' })
+    fireEvent.click(screen.getByRole('button', { name: 'Add artifact' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add artifact' })
     // Type a title.
-    const title = within(dialog).getByRole('textbox', { name: /标题/u })
+    const title = within(dialog).getByRole('textbox', { name: /Title/u })
     fireEvent.change(title, { target: { value: 'A new note' } })
     // Submit.
-    fireEvent.click(within(dialog).getByRole('button', { name: '添加' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add' }))
     await waitFor(() => expect(onCreateArtifact).toHaveBeenCalledTimes(1))
     expect(onCreateArtifact).toHaveBeenCalledWith(expect.objectContaining({
       projectId: FIRST_PROJECT,
@@ -224,17 +224,17 @@ describe('Dashboard Run Inspector Artifacts section (spec §11)', () => {
   }
 
   async function openRunInspector(runId: string): Promise<HTMLElement> {
-    fireEvent.click(screen.getByRole('button', { name: '项目运行' }))
-    const table = screen.getByRole('table', { name: '项目运行列表' })
+    fireEvent.click(screen.getByRole('button', { name: 'Project Runs' }))
+    const table = screen.getByRole('table', { name: 'Project Run list' })
     const run = (fixtureSnapshot.runs!.runs ?? []).find(candidate => candidate.id === runId)!
     const row = within(table).getByRole('row', { name: new RegExp(run.goal) })
     fireEvent.click(row)
-    return screen.getByRole('complementary', { name: /运行详情/u })
+    return screen.getByRole('complementary', { name: /Run details/u })
   }
 
   /** The RunInspector's Artifacts section, located by its heading. */
   function artifactsSection(inspector: HTMLElement): HTMLElement {
-    const heading = within(inspector).getByRole('heading', { name: '产物' })
+    const heading = within(inspector).getByRole('heading', { name: 'Artifacts' })
     const section = heading.closest('section')
     if (section === null) throw new Error('artifacts section not found')
     return section
@@ -253,16 +253,16 @@ describe('Dashboard Run Inspector Artifacts section (spec §11)', () => {
     const section = artifactsSection(inspector)
     // The plan artifact shows its kind + title.
     expect(section.textContent).toContain('The plan')
-    expect(section.textContent).toContain('计划')
+    expect(section.textContent).toContain('Plan')
     // The final report renders the localized section headers.
-    expect(section.textContent).toContain('目标')
-    expect(section.textContent).toContain('结果')
-    expect(section.textContent).toContain('变更')
-    expect(section.textContent).toContain('剩余风险')
+    expect(section.textContent).toContain('Goal')
+    expect(section.textContent).toContain('Outcome')
+    expect(section.textContent).toContain('Changes')
+    expect(section.textContent).toContain('Remaining risks')
     // The report body is present.
     expect(section.textContent).toContain('Implement the health-check endpoint.')
     // The Regenerate action is available for the final report.
-    expect(within(section).getByRole('button', { name: '重新生成' })).toBeTruthy()
+    expect(within(section).getByRole('button', { name: 'Regenerate' })).toBeTruthy()
   })
 
   it('surfaces the report-unavailable marker with Regenerate for a terminal run without a report', async () => {
@@ -276,8 +276,8 @@ describe('Dashboard Run Inspector Artifacts section (spec §11)', () => {
     await waitFor(() => expect(onLoadRunDetail).toHaveBeenCalledWith(SUCCEEDED_RUN.id))
 
     const section = artifactsSection(inspector)
-    expect(section.textContent).toContain('报告不可用')
-    const regenerate = within(section).getByRole('button', { name: '重新生成' })
+    expect(section.textContent).toContain('Report unavailable')
+    const regenerate = within(section).getByRole('button', { name: 'Regenerate' })
     fireEvent.click(regenerate)
     await waitFor(() => expect(onGenerateReport).toHaveBeenCalledTimes(1))
     expect(onGenerateReport).toHaveBeenCalledWith(SUCCEEDED_RUN.id)
@@ -291,7 +291,7 @@ describe('Dashboard Run Inspector Artifacts section (spec §11)', () => {
     await waitFor(() => expect(onLoadRunDetail).toHaveBeenCalledWith(EXECUTING_RUN.id))
 
     const section = artifactsSection(inspector)
-    expect(section.textContent).toContain('此运行没有产物。')
+    expect(section.textContent).toContain('No artifacts for this run.')
   })
 
   it('renders the final report with English section headers under the en locale', async () => {

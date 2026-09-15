@@ -8,7 +8,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { DashboardFooterAction, DashboardOverlay } from './Dashboard.tsx'
 import { DashboardDataController, DashboardUiController } from './controller.ts'
-import { en, DASHBOARD_LOCALE_NS, zh } from './locales.ts'
+import { en, zh, DASHBOARD_LOCALE_NS } from './locales.ts'
 import { installDashboardStyles } from './styles.ts'
 
 export { DashboardSurface } from './Dashboard.tsx'

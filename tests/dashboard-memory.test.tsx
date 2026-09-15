@@ -27,9 +27,9 @@ function entry(overrides: Partial<MemoryEntryView> = {}): MemoryEntryView {
     id: 'mem-1',
     projectId: FIRST_PROJECT,
     kind: 'architecture',
-    title: '客户端与运行时隔离',
-    body: 'client 目录不得导入 src/memory 或 src/tasks 的服务实现。',
-    tags: ['隔离', 'client'],
+    title: 'Client and runtime isolation',
+    body: 'The client directory must not import service implementations from src/memory or src/tasks.',
+    tags: ['isolation', 'client'],
     status: 'active',
     createdAt: '2026-08-14T02:00:00.000Z',
     updatedAt: '2026-08-14T02:00:00.000Z',
@@ -87,11 +87,11 @@ function renderMemoryDashboard(overrides: Partial<ComponentProps<typeof Dashboar
 describe('Dashboard Project Memory tab (spec §10)', () => {
   it('renders the memory tab between projects and configuration in zh and en', () => {
     renderMemoryDashboard()
-    const tab = screen.getByRole('button', { name: '项目记忆' })
+    const tab = screen.getByRole('button', { name: 'Project Memory' })
     expect(tab).toBeTruthy()
     const tabs = Array.from(document.querySelectorAll('button')).map(button => button.textContent)
-    expect(tabs.indexOf('项目记忆')).toBeGreaterThan(tabs.indexOf('项目'))
-    expect(tabs.indexOf('项目记忆')).toBeLessThan(tabs.indexOf('配置'))
+    expect(tabs.indexOf('Project Memory')).toBeGreaterThan(tabs.indexOf('Projects'))
+    expect(tabs.indexOf('Project Memory')).toBeLessThan(tabs.indexOf('Configuration'))
   })
 
   it('renders the memory tab label in English under the en locale', () => {
@@ -125,10 +125,10 @@ describe('Dashboard Project Memory tab (spec §10)', () => {
     })
     renderMemoryDashboard({ onLoadMemory })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目记忆' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Memory' }))
     await waitFor(() => expect(onLoadMemory).toHaveBeenCalledTimes(1))
     expect(onLoadMemory).toHaveBeenCalledWith({ projectId: FIRST_PROJECT })
-    expect(await screen.findByText('该项目还没有项目记忆。')).toBeTruthy()
+    expect(await screen.findByText('This project has no project memory yet.')).toBeTruthy()
   })
 
   it('shows the no-projects state without dispatching when the catalog is empty', async () => {
@@ -142,8 +142,8 @@ describe('Dashboard Project Memory tab (spec §10)', () => {
     })
     renderMemoryDashboard({ snapshot, onLoadMemory })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目记忆' }))
-    expect(await screen.findByText('没有已注册项目。请先在「项目」标签页注册项目。')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Project Memory' }))
+    expect(await screen.findByText('No registered projects. Register a project in the Projects tab first.')).toBeTruthy()
     expect(onLoadMemory).not.toHaveBeenCalled()
   })
 
@@ -155,8 +155,8 @@ describe('Dashboard Project Memory tab (spec §10)', () => {
     })
     renderMemoryDashboard({ onLoadMemory })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目记忆' }))
-    expect((await screen.findByRole('alert')).textContent).toContain('项目记忆服务不可用。')
+    fireEvent.click(screen.getByRole('button', { name: 'Project Memory' }))
+    expect((await screen.findByRole('alert')).textContent).toContain('The Project Memory service is unavailable.')
   })
 
   it('renders entries with kind, tags, status, pin, supersession and the source-run link', async () => {
@@ -178,17 +178,17 @@ describe('Dashboard Project Memory tab (spec §10)', () => {
     })
     renderMemoryDashboard({ onLoadMemory })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目记忆' }))
-    const table = await screen.findByRole('table', { name: '项目记忆列表' })
-    expect(table.textContent).toContain('架构')
-    expect(table.textContent).toContain('客户端与运行时隔离')
-    expect(table.textContent).toContain('隔离')
-    expect(table.textContent).toContain('生效')
-    expect(table.textContent).toContain('取代 mem-0')
-    expect(screen.getByRole('button', { name: '架构 · 1' }).getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(screen.getByRole('button', { name: 'Project Memory' }))
+    const table = await screen.findByRole('table', { name: 'Project memory list' })
+    expect(table.textContent).toContain('Architecture')
+    expect(table.textContent).toContain('Client and runtime isolation')
+    expect(table.textContent).toContain('isolation')
+    expect(table.textContent).toContain('Active')
+    expect(table.textContent).toContain('Supersedes mem-0')
+    expect(screen.getByRole('button', { name: 'Architecture · 1' }).getAttribute('aria-pressed')).toBe('false')
 
-    fireEvent.click(screen.getByRole('button', { name: '来源运行' }))
-    await waitFor(() => expect(screen.getAllByText('为本地任务源实现健康检查端点并补齐单元测试').length).toBeGreaterThan(0))
+    fireEvent.click(screen.getByRole('button', { name: 'Source run' }))
+    await waitFor(() => expect(screen.getAllByText('Implement health check endpoint for the local task source and add unit tests').length).toBeGreaterThan(0))
   })
 
   it('pins an entry through memoryUpdate with the expected version', async () => {
@@ -199,9 +199,9 @@ describe('Dashboard Project Memory tab (spec §10)', () => {
     })
     renderMemoryDashboard({ onLoadMemory, onUpdateMemory })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目记忆' }))
-    await screen.findByRole('table', { name: '项目记忆列表' })
-    fireEvent.click(screen.getByRole('button', { name: '置顶' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Memory' }))
+    await screen.findByRole('table', { name: 'Project memory list' })
+    fireEvent.click(screen.getByRole('button', { name: 'Pin' }))
     await waitFor(() => expect(onUpdateMemory).toHaveBeenCalledWith({ id: 'mem-1', expectedVersion: 1, pinned: true }))
   })
 
@@ -213,9 +213,9 @@ describe('Dashboard Project Memory tab (spec §10)', () => {
     })
     renderMemoryDashboard({ onLoadMemory, onSetMemoryStatus })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目记忆' }))
-    await screen.findByRole('table', { name: '项目记忆列表' })
-    fireEvent.click(screen.getByRole('button', { name: '归档' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Memory' }))
+    await screen.findByRole('table', { name: 'Project memory list' })
+    fireEvent.click(screen.getByRole('button', { name: 'Archive' }))
     await waitFor(() => expect(onSetMemoryStatus).toHaveBeenCalledWith({ id: 'mem-1', expectedVersion: 1, status: 'archived' }))
   })
 
@@ -226,21 +226,21 @@ describe('Dashboard Project Memory tab (spec §10)', () => {
       return {
         entries: [
           entry(),
-          entry({ id: 'mem-2', status: 'superseded', title: '旧约定' }),
+          entry({ id: 'mem-2', status: 'superseded', title: 'Old convention' }),
         ],
         counts: { ...emptyPayload().counts, architecture: 2 },
       }
     })
     renderMemoryDashboard({ onLoadMemory, onSetMemoryStatus })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目记忆' }))
-    await screen.findByRole('table', { name: '项目记忆列表' })
-    fireEvent.click(screen.getByRole('button', { name: '标记为已失效' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Memory' }))
+    await screen.findByRole('table', { name: 'Project memory list' })
+    fireEvent.click(screen.getByRole('button', { name: 'Mark obsolete' }))
     await waitFor(() => expect(onSetMemoryStatus).toHaveBeenCalledWith({ id: 'mem-1', expectedVersion: 1, status: 'superseded' }))
 
-    const supersededRow = screen.getByText('旧约定').closest('.dshd-memory-entry')
+    const supersededRow = screen.getByText('Old convention').closest('.dshd-memory-entry')
     expect(supersededRow).toBeTruthy()
-    expect(supersededRow!.textContent).toContain('已取代')
+    expect(supersededRow!.textContent).toContain('Superseded')
     expect(supersededRow!.querySelector('button')).toBeNull()
   })
 
@@ -251,24 +251,24 @@ describe('Dashboard Project Memory tab (spec §10)', () => {
     }))
     renderMemoryDashboard({ onCreateMemory })
 
-    fireEvent.click(screen.getByRole('button', { name: '项目记忆' }))
-    await screen.findByText('该项目还没有项目记忆。')
-    fireEvent.click(screen.getByRole('button', { name: '添加记忆' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Project Memory' }))
+    await screen.findByText('This project has no project memory yet.')
+    fireEvent.click(screen.getByRole('button', { name: 'Add memory' }))
 
-    const dialog = await screen.findByRole('dialog', { name: '添加记忆' })
-    fireEvent.change(within(dialog).getByLabelText('记忆类型'), { target: { value: 'convention' } })
-    fireEvent.change(within(dialog).getByLabelText('记忆标题'), { target: { value: '提交信息使用中文' } })
-    fireEvent.change(within(dialog).getByLabelText('记忆内容'), { target: { value: '提交信息使用中文描述。' } })
-    fireEvent.change(within(dialog).getByLabelText('标签（逗号分隔）'), { target: { value: 'git, 提交' } })
-    fireEvent.click(within(dialog).getByRole('button', { name: '添加记忆' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Add memory' })
+    fireEvent.change(within(dialog).getByLabelText('Memory kind'), { target: { value: 'convention' } })
+    fireEvent.change(within(dialog).getByLabelText('Memory title'), { target: { value: 'Use Chinese in commit messages' } })
+    fireEvent.change(within(dialog).getByLabelText('Memory body'), { target: { value: 'Describe commits in Chinese.' } })
+    fireEvent.change(within(dialog).getByLabelText('Tags (comma separated)'), { target: { value: 'git, commit' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Add memory' }))
 
     await waitFor(() => expect(onCreateMemory).toHaveBeenCalledWith({
       projectId: FIRST_PROJECT,
       kind: 'convention',
-      title: '提交信息使用中文',
-      body: '提交信息使用中文描述。',
-      tags: ['git', '提交'],
+      title: 'Use Chinese in commit messages',
+      body: 'Describe commits in Chinese.',
+      tags: ['git', 'commit'],
     }))
-    expect(await screen.findByText('已取代既有记忆：mem-1')).toBeTruthy()
+    expect(await screen.findByText('Superseded existing memory: mem-1')).toBeTruthy()
   })
 })
